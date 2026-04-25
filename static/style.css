@@ -1929,6 +1929,8 @@ summary.comment_data {
     max-width: 300px;
     min-width: 250px;
     margin: 0 0 0 15px;
+    max-height: calc(100vh - 20px);
+    overflow-y: auto;
 }
 
 .oldreddit #subreddit,
