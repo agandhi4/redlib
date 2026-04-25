@@ -1876,6 +1876,14 @@ summary.comment_data {
     display: none;
 }
 
+/* Old Reddit comment images: constrained */
+.oldreddit .comment_body img {
+    max-width: 400px;
+    max-height: 300px;
+    width: auto;
+    height: auto;
+}
+
 .oldreddit .deeper_replies {
     margin-left: 10px;
     font-size: 12px;
