@@ -1677,7 +1677,7 @@ summary.comment_data {
         "post_score post_thumbnail post_title" auto
         "post_score post_thumbnail post_header" auto
         "post_score post_thumbnail post_footer" auto
-        / 36px auto minmax(0, 1fr);
+        / 36px 58px minmax(0, 1fr);
 }
 
 .oldreddit .post:first-of-type {
@@ -1745,6 +1745,10 @@ summary.comment_data {
 .oldreddit .post_thumbnail.no_thumbnail {
     width: 50px;
     height: 50px;
+}
+
+.oldreddit .post_thumbnail span {
+    display: none;
 }
 
 .oldreddit .post_footer {
