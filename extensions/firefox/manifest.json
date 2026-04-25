@@ -3,6 +3,12 @@
   "name": "Reddit to Redlib Redirect",
   "description": "Redirects reddit.com and www.reddit.com to your Redlib instance. Leaves old.reddit.com untouched.",
   "version": "1.1.0",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "reddit-redirect@silversky.io",
+      "strict_min_version": "57.0"
+    }
+  },
   "permissions": [
     "webRequest",
     "webRequestBlocking",
