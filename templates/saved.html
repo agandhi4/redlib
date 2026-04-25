@@ -13,10 +13,19 @@
 	{% else %}
 	{% for group in groups %}
 	<div class="saved_group">
-		<h2 class="saved_subreddit"><a href="/r/{{ group.subreddit }}">r/{{ group.subreddit }}</a></h2>
+		<h2 class="saved_subreddit">
+			{% if group.subreddit.is_empty() %}
+			Saved Comments
+			{% else %}
+			<a href="/r/{{ group.subreddit }}">r/{{ group.subreddit }}</a>
+			{% endif %}
+		</h2>
 		{% for item in group.items %}
 		<div class="saved_item">
 			<a class="saved_item_title" href="{{ item.url }}">{{ item.title }}</a>
+			<span class="saved_item_links">
+				<a href="https://old.reddit.com{{ item.url }}" rel="nofollow" title="View on old Reddit">reddit</a>
+			</span>
 			<span class="saved_item_meta">{{ item.saved_at }}</span>
 			<form class="saved_unsave" method="POST" action="/unsave">
 				<input type="hidden" name="post_id" value="{{ item.post_id }}">

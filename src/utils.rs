@@ -349,6 +349,8 @@ pub struct Post {
 	pub nsfw: bool,
 	pub out_url: Option<String>,
 	pub ws_url: String,
+	#[serde(skip)]
+	pub is_saved: bool,
 }
 
 impl Post {
@@ -457,6 +459,7 @@ impl Post {
 				nsfw: post["data"]["over_18"].as_bool().unwrap_or_default(),
 				ws_url: val(post, "websocket_url"),
 				out_url: post["data"]["url_overridden_by_dest"].as_str().map(|a| a.to_string()),
+				is_saved: false,
 			});
 		}
 		Ok((posts, res["data"]["after"].as_str().unwrap_or_default().to_string()))
@@ -885,6 +888,7 @@ pub async fn parse_post(post: &Value) -> Post {
 		nsfw: post["data"]["over_18"].as_bool().unwrap_or_default(),
 		ws_url: val(post, "websocket_url"),
 		out_url: post["data"]["url_overridden_by_dest"].as_str().map(|a| a.to_string()),
+		is_saved: false,
 	}
 }
 

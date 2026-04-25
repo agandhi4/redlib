@@ -27,7 +27,6 @@ struct PostTemplate {
 	url_without_query: String,
 	comment_query: String,
 	sub: Subreddit,
-	is_saved: bool,
 }
 
 #[derive(Template)]
@@ -101,10 +100,9 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 			let sub_data = crate::subreddit::subreddit(&sub, quarantined).await.unwrap_or_default();
 
 			// Record visit and check saved status
-			let post_id = post.id.clone();
-			db::record_visit(&post_id, &post.title, &post.community, &post.permalink);
+			db::record_visit(&post.id, &post.title, &post.community, &post.permalink);
 			db::cleanup_history();
-			let is_saved = db::is_saved(&post_id);
+			post.is_saved = db::is_saved(&post.id);
 
 			// Use the Post and Comment structs to generate a website to show users
 			Ok(template(&PostTemplate {
@@ -117,7 +115,6 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 				url: req_url,
 				comment_query: query,
 				sub: sub_data,
-				is_saved,
 			}))
 		}
 		// If the Reddit API returns an error, exit and send error page to user
