@@ -6,11 +6,16 @@ services:
     networks:
       - default
       - homeinfra_web
+    volumes:
+      - redlib_data:/data
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/settings"]
       interval: 1m
       timeout: 3s
       retries: 3
+
+volumes:
+  redlib_data:
 
 networks:
   homeinfra_web:

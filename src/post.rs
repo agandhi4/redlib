@@ -3,8 +3,10 @@ use crate::client::json;
 use crate::config::get_setting;
 use crate::server::RequestExt;
 use crate::subreddit::{can_access_quarantine, quarantine};
+use crate::db;
 use crate::utils::{
-	error, format_num, get_filters, nsfw_landing, param, parse_post, rewrite_emotes, setting, template, time, val, Author, Awards, Comment, Flair, FlairPart, Post, Preferences, Subreddit,
+	error, format_num, get_filters, nsfw_landing, param, parse_post, redirect, rewrite_emotes, setting, template, time, val, Author, Awards, Comment, Flair, FlairPart, Post,
+	Preferences, Subreddit,
 };
 use askama::Template;
 use hyper::{Body, Request, Response};
@@ -25,6 +27,14 @@ struct PostTemplate {
 	url_without_query: String,
 	comment_query: String,
 	sub: Subreddit,
+	is_saved: bool,
+}
+
+#[derive(Template)]
+#[template(path = "saved.html")]
+struct SavedTemplate {
+	groups: Vec<db::SavedGroup>,
+	prefs: Preferences,
 }
 
 static COMMENT_SEARCH_CAPTURE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\?q=(.*)&type=comment").unwrap());
@@ -89,6 +99,12 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 			// Fetch subreddit sidebar data
 			let sub_data = crate::subreddit::subreddit(&sub, quarantined).await.unwrap_or_default();
 
+			// Record visit and check saved status
+			let post_id = post.id.clone();
+			db::record_visit(&post_id, &post.title, &post.community, &post.permalink);
+			db::cleanup_history();
+			let is_saved = db::is_saved(&post_id);
+
 			// Use the Post and Comment structs to generate a website to show users
 			Ok(template(&PostTemplate {
 				comments,
@@ -100,6 +116,7 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 				url: req_url,
 				comment_query: query,
 				sub: sub_data,
+				is_saved,
 			}))
 		}
 		// If the Reddit API returns an error, exit and send error page to user
@@ -256,4 +273,48 @@ fn build_comment(
 		more_count,
 		prefs: Preferences::new(req),
 	}
+}
+
+// SAVED ITEMS
+
+/// Render the saved items page.
+pub async fn saved(req: Request<Body>) -> Result<Response<Body>, String> {
+	let groups = db::saved_items_grouped();
+	Ok(template(&SavedTemplate {
+		groups,
+		prefs: Preferences::new(&req),
+	}))
+}
+
+/// Save a post. Expects form-encoded post_id, title, subreddit, url, redirect.
+pub async fn save(req: Request<Body>) -> Result<Response<Body>, String> {
+	let body = hyper::body::to_bytes(req.into_body()).await.map_err(|e| e.to_string())?;
+	let form: HashMap<String, String> = url::form_urlencoded::parse(&body).into_owned().collect();
+
+	let post_id = form.get("post_id").cloned().unwrap_or_default();
+	let title = form.get("title").cloned().unwrap_or_default();
+	let subreddit = form.get("subreddit").cloned().unwrap_or_default();
+	let url = form.get("url").cloned().unwrap_or_default();
+	let redirect_url = form.get("redirect").cloned().unwrap_or_else(|| "/saved".to_string());
+
+	if !post_id.is_empty() {
+		db::save_item(&post_id, &title, &subreddit, &url);
+	}
+
+	Ok(redirect(&redirect_url))
+}
+
+/// Unsave a post. Expects form-encoded post_id, redirect.
+pub async fn unsave(req: Request<Body>) -> Result<Response<Body>, String> {
+	let body = hyper::body::to_bytes(req.into_body()).await.map_err(|e| e.to_string())?;
+	let form: HashMap<String, String> = url::form_urlencoded::parse(&body).into_owned().collect();
+
+	let post_id = form.get("post_id").cloned().unwrap_or_default();
+	let redirect_url = form.get("redirect").cloned().unwrap_or_else(|| "/saved".to_string());
+
+	if !post_id.is_empty() {
+		db::unsave_item(&post_id);
+	}
+
+	Ok(redirect(&redirect_url))
 }

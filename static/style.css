@@ -2020,6 +2020,107 @@ summary.comment_data {
     height: 1em;
 }
 
+/* Save button */
+
+.save_action {
+    margin: 5px 12px;
+}
+
+.save_btn {
+    background: var(--foreground);
+    color: var(--text);
+    border: 1px solid var(--highlighted);
+    border-radius: 3px;
+    padding: 4px 12px;
+    font-size: 12px;
+    font-weight: bold;
+    cursor: pointer;
+    opacity: 0.8;
+}
+
+.save_btn:hover {
+    background: var(--highlighted);
+    opacity: 1;
+}
+
+.save_btn.saved {
+    color: var(--accent);
+}
+
+/* Saved page */
+
+.saved_heading {
+    font-size: 18px;
+    margin: 15px 0 10px;
+}
+
+.saved_empty {
+    opacity: 0.6;
+    margin: 20px 0;
+    font-size: 14px;
+}
+
+.saved_group {
+    margin-bottom: 15px;
+    background: var(--post);
+    border-radius: 5px;
+    border: var(--panel-border);
+    overflow: hidden;
+}
+
+.saved_subreddit {
+    font-size: 14px;
+    padding: 8px 12px;
+    background: var(--foreground);
+    border-bottom: 1px solid var(--highlighted);
+}
+
+.saved_subreddit a {
+    color: var(--accent);
+}
+
+.saved_item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--highlighted);
+    font-size: 13px;
+}
+
+.saved_item:last-child {
+    border-bottom: none;
+}
+
+.saved_item_title {
+    flex: 1;
+    color: var(--text);
+}
+
+.saved_item_title:hover {
+    color: var(--accent);
+}
+
+.saved_item_meta {
+    opacity: 0.5;
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.saved_unsave button {
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-size: 11px;
+    cursor: pointer;
+    font-weight: bold;
+    opacity: 0.7;
+}
+
+.saved_unsave button:hover {
+    opacity: 1;
+}
+
 /* Settings */
 
 #settings {
