@@ -94,4 +94,29 @@
 		{%- endfor %}
 
 	</div>
+	{% if !sub.name.is_empty() && prefs.hide_sidebar_and_summary != "on" %}
+	<aside>
+		<details class="panel" id="subreddit" open>
+			<summary id="subreddit_label">Subreddit</summary>
+			<div id="sub_meta">
+				<img loading="lazy" id="sub_icon" src="{{ sub.icon }}" alt="Icon for r/{{ sub.name }}">
+				<h1 id="sub_title">{{ sub.title }}</h1>
+				<p id="sub_name">r/{{ sub.name }}</p>
+				<p id="sub_description">{{ sub.description }}</p>
+				<div id="sub_details">
+					<label>Members</label>
+					<label>Active</label>
+					<div title="{{ sub.members.1 }}">{{ sub.members.0 }}</div>
+					<div title="{{ sub.active.1 }}">{{ sub.active.0 }}</div>
+				</div>
+			</div>
+		</details>
+		<details class="panel" id="sidebar">
+			<summary id="sidebar_label">Sidebar</summary>
+			<div id="sidebar_contents">
+				{{ sub.info|safe }}
+			</div>
+		</details>
+	</aside>
+	{% endif %}
 {% endblock %}

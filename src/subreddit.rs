@@ -559,7 +559,7 @@ pub async fn sidebar(req: Request<Body>) -> Result<Response<Body>, String> {
 // }
 
 // SUBREDDIT
-async fn subreddit(sub: &str, quarantined: bool) -> Result<Subreddit, String> {
+pub async fn subreddit(sub: &str, quarantined: bool) -> Result<Subreddit, String> {
 	// Build the Reddit JSON API url
 	let path: String = format!("/r/{sub}/about.json?raw_json=1");
 

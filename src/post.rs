@@ -4,7 +4,7 @@ use crate::config::get_setting;
 use crate::server::RequestExt;
 use crate::subreddit::{can_access_quarantine, quarantine};
 use crate::utils::{
-	error, format_num, get_filters, nsfw_landing, param, parse_post, rewrite_emotes, setting, template, time, val, Author, Awards, Comment, Flair, FlairPart, Post, Preferences,
+	error, format_num, get_filters, nsfw_landing, param, parse_post, rewrite_emotes, setting, template, time, val, Author, Awards, Comment, Flair, FlairPart, Post, Preferences, Subreddit,
 };
 use askama::Template;
 use hyper::{Body, Request, Response};
@@ -24,6 +24,7 @@ struct PostTemplate {
 	url: String,
 	url_without_query: String,
 	comment_query: String,
+	sub: Subreddit,
 }
 
 static COMMENT_SEARCH_CAPTURE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\?q=(.*)&type=comment").unwrap());
@@ -85,6 +86,9 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 				_ => query_comments(&response[1], &post.permalink, &post.author.name, highlighted_comment, &get_filters(&req), &query, &req),
 			};
 
+			// Fetch subreddit sidebar data
+			let sub_data = crate::subreddit::subreddit(&sub, quarantined).await.unwrap_or_default();
+
 			// Use the Post and Comment structs to generate a website to show users
 			Ok(template(&PostTemplate {
 				comments,
@@ -95,6 +99,7 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 				single_thread,
 				url: req_url,
 				comment_query: query,
+				sub: sub_data,
 			}))
 		}
 		// If the Reddit API returns an error, exit and send error page to user
