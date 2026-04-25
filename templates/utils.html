@@ -206,7 +206,7 @@
 		{% if prefs.disable_visit_reddit_confirmation != "on" %}
 		href="#popup"
 		{% else %}
-		href="https://reddit.com{{ permalink }}"
+		href="https://old.reddit.com{{ permalink }}"
 		rel="nofollow"
 		{% endif %}
 	>reddit</a>
@@ -327,7 +327,7 @@
 	<div class="popup-inner">
 		<h1>You are about to leave Redlib</h1>
 		<p>Do you want to continue?</p>
-		<p id="reddit_url">https://www.reddit.com{{ url }}</p>
+		<p id="reddit_url">https://old.reddit.com{{ url }}</p>
 		<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 639.24 563">
 			<defs>
 				<style>.cls-1{fill:#000000;}.cls-2{fill:#f8aa00;}</style>
@@ -339,7 +339,7 @@
 			<path class="cls-1" d="M319.54,473.08c-46.34,2.64-53.75-72.47-.31-75.47,49.56,.78,49.1,76.24,.31,75.47Z"/>
 		</svg>
 		<a id="goback" href="#">No, go back!</a>
-		<a id="toreddit" href="https://www.reddit.com{{ url }}" rel="nofollow">Yes, take me to Reddit</a>
+		<a id="toreddit" href="https://old.reddit.com{{ url }}" rel="nofollow">Yes, take me to Reddit</a>
 	</div>
 </div>
 {%- endmacro %}
