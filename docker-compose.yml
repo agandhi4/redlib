@@ -1,0 +1,17 @@
+services:
+  redlib:
+    image: ghcr.io/agandhi4/redlib:latest
+    container_name: redlib
+    restart: unless-stopped
+    networks:
+      - default
+      - homeinfra_web
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/settings"]
+      interval: 1m
+      timeout: 3s
+      retries: 3
+
+networks:
+  homeinfra_web:
+    external: true
