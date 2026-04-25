@@ -1757,6 +1757,81 @@ summary.comment_data {
     margin-top: 20px;
 }
 
+/* Old Reddit comments — border-left nesting like old.reddit.com */
+
+.oldreddit .comment {
+    border-radius: 0;
+    padding: 0;
+    border-left: 2px solid var(--highlighted);
+    margin: 0;
+}
+
+.oldreddit .comment_left {
+    display: none;
+}
+
+.oldreddit .comment_right {
+    padding: 4px 0 4px 8px;
+}
+
+.oldreddit .comment_body {
+    padding: 1px 5px;
+    margin: 1px 0;
+    font-size: 13px;
+}
+
+.oldreddit .comment_body > p:not(:first-child) {
+    margin-top: 6px;
+}
+
+.oldreddit .comment_author {
+    font-size: 11px;
+    opacity: 0.7;
+}
+
+.oldreddit .comment_score_inline {
+    font-size: 10px;
+}
+
+.oldreddit .created {
+    font-size: 10px;
+}
+
+.oldreddit summary.comment_data {
+    font-size: 11px;
+    padding: 2px 0;
+}
+
+.oldreddit .replies > .comment {
+    margin-left: 8px;
+    padding: 0;
+    border-left: 2px solid var(--highlighted);
+}
+
+.oldreddit .replies .comment {
+    background: var(--post);
+}
+
+.oldreddit .replies .replies .comment {
+    background: var(--outside);
+}
+
+.oldreddit .replies .replies .replies .comment {
+    background: var(--post);
+}
+
+.oldreddit .replies .replies .replies .replies .comment {
+    background: var(--outside);
+}
+
+.oldreddit .replies .replies .replies .replies .replies .comment {
+    background: var(--post);
+}
+
+.oldreddit .deeper_replies {
+    margin-left: 10px;
+    font-size: 12px;
+}
 
 /* Settings */
 
