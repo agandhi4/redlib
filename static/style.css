@@ -1721,7 +1721,7 @@ summary.comment_data {
     display: none;
 }
 
-.oldreddit .post_media_content {
+.oldreddit #posts .post_media_content {
     display: none;
 }
 
@@ -1830,6 +1830,50 @@ summary.comment_data {
 
 .oldreddit .replies .replies .replies .replies .replies .comment {
     background: var(--post);
+}
+
+/* Old Reddit media: constrained images and thumbnail grid galleries */
+.oldreddit .post_media_content {
+    max-width: 600px;
+    margin: 10px 12px;
+}
+
+.oldreddit .post_media_image svg,
+.oldreddit .post_media_image img {
+    max-height: 500px;
+    width: auto;
+    max-width: 100%;
+}
+
+.oldreddit .post_media_video {
+    max-height: 500px;
+    max-width: 100%;
+}
+
+.oldreddit .gallery {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    max-width: 800px;
+    margin: 10px 12px;
+}
+
+.oldreddit .gallery figure {
+    width: 120px;
+    height: 120px;
+    margin: 0;
+    overflow: hidden;
+}
+
+.oldreddit .gallery figure img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    cursor: pointer;
+}
+
+.oldreddit .gallery figcaption {
+    display: none;
 }
 
 .oldreddit .deeper_replies {
