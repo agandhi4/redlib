@@ -1911,14 +1911,58 @@ summary.comment_data {
     font-size: 12px;
 }
 
-/* Old Reddit: constrain content width */
-.oldreddit .thread,
-.oldreddit .comment {
-    max-width: 800px;
+/* Old Reddit: wider layout for sidebar */
+.oldreddit main {
+    max-width: 1300px;
 }
 
-.oldreddit .post.highlighted {
-    max-width: 900px;
+.oldreddit #column_one {
+    max-width: unset;
+    flex: 1;
+    min-width: 0;
+}
+
+.oldreddit aside {
+    position: sticky;
+    top: 10px;
+    align-self: flex-start;
+    max-width: 300px;
+    min-width: 250px;
+    margin: 0 0 0 15px;
+}
+
+.oldreddit #subreddit,
+.oldreddit #sidebar {
+    margin: 0 0 10px 0;
+    border: none;
+    background: var(--post);
+    border-radius: 3px;
+    min-width: unset;
+}
+
+.oldreddit #subreddit *,
+.oldreddit #sidebar * {
+    font-size: 12px;
+}
+
+.oldreddit #sub_meta {
+    padding: 10px;
+}
+
+.oldreddit #sidebar_contents {
+    padding: 10px;
+    font-size: 11px;
+}
+
+.oldreddit #sidebar_label,
+.oldreddit #subreddit_label {
+    font-size: 11px;
+    padding: 6px 10px;
+    background: var(--foreground);
+}
+
+.oldreddit .panel {
+    border: 1px solid var(--highlighted);
 }
 
 /* Old Reddit: smaller flair in comments */
