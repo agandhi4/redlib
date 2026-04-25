@@ -36,6 +36,12 @@
 		{% else %}
 		<div class="comment_body {% if highlighted %}highlighted{% endif %}">{{ body|safe }}</div>
 		{% endif %}
+		<div class="comment_footer">
+			<a href="{{ post_link }}{{ id }}/?context=3#{{ id }}">permalink</a>
+			{% if parent_kind == "t1" %}
+			<a href="{{ post_link }}{{ parent_id }}/?context=3#{{ parent_id }}">parent</a>
+			{% endif %}
+		</div>
 		<blockquote class="replies">{% for c in replies -%}{{ c.render().unwrap()|safe }}{%- endfor %}
 		</blockquote>
 	</details>

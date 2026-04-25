@@ -1876,6 +1876,28 @@ summary.comment_data {
     display: none;
 }
 
+/* Comment footer: hidden by default, shown in oldreddit */
+.comment_footer {
+    display: none;
+}
+
+.oldreddit .comment_footer {
+    display: flex;
+    gap: 8px;
+    font-size: 10px;
+    padding: 2px 5px 4px;
+    opacity: 0.5;
+}
+
+.oldreddit .comment_footer a {
+    color: var(--text);
+    font-weight: bold;
+}
+
+.oldreddit .comment_footer a:hover {
+    text-decoration: underline;
+}
+
 /* Old Reddit comment images: constrained */
 .oldreddit .comment_body img {
     max-width: 400px;
