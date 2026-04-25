@@ -1911,6 +1911,30 @@ summary.comment_data {
     font-size: 12px;
 }
 
+/* Old Reddit: constrain content width */
+.oldreddit .thread,
+.oldreddit .comment {
+    max-width: 800px;
+}
+
+.oldreddit .post.highlighted {
+    max-width: 900px;
+}
+
+/* Old Reddit: smaller flair in comments */
+.oldreddit .author_flair {
+    font-size: 10px;
+    padding: 2px 4px;
+    border-radius: 3px;
+    vertical-align: middle;
+}
+
+.oldreddit .author_flair .emoji,
+.oldreddit .comment_data .emoji {
+    width: 1em;
+    height: 1em;
+}
+
 /* Settings */
 
 #settings {
