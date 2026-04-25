@@ -35,6 +35,7 @@ struct PostTemplate {
 struct SavedTemplate {
 	groups: Vec<db::SavedGroup>,
 	prefs: Preferences,
+	url: String,
 }
 
 static COMMENT_SEARCH_CAPTURE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\?q=(.*)&type=comment").unwrap());
@@ -283,6 +284,7 @@ pub async fn saved(req: Request<Body>) -> Result<Response<Body>, String> {
 	Ok(template(&SavedTemplate {
 		groups,
 		prefs: Preferences::new(&req),
+		url: "/saved".to_string(),
 	}))
 }
 
