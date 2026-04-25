@@ -1,14 +1,22 @@
 {
   "manifest_version": 2,
   "name": "Reddit to Redlib Redirect",
-  "description": "Redirects reddit.com and www.reddit.com to reddit.box. Leaves old.reddit.com untouched.",
-  "version": "1.0.0",
+  "description": "Redirects reddit.com and www.reddit.com to your Redlib instance. Leaves old.reddit.com untouched.",
+  "version": "1.1.0",
   "permissions": [
     "webRequest",
     "webRequestBlocking",
+    "storage",
     "*://*.reddit.com/*"
   ],
   "background": {
     "scripts": ["background.js"]
+  },
+  "browser_action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "32": "icon.svg"
+    },
+    "default_title": "Redlib Redirect"
   }
 }
