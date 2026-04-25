@@ -1,0 +1,14 @@
+{
+  "manifest_version": 2,
+  "name": "Reddit to Redlib Redirect",
+  "description": "Redirects reddit.com and www.reddit.com to reddit.box. Leaves old.reddit.com untouched.",
+  "version": "1.0.0",
+  "permissions": [
+    "webRequest",
+    "webRequestBlocking",
+    "*://*.reddit.com/*"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  }
+}
