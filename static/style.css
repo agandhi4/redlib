@@ -2025,31 +2025,33 @@ summary.comment_data {
     height: 1em;
 }
 
-/* Save button */
+/* Save button (inline in post links and comment footer) */
 
-.save_action {
-    margin: 5px 12px;
+.save_inline {
+    display: inline;
 }
 
-.save_btn {
-    background: var(--foreground);
+.save_inline form,
+.save_inline_comment {
+    display: inline;
+}
+
+.save_inline button,
+.save_inline_comment button {
+    background: none;
+    border: none;
     color: var(--text);
-    border: 1px solid var(--highlighted);
-    border-radius: 3px;
-    padding: 4px 12px;
-    font-size: 12px;
+    font-size: inherit;
     font-weight: bold;
     cursor: pointer;
+    padding: 0;
     opacity: 0.8;
 }
 
-.save_btn:hover {
-    background: var(--highlighted);
-    opacity: 1;
-}
-
-.save_btn.saved {
+.save_inline button:hover,
+.save_inline_comment button:hover {
     color: var(--accent);
+    opacity: 1;
 }
 
 /* Saved page */
@@ -2104,6 +2106,21 @@ summary.comment_data {
 
 .saved_item_title:hover {
     color: var(--accent);
+}
+
+.saved_item_links {
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.saved_item_links a {
+    color: var(--accent);
+    font-weight: bold;
+    opacity: 0.7;
+}
+
+.saved_item_links a:hover {
+    opacity: 1;
 }
 
 .saved_item_meta {

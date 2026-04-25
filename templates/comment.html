@@ -37,6 +37,14 @@
 		<div class="comment_body {% if highlighted %}highlighted{% endif %}">{{ body|safe }}</div>
 		{% endif %}
 		<div class="comment_footer">
+			<form class="save_inline_comment" method="POST" action="/save">
+				<input type="hidden" name="post_id" value="{{ id }}">
+				<input type="hidden" name="title" value="Comment by u/{{ author.name }}">
+				<input type="hidden" name="subreddit" value="">
+				<input type="hidden" name="url" value="{{ post_link }}{{ id }}/?context=3#{{ id }}">
+				<input type="hidden" name="redirect" value="{{ post_link }}">
+				<button type="submit">save</button>
+			</form>
 			<a href="{{ post_link }}{{ id }}/?context=3#{{ id }}">permalink</a>
 			{% if parent_kind == "t1" %}
 			<a href="{{ post_link }}{{ parent_id }}/?context=3#{{ parent_id }}">parent</a>
