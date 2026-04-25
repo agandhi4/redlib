@@ -228,6 +228,11 @@ figcaption {
     text-align: center;
 }
 
+#saved_link {
+    opacity: 0.8;
+    margin-left: 10px;
+}
+
 #settings_link {
     opacity: 0.8;
     margin-left: 10px;
