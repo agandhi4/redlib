@@ -23,6 +23,7 @@ clap = { version = "4.4.11", default-features = false, features = [
     "env",
     "derive",
 ] }
+rusqlite = { version = "0.31", features = ["bundled"] }
 regex = "1.10.2"
 serde = { version = "1.0.193", features = ["derive"] }
 cookie = "0.18.0"

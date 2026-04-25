@@ -12,7 +12,7 @@ use log::{info, warn};
 use redlib::client::{canonical_path, proxy, rate_limit_check, CLIENT};
 use redlib::server::{self, RequestExt};
 use redlib::utils::{error, redirect, ThemeAssets};
-use redlib::{config, duplicates, headers, instance_info, post, search, settings, subreddit, user};
+use redlib::{config, db, duplicates, headers, instance_info, post, search, settings, subreddit, user};
 
 use redlib::client::OAUTH_CLIENT;
 
@@ -203,6 +203,8 @@ async fn main() {
 	LazyLock::force(&instance_info::INSTANCE_INFO);
 	info!("Creating OAUTH client.");
 	LazyLock::force(&OAUTH_CLIENT);
+	info!("Initializing SQLite database.");
+	db::init();
 
 	// Define default headers (added to all responses)
 	app.default_headers = headers! {
@@ -291,6 +293,11 @@ async fn main() {
 	app.at("/user/:name/comments/:id").get(|r| post::item(r).boxed());
 	app.at("/user/:name/comments/:id/:title").get(|r| post::item(r).boxed());
 	app.at("/user/:name/comments/:id/:title/:comment_id").get(|r| post::item(r).boxed());
+
+	// Saved items
+	app.at("/saved").get(|r| post::saved(r).boxed());
+	app.at("/save").post(|r| post::save(r).boxed());
+	app.at("/unsave").post(|r| post::unsave(r).boxed());
 
 	// Configure settings
 	app.at("/settings").get(|r| settings::get(r).boxed()).post(|r| settings::set(r).boxed());
