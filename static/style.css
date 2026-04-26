@@ -2478,14 +2478,13 @@ th {
         max-width: unset;
     }
 
-    aside,
+    aside {
+        display: none;
+    }
     #subreddit,
     #user {
         margin: 0;
         max-width: 100%;
-    }
-    .oldreddit aside {
-        display: none;
     }
     #user { margin: 0 0 20px; }
     
@@ -2596,7 +2595,27 @@ th {
     }
 
     .comment_data::marker {
-        font-size: 25px;
+        font-size: 14px;
+    }
+
+    /* Constrain images on mobile */
+    .post_media_image svg,
+    .post_media_image img {
+        max-height: 300px;
+        width: auto;
+        max-width: 100%;
+    }
+
+    .comment_body img {
+        max-width: 200px;
+        max-height: 200px;
+        width: auto;
+        height: auto;
+    }
+
+    .gallery figure {
+        width: 80px;
+        height: 80px;
     }
     .user-comment .comment_data > .comment_link {
         order: 2;
