@@ -2484,6 +2484,9 @@ th {
         margin: 0;
         max-width: 100%;
     }
+    .oldreddit aside {
+        display: none;
+    }
     #user { margin: 0 0 20px; }
     
     body.fixed_navbar {

@@ -211,7 +211,7 @@ async fn main() {
 		"Referrer-Policy" => "no-referrer",
 		"X-Content-Type-Options" => "nosniff",
 		"X-Frame-Options" => "DENY",
-		"Content-Security-Policy" => "default-src 'none'; font-src 'self'; script-src 'self' blob:; manifest-src 'self'; media-src 'self' data: blob: about:; style-src 'self' 'unsafe-inline'; base-uri 'none'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; connect-src 'self'; worker-src blob:;"
+		"Content-Security-Policy" => "default-src 'none'; font-src 'self'; script-src 'self' blob:; manifest-src 'self'; media-src 'self' data: blob: about:; style-src 'self' 'unsafe-inline'; base-uri 'none'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; connect-src 'self'; worker-src 'self' blob:;"
 	};
 
 	if let Some(expire_time) = hsts {
@@ -246,6 +246,12 @@ async fn main() {
 	app.at("/touch-icon-iphone.png").get(|_| iphone_logo().boxed());
 	app.at("/apple-touch-icon.png").get(|_| iphone_logo().boxed());
 	app.at("/opensearch.xml").get(|_| opensearch().boxed());
+	app
+		.at("/sw.js")
+		.get(|_| resource(include_str!("../static/sw.js"), "application/javascript", false).boxed());
+	app
+		.at("/register-sw.js")
+		.get(|_| resource(include_str!("../static/register-sw.js"), "application/javascript", false).boxed());
 	app
 		.at("/playHLSVideo.js")
 		.get(|_| resource(include_str!("../static/playHLSVideo.js"), "text/javascript", false).boxed());
