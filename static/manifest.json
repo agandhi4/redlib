@@ -1,24 +1,35 @@
 {
 	"name": "Redlib",
 	"short_name": "Redlib",
-	"display": "standalone",
-	"background_color": "#1f1f1f",
 	"description": "An alternative private front-end to Reddit",
-	"theme_color": "#1f1f1f",
+	"display": "standalone",
 	"start_url": "/",
+	"scope": "/",
+	"id": "/",
+	"theme_color": "#1f1f1f",
+	"background_color": "#0f0f0f",
 	"icons": [
 		{
 			"src": "logo.png",
 			"sizes": "512x512",
-			"type": "image/png"
+			"type": "image/png",
+			"purpose": "any"
+		},
+		{
+			"src": "logo.png",
+			"sizes": "512x512",
+			"type": "image/png",
+			"purpose": "maskable"
 		},
 		{
 			"src": "apple-touch-icon.png",
-			"sizes": "180x180"
+			"sizes": "180x180",
+			"type": "image/png"
 		},
 		{
 			"src": "favicon.ico",
-			"sizes": "32x32"
+			"sizes": "32x32",
+			"type": "image/x-icon"
 		}
 	]
 }
