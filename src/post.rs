@@ -72,7 +72,7 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 		// Otherwise, grab the JSON output from the request
 		Ok(response) => {
 			// Parse the JSON into Post and Comment structs
-			let post = parse_post(&response[0]["data"]["children"][0]).await;
+			let mut post = parse_post(&response[0]["data"]["children"][0]).await;
 
 			let req_url = req.uri().to_string();
 			// Return landing page if this post if this Reddit deems this post
