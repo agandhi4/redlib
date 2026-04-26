@@ -1502,6 +1502,7 @@ a.search_subreddit:hover {
     padding: 2px 5px;
     margin: 2px 0;
     overflow: auto;
+    cursor: pointer;
 }
 
 .comment_body.highlighted,
