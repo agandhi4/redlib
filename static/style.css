@@ -1716,10 +1716,18 @@ summary.comment_data {
 
 /* Old Reddit: title is the primary visual element */
 .oldreddit .post_title {
-    font-size: 13px;
+    font-size: 15px;
     font-weight: 500;
     line-height: 1.3;
     margin: 4px 10px 0 8px;
+}
+
+.self_placeholder {
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.3;
 }
 
 /* Hide body preview, media, polls, notifications in listing */
