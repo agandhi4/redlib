@@ -210,6 +210,7 @@ nav #logo {
 nav #links {
     margin-left: 10px;
     display: flex;
+    gap: 12px;
     flex-grow: 1;
     flex-basis: 0;
     justify-content: flex-end;
@@ -230,12 +231,10 @@ figcaption {
 
 #saved_link {
     opacity: 0.8;
-    margin-left: 10px;
 }
 
 #settings_link {
     opacity: 0.8;
-    margin-left: 10px;
 }
 
 .popup {
@@ -1671,11 +1670,27 @@ summary.comment_data {
 
 /* Old Reddit layout — dense list like old.reddit.com */
 
+/* Two-column post grid on wide desktop */
+@media screen and (min-width: 1200px) {
+    .oldreddit #posts {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0 12px;
+    }
+    .oldreddit #posts .sep {
+        display: none;
+    }
+    .oldreddit #posts .post:first-of-type,
+    .oldreddit #posts .post:nth-of-type(2) {
+        border-radius: 5px 5px 0 0;
+    }
+}
+
 /* Inherit compact base: no margins, no rounded corners between posts */
 .oldreddit .post:not(.highlighted) {
     border-radius: 0;
     margin: 0;
-    padding: 0;
+    padding: 2px 0;
     box-shadow: none;
     background: var(--post);
     border-bottom: 1px solid var(--highlighted);
