@@ -1764,10 +1764,6 @@ summary.comment_data {
     display: none;
 }
 
-.oldreddit #posts .post_media_content {
-    display: none;
-}
-
 .oldreddit .post_poll {
     display: none;
 }
@@ -2607,10 +2603,10 @@ th {
     }
 
     .oldreddit .post_thumbnail {
-        width: 70px;
-        height: 70px;
-        min-width: 70px;
-        border-radius: 8px;
+        width: 80px;
+        height: 80px;
+        min-width: 80px;
+        border-radius: 10px;
         margin: 0;
         align-self: start;
     }
@@ -2624,20 +2620,11 @@ th {
         display: none;
     }
 
-    .oldreddit #posts .post_media_content {
-        display: block;
-        max-width: 100%;
-        margin: 6px 0;
-        border-radius: 8px;
-        overflow: hidden;
-    }
-
-    .oldreddit #posts .post_media_image svg,
-    .oldreddit #posts .post_media_image img {
-        max-height: 300px;
+    .oldreddit .post_thumbnail img,
+    .oldreddit .post_thumbnail svg {
         width: 100%;
+        height: 100%;
         object-fit: cover;
-        border-radius: 8px;
     }
 
     .oldreddit .post_score {

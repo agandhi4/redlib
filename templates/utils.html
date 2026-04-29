@@ -269,7 +269,7 @@
 		<a href="{{ post.permalink }}">{{ post.title }}</a>{% if post.flags.nsfw %} <small class="nsfw">NSFW</small>{% endif %}{% if post.flags.spoiler %} <small class="spoiler">Spoiler</small>{% endif %}
 	</h2>
 	<!-- POST MEDIA/THUMBNAIL -->
-	{% if (prefs.layout.is_empty() || prefs.layout == "card" || prefs.layout == "oldreddit") && post.post_type == "image" %}
+	{% if (prefs.layout.is_empty() || prefs.layout == "card") && post.post_type == "image" %}
 	<div class="post_media_content">
 		<a href="{{ post.media.url }}" class="post_media_image {% if post.media.height < post.media.width*2 %}short{% endif %}" >
 			{% if post.media.height == 0 || post.media.width == 0 %}
@@ -288,7 +288,7 @@
 			{% endif %}
 		</a>
 	</div>
-	{% else if (prefs.layout.is_empty() || prefs.layout == "card" || prefs.layout == "oldreddit") && (post.post_type == "gif" || post.post_type == "video") %}
+	{% else if (prefs.layout.is_empty() || prefs.layout == "card") && (post.post_type == "gif" || post.post_type == "video") %}
 	{% if prefs.use_hls == "on" && !post.media.alt_url.is_empty() %}
 	<div class="post_media_content">
         <video class="post_media_video short{% if prefs.autoplay_videos == "on" %} hls_autoplay{% endif %}" {% if post.media.width > 0 && post.media.height > 0 %}width="{{ post.media.width }}" height="{{ post.media.height }}"{% endif %} poster="{{ post.media.poster }}" controls preload="none">
