@@ -1745,6 +1745,20 @@ summary.comment_data {
     opacity: 0.3;
 }
 
+/* Sub icon and footer icons: hidden on desktop, shown on mobile */
+.sub_icon_placeholder {
+    display: none;
+}
+
+.post_footer_icon,
+.score_icon {
+    display: none;
+}
+
+.post_share {
+    display: none;
+}
+
 /* Hide body preview, media, polls, notifications in listing */
 .oldreddit .post_preview {
     display: none;
@@ -2533,6 +2547,170 @@ th {
     #searchbox {
         width: calc(100vw - 20px);
         margin-bottom: 10px;
+    }
+
+    /* ── Old Reddit mobile card layout ──────────────────────────── */
+
+    .oldreddit #posts {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 0 8px;
+    }
+
+    .oldreddit .post:not(.highlighted) {
+        border-radius: 10px;
+        border-bottom: none;
+        margin: 0;
+        padding: 12px;
+        box-shadow: none;
+        background: var(--post);
+        grid-template:
+            "post_header post_header" auto
+            "post_title post_thumbnail" auto
+            "post_body post_thumbnail" auto
+            "post_media post_media" auto
+            "post_score post_footer" auto
+            / 1fr auto;
+    }
+
+    .oldreddit .post:first-of-type,
+    .oldreddit .post:last-of-type {
+        border-radius: 10px;
+    }
+
+    .oldreddit .post_header {
+        margin: 0 0 6px 0;
+        font-size: 12px;
+        opacity: 0.7;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+    }
+
+    .oldreddit .post_title {
+        font-size: 15px;
+        font-weight: 600;
+        line-height: 1.4;
+        margin: 0 8px 4px 0;
+    }
+
+    .oldreddit .post_preview {
+        display: block;
+        font-size: 13px;
+        opacity: 0.7;
+        max-height: 60px;
+        overflow: hidden;
+        margin: 0 8px 4px 0;
+        -webkit-mask-image: linear-gradient(180deg, #000 50%, transparent);
+        mask-image: linear-gradient(180deg, #000 50%, transparent);
+    }
+
+    .oldreddit .post_thumbnail {
+        width: 70px;
+        height: 70px;
+        min-width: 70px;
+        border-radius: 8px;
+        margin: 0;
+        align-self: start;
+    }
+
+    .oldreddit .post_thumbnail.no_thumbnail,
+    .oldreddit .self_placeholder {
+        display: none;
+    }
+
+    .oldreddit .post_thumbnail span {
+        display: none;
+    }
+
+    .oldreddit #posts .post_media_content {
+        display: block;
+        max-width: 100%;
+        margin: 6px 0;
+        border-radius: 8px;
+        overflow: hidden;
+    }
+
+    .oldreddit #posts .post_media_image svg,
+    .oldreddit #posts .post_media_image img {
+        max-height: 300px;
+        width: 100%;
+        object-fit: cover;
+        border-radius: 8px;
+    }
+
+    .oldreddit .post_score {
+        padding: 0;
+        font-size: 12px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        min-width: auto;
+        border-radius: 0;
+        opacity: 0.7;
+    }
+
+    .oldreddit .post_score .label {
+        display: none;
+    }
+
+    .oldreddit .post_footer {
+        margin: 0;
+        font-size: 12px;
+        opacity: 0.7;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 16px;
+    }
+
+    .oldreddit .post_comments {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+    }
+
+    .oldreddit .post_share {
+        display: flex;
+        align-items: center;
+    }
+
+    .oldreddit .post_footer_icon,
+    .oldreddit .score_icon {
+        width: 16px;
+        height: 16px;
+        vertical-align: middle;
+        opacity: 0.8;
+    }
+
+    .oldreddit .sub_icon_placeholder {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        background: var(--accent);
+        color: var(--background);
+        font-size: 9px;
+        font-weight: 700;
+        flex-shrink: 0;
+    }
+
+    /* Comments: slightly larger on mobile for readability */
+    .oldreddit .comment_body {
+        font-size: 14px;
+        padding: 4px 5px;
+    }
+
+    .oldreddit .comment_right {
+        padding: 8px 0 8px 8px;
+    }
+
+    .oldreddit summary.comment_data {
+        font-size: 12px;
     }
 }
 
