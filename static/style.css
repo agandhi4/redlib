@@ -2726,7 +2726,7 @@ th {
         display: none;
     }
 
-    .post {
+    :not(.oldreddit) .post {
         grid-template:
             "post_header post_header post_thumbnail" auto
             "post_title  post_title  post_thumbnail" 1fr
@@ -2738,7 +2738,7 @@ th {
             / auto 1fr fit-content(min(20%, 152px));
     }
 
-    .post_score {
+    :not(.oldreddit) .post_score {
         margin: 5px 0px 20px 15px;
         padding: 0;
     }
@@ -2751,23 +2751,23 @@ th {
         padding: 0;
     }
 
-    .post_score::before {
+    :not(.oldreddit) .post_score::before {
         content: "↑";
     }
 
-    .post_header {
+    :not(.oldreddit) .post_header {
         font-size: 14px;
     }
-    .post_footer {
+    :not(.oldreddit) .post_footer {
         margin-left: 15px;
     }
 
-    .replies > .comment {
+    :not(.oldreddit) .replies > .comment {
         margin-left: -12px;
         padding: 5px 0;
     }
 
-    .comment_left {
+    :not(.oldreddit) .comment_left {
         min-width: 16px;
         max-width: 16px;
         padding: 5px 0px;
@@ -2775,18 +2775,18 @@ th {
         margin-top: -5px;
     }
 
-    .line {
+    :not(.oldreddit) .line {
         margin-left: 5px;
     }
 
     /* .thread { margin-left: -5px; } */
-    .comment_right {
+    :not(.oldreddit) .comment_right {
         padding: 5px 0 10px 2px;
     }
-    .comment_author {
+    :not(.oldreddit) .comment_author {
         margin-left: 12px;
     }
-    .comment_data {
+    :not(.oldreddit) .comment_data {
         margin-left: 12px;
     }
 
