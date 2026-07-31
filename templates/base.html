@@ -25,7 +25,10 @@
 		<link rel="search" type="application/opensearchdescription+xml" title="Search Redlib" href="/opensearch.xml">
 		<!-- PWA Manifest -->
 		<link rel="manifest" type="application/json" href="/manifest.json">
-		<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico"> 
+		<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico">
+		<!-- Fonts are referenced from CSS and would otherwise start loading a round trip late -->
+		<link rel="preload" href="/PlexSans.var.woff2" as="font" type="font/woff2" crossorigin>
+		<link rel="preload" href="/PlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
 		<link rel="stylesheet" type="text/css" href="/style.css?v={{ env!("CARGO_PKG_VERSION") }}">
 		<!-- Video quality -->
 		<div id="video_quality" data-value="{{ prefs.video_quality }}"></div>
@@ -89,5 +92,6 @@
 			</footer>
 		{% endblock %}
 		<script src="/register-sw.js"></script>
+		<script src="/prefetch.js?v={{ env!("CARGO_PKG_VERSION") }}" defer></script>
 	</body>
 </html>

@@ -724,9 +724,13 @@ fn compress_body(compressor: CompressionType, body_bytes: Vec<u8>) -> Result<Vec
 		}
 
 		CompressionType::Brotli => {
-			// We may want to make the compression parameters configurable
-			// in the future. For now, the defaults are sufficient.
-			let brotli_params = BrotliEncoderParams::default();
+			// Default quality (9+) burns tens of ms of NAS CPU per response
+			// for ~1% better ratio than q5 on HTML-sized payloads. Latency
+			// matters more than the last few compressed bytes here.
+			let brotli_params = BrotliEncoderParams {
+				quality: 5,
+				..BrotliEncoderParams::default()
+			};
 
 			let mut compressed = Vec::<u8>::new();
 			match BrotliCompress(&mut reader, &mut compressed, &brotli_params) {
