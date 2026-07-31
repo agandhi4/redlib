@@ -62,6 +62,18 @@ async fn font() -> Result<Response<Body>, String> {
 	)
 }
 
+// Fonts are compiled into the binary like all static assets; each needs its own route.
+fn serve_font(bytes: &'static [u8]) -> Result<Response<Body>, String> {
+	Ok(
+		Response::builder()
+			.status(200)
+			.header("content-type", "font/woff2")
+			.header("Cache-Control", "public, max-age=1209600, s-maxage=86400")
+			.body(bytes.into())
+			.unwrap_or_default(),
+	)
+}
+
 async fn opensearch() -> Result<Response<Body>, String> {
 	Ok(
 		Response::builder()
@@ -243,6 +255,9 @@ async fn main() {
 	app.at("/favicon.ico").get(|_| favicon().boxed());
 	app.at("/logo.png").get(|_| pwa_logo().boxed());
 	app.at("/Inter.var.woff2").get(|_| font().boxed());
+	app.at("/PlexSans.var.woff2").get(|_| async { serve_font(include_bytes!("../static/PlexSans.var.woff2")) }.boxed());
+	app.at("/PlexMono-Regular.woff2").get(|_| async { serve_font(include_bytes!("../static/PlexMono-Regular.woff2")) }.boxed());
+	app.at("/PlexMono-SemiBold.woff2").get(|_| async { serve_font(include_bytes!("../static/PlexMono-SemiBold.woff2")) }.boxed());
 	app.at("/touch-icon-iphone.png").get(|_| iphone_logo().boxed());
 	app.at("/apple-touch-icon.png").get(|_| iphone_logo().boxed());
 	app.at("/opensearch.xml").get(|_| opensearch().boxed());
