@@ -9,10 +9,11 @@ use crate::utils::{
 	Preferences, Subreddit,
 };
 use askama::Template;
+use cached::{Cached, TimedSizedCache};
 use hyper::{Body, Request, Response};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 // STRUCTS
 #[derive(Template)]
@@ -39,7 +40,32 @@ struct SavedTemplate {
 
 static COMMENT_SEARCH_CAPTURE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\?q=(.*)&type=comment").unwrap());
 
+// Rendered-HTML cache for post pages. The JSON cache (client.rs) already
+// avoids re-fetching from Reddit, but parsing + rendering hundreds of
+// comments costs ~250ms of NAS CPU per request — and the hover-prefetch
+// flow renders every page twice (prefetch, then the real click). Keyed on
+// URI + cookies because prefs shape the HTML. 20 entries × ~400KB ≈ 8MB.
+static RENDERED_POST_CACHE: LazyLock<Mutex<TimedSizedCache<String, String>>> =
+	LazyLock::new(|| Mutex::new(TimedSizedCache::with_size_and_lifespan(20, std::time::Duration::from_secs(30))));
+
+fn html_response(html: String) -> Response<Body> {
+	Response::builder()
+		.status(200)
+		.header("content-type", "text/html")
+		.body(html.into())
+		.unwrap_or_default()
+}
+
 pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
+	// Serve a recently rendered copy if one exists (see RENDERED_POST_CACHE)
+	let cache_key = format!(
+		"{}|{}",
+		req.uri(),
+		req.headers().get("cookie").and_then(|c| c.to_str().ok()).unwrap_or_default()
+	);
+	if let Some(html) = RENDERED_POST_CACHE.lock().unwrap().cache_get(&cache_key).cloned() {
+		return Ok(html_response(html));
+	}
 	// Build Reddit API path
 	let mut path: String = format!("{}.json?{}&raw_json=1", req.uri().path(), req.uri().query().unwrap_or_default());
 	let sub = req.param("sub").unwrap_or_default();
@@ -105,7 +131,7 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 			post.is_saved = db::is_saved(&post.id);
 
 			// Use the Post and Comment structs to generate a website to show users
-			Ok(template(&PostTemplate {
+			let html = PostTemplate {
 				comments,
 				post,
 				url_without_query: url.clone().trim_end_matches(&format!("?q={query}&type=comment")).to_string(),
@@ -115,7 +141,11 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 				url: req_url,
 				comment_query: query,
 				sub: sub_data,
-			}))
+			}
+			.render()
+			.unwrap_or_default();
+			RENDERED_POST_CACHE.lock().unwrap().cache_set(cache_key, html.clone());
+			Ok(html_response(html))
 		}
 		// If the Reddit API returns an error, exit and send error page to user
 		Err(msg) => {
