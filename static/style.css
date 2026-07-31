@@ -1643,6 +1643,19 @@ summary.comment_data {
     text-rendering: optimizeLegibility;
 }
 
+/* Form/table elements set their own family (Inter) in the base rules;
+   inherit Plex instead so no page mixes typefaces */
+.oldreddit fieldset,
+.oldreddit table,
+.oldreddit th,
+.oldreddit td,
+.oldreddit select,
+.oldreddit input,
+.oldreddit textarea,
+.oldreddit button {
+    font-family: inherit;
+}
+
 /* Single column beats the old two-column masonry: uneven card heights
    broke vertical scan order, which is the whole point of a dense list. */
 .oldreddit .post:not(.highlighted) {
