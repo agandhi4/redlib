@@ -39,12 +39,6 @@
 					</select>
 				</div>
 				<div class="prefs-group">
-					<label for="layout">Layout:</label>
-					<select name="layout" id="layout">
-						{% call utils::options(prefs.layout, ["card", "clean", "compact", "oldreddit"], "card") %}
-					</select>
-				</div>
-				<div class="prefs-group">
 					<label for="wide">Wide UI:</label>
 					<input type="hidden" value="off" name="wide">
 					<input type="checkbox" name="wide" id="wide" {% if prefs.wide=="on" %}checked{% endif %}>

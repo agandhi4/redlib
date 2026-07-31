@@ -709,7 +709,8 @@ impl Preferences {
 			available_themes: themes,
 			theme: setting(req, "theme"),
 			front_page: setting(req, "front_page"),
-			layout: setting(req, "layout"),
+			// oldreddit is the only maintained layout; cookie/env can still override
+			layout: setting_or_default(req, "layout", "oldreddit".to_string()),
 			wide: setting(req, "wide"),
 			blur_spoiler: setting(req, "blur_spoiler"),
 			show_nsfw: setting(req, "show_nsfw"),
