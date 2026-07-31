@@ -1630,69 +1630,6 @@ summary.comment_data {
     color: var(--admin);
 }
 
-/* Layouts */
-
-.compact .post:not(.highlighted) {
-    border-radius: 0;
-    margin: 0;
-    padding: 0;
-}
-
-.compact .post:first-of-type {
-    border-radius: 5px 5px 0 0;
-    overflow: hidden;
-}
-
-.compact .post:last-of-type {
-    border-radius: 0 0 5px 5px;
-    overflow: hidden;
-}
-
-.compact .post.highlighted {
-    border-radius: 5px;
-}
-.compact .post:not(:last-of-type):not(.highlighted):not(.stickied) {
-    border-bottom: 0;
-}
-
-.compact .post_score {
-    padding-top: 15px;
-    border-radius: 0;
-}
-
-.compact .post_header {
-    margin: 11px 15px 2.5px 12px;
-    font-size: 14px;
-}
-
-.compact .post_title,
-.compact #post_url,
-.compact .post_body {
-    margin: 2.5px 15px;
-}
-
-.compact .post_preview {
-    display: none;
-}
-
-.compact .post_media {
-    max-width: calc(100% - 30px);
-    margin: 2.5px auto;
-}
-
-.compact .post_footer {
-    margin: 5px 15px 15px 15px;
-}
-
-.compact .post_thumbnail {
-    width: 75px;
-    height: 75px;
-}
-
-.compact footer {
-    margin-top: 20px;
-}
-
 /* ════════════════════════════════════════════════════════════════════
    Old Reddit layout — "utility broadsheet"
    Single dense scan column like old.reddit.com, set in IBM Plex.
@@ -2838,68 +2775,8 @@ th {
         display: none;
     }
 
-    body:not(.oldreddit) .post {
-        grid-template:
-            "post_header post_header post_thumbnail" auto
-            "post_title  post_title  post_thumbnail" 1fr
-            "post_media  post_media  post_thumbnail" auto
-            "post_body   post_body   post_thumbnail" auto
-            "post_poll   post_poll   post_thumbnail" auto
-            "post_notification post_notification post_thumbnail" auto
-            "post_score  post_footer post_thumbnail" auto
-            / auto 1fr fit-content(min(20%, 152px));
-    }
-
-    body:not(.oldreddit) .post_score {
-        margin: 5px 0px 20px 15px;
-        padding: 0;
-    }
-
     .post_poll {
         padding: 5px 15px 10px 12px;
-    }
-
-    .compact .post_score {
-        padding: 0;
-    }
-
-    body:not(.oldreddit) .post_score::before {
-        content: "↑";
-    }
-
-    body:not(.oldreddit) .post_header {
-        font-size: 14px;
-    }
-    body:not(.oldreddit) .post_footer {
-        margin-left: 15px;
-    }
-
-    body:not(.oldreddit) .replies > .comment {
-        margin-left: -12px;
-        padding: 5px 0;
-    }
-
-    body:not(.oldreddit) .comment_left {
-        min-width: 16px;
-        max-width: 16px;
-        padding: 5px 0px;
-        align-items: initial;
-        margin-top: -5px;
-    }
-
-    body:not(.oldreddit) .line {
-        margin-left: 5px;
-    }
-
-    /* .thread { margin-left: -5px; } */
-    body:not(.oldreddit) .comment_right {
-        padding: 5px 0 10px 2px;
-    }
-    body:not(.oldreddit) .comment_author {
-        margin-left: 12px;
-    }
-    body:not(.oldreddit) .comment_data {
-        margin-left: 12px;
     }
 
     .user-comment .comment_data {
