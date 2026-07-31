@@ -163,50 +163,71 @@ pub async fn proxy(req: HyperRequest<Body>, format: &str) -> Result<HyperRespons
 	}
 
 	// First parameter is target URL (mandatory).
-	let wreq_uri = wreq::Uri::try_from(url).map_err(|_| "Couldn't parse URL".to_string())?;
+	let wreq_uri = wreq::Uri::try_from(url.clone()).map_err(|_| "Couldn't parse URL".to_string())?;
 
-	let mut builder = CLIENT.get(wreq_uri);
+	// Reddit's CDN intermittently drops connections (resets, HTTP/2 GOAWAY) under
+	// concurrent load. Without a retry, each such drop renders as a permanently
+	// blank image on the page, so retry transport errors and 5xx briefly.
+	const MAX_ATTEMPTS: u32 = 3;
+	let mut last_err = String::new();
 
-	// Copy useful headers from original request
-	for &key in &["Range", "If-Modified-Since", "Cache-Control"] {
-		if let Some(value) = req.headers().get(key) {
-			builder = builder.header(key, value.as_bytes());
+	for attempt in 1..=MAX_ATTEMPTS {
+		let mut builder = CLIENT.get(wreq_uri.clone());
+
+		// Copy useful headers from original request
+		for &key in &["Range", "If-Modified-Since", "Cache-Control"] {
+			if let Some(value) = req.headers().get(key) {
+				builder = builder.header(key, value.as_bytes());
+			}
+		}
+
+		// Add User-Agent header of the currently spoofed device
+		{
+			let client = OAUTH_CLIENT.load_full();
+			builder = builder.header("User-Agent", client.user_agent());
+		}
+
+		// This is needed or Reddit will redirect us to a /media landing page that just renders the image.
+		builder = builder.header(wreq_header::ACCEPT, "*/*");
+
+		match builder.send().await {
+			// Retry CDN-side errors; pass the final attempt's response through unmodified.
+			Ok(res) if res.status().is_server_error() && attempt < MAX_ATTEMPTS => {
+				last_err = format!("upstream returned {}", res.status());
+			}
+			Ok(mut res) => {
+				let headers = res.headers_mut();
+
+				let mut rm = |key: &str| headers.remove(key);
+
+				rm("access-control-expose-headers");
+				rm("server");
+				rm("vary");
+				rm("etag");
+				rm("x-cdn");
+				rm("x-cdn-client-region");
+				rm("x-cdn-name");
+				rm("x-cdn-server-region");
+				rm("x-reddit-cdn");
+				rm("x-reddit-video-features");
+				rm("Nel");
+				rm("Report-To");
+
+				return Ok(res.into_hyper_response());
+			}
+			Err(e) => {
+				last_err = e.to_string();
+			}
+		}
+
+		if attempt < MAX_ATTEMPTS {
+			warn!("Proxy fetch for {url} failed (attempt {attempt}/{MAX_ATTEMPTS}): {last_err}");
+			tokio::time::sleep(std::time::Duration::from_millis(250 * u64::from(attempt))).await;
 		}
 	}
 
-	// Add User-Agent header of the currently spoofed device
-	{
-		let client = OAUTH_CLIENT.load_full();
-		builder = builder.header("User-Agent", client.user_agent());
-	}
-
-	// This is needed or Reddit will redirect us to a /media landing page that just renders the image.
-	builder = builder.header(wreq_header::ACCEPT, "*/*");
-
-	builder
-		.send()
-		.await
-		.map(|mut res| {
-			let headers = res.headers_mut();
-
-			let mut rm = |key: &str| headers.remove(key);
-
-			rm("access-control-expose-headers");
-			rm("server");
-			rm("vary");
-			rm("etag");
-			rm("x-cdn");
-			rm("x-cdn-client-region");
-			rm("x-cdn-name");
-			rm("x-cdn-server-region");
-			rm("x-reddit-cdn");
-			rm("x-reddit-video-features");
-			rm("Nel");
-			rm("Report-To");
-
-			res.into_hyper_response()
-		})
-		.map_err(|e| e.to_string())
+	error!("Proxy fetch for {url} failed after {MAX_ATTEMPTS} attempts: {last_err}");
+	Err(last_err)
 }
 
 /// Makes a GET request to Reddit at `path`. By default, this will honor HTTP
