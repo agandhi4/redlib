@@ -30,6 +30,13 @@
 			</span>
 			{% endfor %}
 			{% endif %}
+			{% if replies.len() > 0 %}
+			<!-- CSS shows the count only while collapsed, the button only while open (top level) -->
+			<span class="comment_reply_count">{{ replies.len() }} {% if replies.len() == 1 %}reply{% else %}replies{% endif %}</span>
+			{% if parent_kind == "t3" %}
+			<button type="button" class="collapse_children">collapse thread</button>
+			{% endif %}
+			{% endif %}
 		</summary>
 		{% if is_filtered %}
 		<div class="comment_body_filtered {% if highlighted %}highlighted{% endif %}">(Filtered content)</div>

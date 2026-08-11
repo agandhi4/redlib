@@ -1,14 +1,10 @@
 // Bump CACHE_NAME on any STATIC_ASSETS change: the byte-diff triggers SW
 // reinstall, which is the only thing that refreshes the precache.
-const CACHE_NAME = "redlib-v2";
+const CACHE_NAME = "redlib-v3";
 const STATIC_ASSETS = [
   // style.css is deliberately absent: pages request it as /style.css?v=X,
   // which never matches an unversioned precache entry (HTTP cache owns it).
-  // Inter dropped: oldreddit overrides every element that referenced it,
-  // so the @font-face never triggers a download.
-  "/PlexSans.var.woff2",
-  "/PlexMono-Regular.woff2",
-  "/PlexMono-SemiBold.woff2",
+  // No fonts: the layout uses the system UI stack.
   "/favicon.ico",
   "/logo.png",
   "/manifest.json",

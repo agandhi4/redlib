@@ -72,6 +72,11 @@
         <input id="search" class="commentQuery" type="search" name="q" value="{{ comment_query }}" placeholder="Search comments">
         <input type="hidden" name="type" value="comment">
       </form>
+      <!-- COLLAPSE/EXPAND ALL (handled by comment-collapse.js) -->
+      <div id="comment_tools">
+        <button type="button" data-comments="collapse">Collapse all</button>
+        <button type="button" data-comments="expand">Expand all</button>
+      </div>
       </div>
   
       <div>

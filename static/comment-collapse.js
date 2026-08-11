@@ -1,18 +1,34 @@
+// static/comment-collapse.js — replaces the existing file.
+// Existing behavior (click a comment body to collapse it) is unchanged;
+// two additions: collapse-all / expand-all, and collapse-children.
+
 document.addEventListener("click", (e) => {
-  // Only act on clicks inside comment bodies
+  // ── Collapse all / expand all (buttons in post.html's #comment_tools)
+  const tool = e.target.closest("[data-comments]");
+  if (tool) {
+    e.preventDefault();
+    const open = tool.dataset.comments === "expand";
+    document.querySelectorAll("details.comment_right").forEach((d) => (d.open = open));
+    return;
+  }
+
+  // ── Collapse just this comment's replies, keeping the comment itself open
+  const kids = e.target.closest(".collapse_children");
+  if (kids) {
+    e.preventDefault();
+    kids
+      .closest("details.comment_right")
+      .querySelectorAll(".replies details.comment_right")
+      .forEach((d) => (d.open = false));
+    return;
+  }
+
+  // ── Click a comment body to collapse it (unchanged)
   const body = e.target.closest(".comment_body");
   if (!body) return;
-
-  // Don't collapse when clicking links, buttons, or interactive elements
   if (e.target.closest("a, button, input, textarea, video, details")) return;
-
-  // Don't collapse if user is selecting text
   const selection = window.getSelection();
   if (selection && selection.toString().length > 0) return;
-
-  // Toggle the parent <details> element
   const details = body.closest("details");
-  if (details) {
-    details.open = !details.open;
-  }
+  if (details) details.open = !details.open;
 });
