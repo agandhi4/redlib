@@ -1661,8 +1661,13 @@ summary.comment_data {
     box-shadow: none;
     background: var(--post);
     border-bottom: 1px solid var(--or-rule);
+    /* post_body (the self-post preview) sits directly under the title,
+       above the byline — deliberately unlike the base/mobile grids: the
+       preview is a continuation of the content, and interleaving the
+       meta line between title and preview alternates voices badly */
     grid-template:
         "post_score post_thumbnail post_title" auto
+        "post_score post_thumbnail post_body" auto
         "post_score post_thumbnail post_header" auto
         "post_score post_thumbnail post_footer" 1fr
         / 52px 56px minmax(0, 1fr);
@@ -1718,10 +1723,10 @@ summary.comment_data {
 
 .oldreddit .post_title {
     margin: 0 12px 0 12px;
-    font-size: 15.5px;
+    font-size: 17px;
     font-weight: 600;
-    line-height: 1.36;
-    letter-spacing: -0.008em;
+    line-height: 1.34;
+    letter-spacing: -0.01em;
     color: var(--or-title);
 }
 
@@ -1752,7 +1757,14 @@ summary.comment_data {
     color: var(--or-action);
     display: flex;
     align-items: center;
+    justify-content: flex-start;
     gap: 16px;
+}
+
+/* Ratio reads as a row summary: pushed right, echoing the post page's
+   "N% Upvoted" placement (don't rely on the base rule's space-between) */
+.oldreddit .post_footer .post_ratio {
+    margin-left: auto;
 }
 
 /* Comment count joins the mono data rail; the bubble icon labels the
@@ -1811,11 +1823,35 @@ summary.comment_data {
     display: none;
 }
 
-/* Hide body preview, polls, notifications in listing */
-.oldreddit .post_preview,
+/* Hide polls and notifications in listing */
 .oldreddit .post_poll,
 .oldreddit .post_notification {
     display: none;
+}
+
+/* Self-post preview: two quiet lines under the title, faded like the
+   mobile cards so titles stay the loudest thing in the column */
+.oldreddit .post_preview {
+    margin: 3px 12px 0 12px;
+    padding: 0;
+    width: auto;
+    font-size: 12.5px;
+    line-height: 1.5;
+    opacity: 1;
+    color: var(--or-meta);
+    max-height: 38px; /* two lines at 12.5px/1.5 */
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(180deg, #000 50%, transparent);
+    mask-image: linear-gradient(180deg, #000 50%, transparent);
+}
+
+/* Link destination after the title, set in the meta voice */
+.oldreddit .post_domain {
+    font-family: var(--or-font);
+    font-size: 11.5px;
+    font-weight: 400;
+    letter-spacing: 0;
+    color: var(--or-meta);
 }
 
 .self_placeholder {
@@ -2806,13 +2842,22 @@ th {
         margin-left: auto;
     }
 
+    .oldreddit .post_header .gallery_count {
+        white-space: nowrap;
+        flex-shrink: 0;
+    }
+
     /* Time is pushed right; the dot preceding it would float mid-gap */
     .oldreddit .post_header .dot:last-of-type {
         display: none;
     }
 
+    /* Cards are width-constrained; keep the mobile title at the spec size
+       rather than inheriting the larger desktop one */
     .oldreddit .post_title {
         margin: 0 11px 0 0;
+        font-size: 15.5px;
+        line-height: 1.36;
     }
 
     .oldreddit .post_flair {
@@ -2874,6 +2919,11 @@ th {
         justify-content: flex-end;
         gap: 18px;
         font-size: 12px;
+    }
+
+    /* Cards are too narrow for the ratio; score + comments carry the row */
+    .oldreddit .post_ratio {
+        display: none;
     }
 
     .oldreddit .post_score .score_icon,
