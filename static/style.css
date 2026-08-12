@@ -1536,22 +1536,12 @@ a.search_subreddit:hover {
 }
 
 /* Alternating comment depth backgrounds */
+/* (The old layout's alternating reply backgrounds lived here — removed:
+   the oldreddit depth ramp owns nesting cues, and the zebra leaked
+   through in any theme where --outside and --post visibly differ) */
 .replies > .comment {
     margin-left: -20px;
     padding: 2px 5px;
-    background: var(--outside);
-}
-.replies .replies > .comment {
-    background: var(--post);
-}
-.replies .replies .replies > .comment {
-    background: var(--outside);
-}
-.replies .replies .replies .replies > .comment {
-    background: var(--post);
-}
-.replies .replies .replies .replies .replies > .comment {
-    background: var(--outside);
 }
 
 .created {
@@ -1916,8 +1906,10 @@ summary.comment_data {
     border-left: 2px solid var(--or-d1);
 }
 
+/* 20px per level: position is the primary depth cue (the ramp assists);
+   HN-style indentation reads instantly where color must be decoded */
 .oldreddit .replies > .comment {
-    margin-left: 12px;
+    margin-left: 20px;
     border-left-color: var(--or-d2);
 }
 
@@ -2028,7 +2020,7 @@ summary.comment_data {
 }
 
 .oldreddit .comment_body > p:not(:first-child) {
-    margin-top: 8px;
+    margin-top: 10px;
 }
 
 /* Comment footer: hidden by default, shown in oldreddit */
@@ -2983,7 +2975,7 @@ th {
     }
 
     .oldreddit .replies > .comment {
-        margin-left: 8px;
+        margin-left: 10px;
     }
 
     /* Bottom tab bar (markup in base.html; hidden above 800px by the

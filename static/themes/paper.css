@@ -1,0 +1,22 @@
+/* Paper theme — Hacker News-inspired: one continuous warm surface,
+   structure from indentation and hairlines rather than cards. HN's own
+   #ff6600 fails contrast on this ground (2.7:1); #b35400 keeps the
+   burnt-orange character at 4.6:1. Text 15.6:1. */
+.paper {
+	--accent: #b35400;
+	--green: #1e7d32;
+	--text: #1d1d1b;
+	--foreground: #e8e6d9;
+	--background: #f6f6ef;
+	--outside: #efeee4;
+	--post: #f6f6ef;
+	--panel-border: 1px solid #dcdacc;
+	--highlighted: #e2e0d2;
+	--visited: #828282;
+	--shadow: 0 1px 3px rgba(60, 50, 20, 0.08);
+}
+
+html:has(> .paper) {
+  /* Hint color theme to browser for scrollbar */
+  color-scheme: light;
+}
