@@ -1622,7 +1622,7 @@ summary.comment_data {
     --or-action: color-mix(in srgb, var(--text) 62%, var(--post));
     --or-num: color-mix(in srgb, var(--text) 86%, var(--post));
     --or-num-quiet: color-mix(in srgb, var(--text) 44%, var(--post));
-    --or-rule: color-mix(in srgb, var(--text) 12%, var(--post));
+    --or-rule: color-mix(in srgb, var(--text) 16%, var(--post));
     --or-chip: color-mix(in srgb, var(--text) 24%, var(--post));
 
     /* Comment depth ramp: one accent hue stepping lighter with depth. */
@@ -1930,6 +1930,12 @@ summary.comment_data {
 
 .oldreddit .comment_left {
     display: none;
+}
+
+/* Top-level threads read as visual paragraphs: separation by proximity,
+   not by adding more ink to a page that already carries depth rails */
+.oldreddit .thread + .thread {
+    margin-top: 14px;
 }
 
 .oldreddit .comment_right {
