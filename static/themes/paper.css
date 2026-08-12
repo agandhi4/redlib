@@ -1,13 +1,14 @@
-/* Paper theme — Hacker News-inspired: one continuous warm surface,
-   structure from indentation and hairlines rather than cards. HN's own
-   #ff6600 fails contrast on this ground (2.7:1); #b35400 keeps the
-   burnt-orange character at 4.6:1. Text 15.6:1. */
+/* Paper theme — Hacker News-inspired: warm paper content surface on a
+   lighter window canvas (HN's beige table on its white body), structure
+   from indentation and hairlines rather than cards. HN's own #ff6600
+   fails contrast on this ground (2.7:1); #b35400 keeps the burnt-orange
+   character at 4.6:1. Text 15.6:1. */
 .paper {
 	--accent: #b35400;
 	--green: #1e7d32;
 	--text: #1d1d1b;
 	--foreground: #e8e6d9;
-	--background: #f6f6ef;
+	--background: #fcfcf9;
 	--outside: #efeee4;
 	--post: #f6f6ef;
 	--panel-border: 1px solid #dcdacc;

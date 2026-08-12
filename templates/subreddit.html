@@ -97,9 +97,11 @@
 				</div>
 				{% endif %}
 				<div id="sub_meta">
-					<img loading="lazy" id="sub_icon" src="{{ sub.icon }}" alt="Icon for r/{{ sub.name }}">
-					<h1 id="sub_title">{{ sub.title }}</h1>
-					<p id="sub_name">r/{{ sub.name }}</p>
+					<a id="sub_link" href="/r/{{ sub.name }}">
+						<img loading="lazy" id="sub_icon" src="{{ sub.icon }}" alt="Icon for r/{{ sub.name }}">
+						<h1 id="sub_title">{{ sub.title }}</h1>
+						<p id="sub_name">r/{{ sub.name }}</p>
+					</a>
 					<p id="sub_description">{{ sub.description }}</p>
 					<div id="sub_details">
 						<label>Members</label>
@@ -139,7 +141,7 @@
 						{% endif %}
 				</div>
 			</details>
-			<details class="panel" id="sidebar">
+			<details class="panel" id="sidebar" open>
 				<summary id="sidebar_label">Sidebar</summary>
 				<div id="sidebar_contents">
 					{{ sub.info|safe }}
@@ -154,6 +156,19 @@
 				</div>
 			</details>
 			{% endif %}
+		</aside>
+		{% else if !prefs.subscriptions.is_empty() && prefs.hide_sidebar_and_summary != "on" %}
+		<!-- Front page / popular / multireddit: no sub to describe, so the
+		     aside lists the user's subscriptions instead (balances the column) -->
+		<aside>
+			<details class="panel" id="subscriptions" open>
+				<summary id="subscriptions_label">Subscriptions</summary>
+				<ul id="subscriptions_list">
+					{% for sub_name in prefs.subscriptions %}
+					<li><a href="/r/{{ sub_name }}">r/{{ sub_name }}</a></li>
+					{% endfor %}
+				</ul>
+			</details>
 		</aside>
 		{% endif %}
 	</main>

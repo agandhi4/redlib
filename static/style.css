@@ -2234,7 +2234,8 @@ summary.comment_data {
 }
 
 .oldreddit #subreddit,
-.oldreddit #sidebar {
+.oldreddit #sidebar,
+.oldreddit #subscriptions {
     margin: 0 0 10px 0;
     border: none;
     background: var(--post);
@@ -2242,9 +2243,36 @@ summary.comment_data {
     min-width: unset;
 }
 
+.oldreddit #subscriptions_list {
+    list-style: none;
+    margin: 0;
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 2;
+}
+
+.oldreddit #subscriptions_list a {
+    color: var(--or-meta-strong);
+    font-weight: 600;
+}
+
+.oldreddit #subscriptions_list a:hover {
+    color: var(--accent);
+    text-decoration: underline;
+}
+
 .oldreddit #sub_meta {
     padding: 10px;
     font-size: 12px;
+}
+
+/* The sub's icon/title/name are one link back to its front page */
+.oldreddit #sub_link {
+    display: block;
+}
+
+.oldreddit #sub_link:hover #sub_title {
+    text-decoration: underline;
 }
 
 .oldreddit #sub_title {
@@ -2296,7 +2324,8 @@ summary.comment_data {
 }
 
 .oldreddit #sidebar_label,
-.oldreddit #subreddit_label {
+.oldreddit #subreddit_label,
+.oldreddit #subscriptions_label {
     font-size: 11px;
     padding: 6px 10px;
     background: var(--foreground);
