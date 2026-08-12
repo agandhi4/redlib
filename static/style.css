@@ -2038,6 +2038,29 @@ summary.comment_data {
     color: var(--or-num-quiet);
 }
 
+/* Reclaim the per-comment action line: on hover-capable devices the
+   footer shows only for the comment under the pointer. Scoped to the
+   comment's own summary/body via sibling selectors — matching on
+   details.comment_right:hover would light up every ancestor of a nested
+   comment, since ancestors contain their replies. The footer sits flush
+   under the body (no margin gap), so the pointer hands off to
+   .comment_footer:hover without a dead zone. Keyboard: focusing
+   anything in the comment reveals it via :focus-within. Touch devices
+   (hover: none) keep it always visible. */
+@media (hover: hover) and (pointer: fine) {
+    .oldreddit .comment_footer {
+        display: none;
+    }
+
+    .oldreddit summary.comment_data:hover ~ .comment_footer,
+    .oldreddit .comment_body:hover + .comment_footer,
+    .oldreddit .comment_body_filtered:hover + .comment_footer,
+    .oldreddit .comment_footer:hover,
+    .oldreddit details.comment_right:focus-within > .comment_footer {
+        display: flex;
+    }
+}
+
 /* Links and the save button pick up the footer's quiet color instead of
    the base link/button styling */
 .oldreddit .comment_footer a,
