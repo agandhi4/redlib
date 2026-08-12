@@ -105,9 +105,11 @@
 		<details class="panel" id="subreddit" open>
 			<summary id="subreddit_label">Subreddit</summary>
 			<div id="sub_meta">
-				<img loading="lazy" id="sub_icon" src="{{ sub.icon }}" alt="Icon for r/{{ sub.name }}">
-				<h1 id="sub_title">{{ sub.title }}</h1>
-				<p id="sub_name">r/{{ sub.name }}</p>
+				<a id="sub_link" href="/r/{{ sub.name }}">
+					<img loading="lazy" id="sub_icon" src="{{ sub.icon }}" alt="Icon for r/{{ sub.name }}">
+					<h1 id="sub_title">{{ sub.title }}</h1>
+					<p id="sub_name">r/{{ sub.name }}</p>
+				</a>
 				<p id="sub_description">{{ sub.description }}</p>
 				<div id="sub_details">
 					<label>Members</label>
@@ -117,7 +119,7 @@
 				</div>
 			</div>
 		</details>
-		<details class="panel" id="sidebar">
+		<details class="panel" id="sidebar" open>
 			<summary id="sidebar_label">Sidebar</summary>
 			<div id="sidebar_contents">
 				{{ sub.info|safe }}
