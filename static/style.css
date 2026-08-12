@@ -1761,10 +1761,8 @@ summary.comment_data {
     gap: 16px;
 }
 
-/* Ratio reads as a row summary: pushed right, echoing the post page's
-   "N% Upvoted" placement (don't rely on the base rule's space-between) */
-.oldreddit .post_footer .post_ratio {
-    margin-left: auto;
+.oldreddit .post_footer .post_ratio:hover {
+    text-decoration: underline;
 }
 
 /* Comment count joins the mono data rail; the bubble icon labels the
