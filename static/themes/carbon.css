@@ -1,8 +1,8 @@
-/* Dark theme setting */
-.dark{
-	--accent: #d54455;
+/* Carbon theme (libreddit dark) */
+.carbon {
+	--accent: #35d0d0;
 	--green: #5cff85;
-	--text: white;
+	--text: #e6e6e6;
 	--foreground: #222;
 	--background: #0f0f0f;
 	--outside: #1f1f1f;

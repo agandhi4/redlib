@@ -30,20 +30,23 @@
     --footer-height: 30px;
 }
 
-/* Automatic theme selection */
+/* Automatic theme selection.
+   Default dark: layered slightly-cool neutrals rather than near-black —
+   off-white text (pure white halates), accent tuned to 4.7:1 on cards.
+   Contrast (WCAG): text/post 13.1, or-body 9.2, accent/post 4.7. */
 :root,
 .dark {
     /* Default & fallback theme (dark) */
-    --accent: #d54455;
-    --green: #5cff85;
-    --text: white;
-    --foreground: #222;
-    --background: #0f0f0f;
-    --outside: #1f1f1f;
-    --post: #161616;
-    --panel-border: 1px solid #333;
-    --highlighted: #333;
-    --visited: #aaa;
+    --accent: #e05c6b;
+    --green: #4ccf7d;
+    --text: #e2e4e8;
+    --foreground: #2a2e36;
+    --background: #14161a;
+    --outside: #22252c;
+    --post: #1b1e24;
+    --panel-border: 1px solid #2e323a;
+    --highlighted: #363b45;
+    --visited: #9aa0a8;
     --shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
     --popup: #b80a27;
     --spoiler: #ddd;
@@ -52,20 +55,21 @@
     color-scheme: dark;
 }
 
-/* Browser-defined light theme */
+/* Browser-defined light theme: white cards on a cool paper canvas,
+   near-black (not black) text. text/post 16.9, accent/post 6.4. */
 @media (prefers-color-scheme: light) {
     :root {
-        --accent: #bb2b3b;
-        --green: #00a229;
-        --text: black;
-        --foreground: #f5f5f5;
-        --background: #ddd;
-        --outside: #ececec;
-        --post: #eee;
-        --panel-border: 1px solid #ccc;
-        --highlighted: white;
-        --visited: #555;
-        --shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        --accent: #b3293b;
+        --green: #008a24;
+        --text: #1b1d21;
+        --foreground: #edeff2;
+        --background: #eef0f3;
+        --outside: #f7f8f9;
+        --post: #ffffff;
+        --panel-border: 1px solid #d9dce1;
+        --highlighted: #e3e6eb;
+        --visited: #6a6f78;
+        --shadow: 0 1px 3px rgba(16, 24, 40, 0.1);
         --spoiler: #0f0f0f;
 
         /* Hint color theme to browser for scrollbar */
@@ -1617,6 +1621,7 @@ summary.comment_data {
        mushy as well as faint — a mixed color keeps rendering crisp. */
     --or-title: color-mix(in srgb, var(--text) 96%, var(--post));
     --or-title-quiet: color-mix(in srgb, var(--text) 66%, var(--post)); /* visited */
+    --or-body: color-mix(in srgb, var(--text) 82%, var(--post)); /* long-form comment text */
     --or-meta: color-mix(in srgb, var(--text) 58%, var(--post));
     --or-meta-strong: color-mix(in srgb, var(--text) 75%, var(--post));
     --or-action: color-mix(in srgb, var(--text) 62%, var(--post));
@@ -1912,7 +1917,7 @@ summary.comment_data {
 }
 
 .oldreddit .replies > .comment {
-    margin-left: 8px;
+    margin-left: 12px;
     border-left-color: var(--or-d2);
 }
 
@@ -2011,13 +2016,15 @@ summary.comment_data {
     color: var(--or-meta);
 }
 
+/* Long-form reading: 82% mix, not the 66% visited tone — comments are
+   the primary content on a post page, not secondary metadata */
 .oldreddit .comment_body {
     padding: 3px 5px;
     margin: 4px 0 0;
     font-size: 13.5px;
     line-height: 1.62;
     opacity: 1;
-    color: var(--or-title-quiet);
+    color: var(--or-body);
 }
 
 .oldreddit .comment_body > p:not(:first-child) {
@@ -2976,7 +2983,7 @@ th {
     }
 
     .oldreddit .replies > .comment {
-        margin-left: 6px;
+        margin-left: 8px;
     }
 
     /* Bottom tab bar (markup in base.html; hidden above 800px by the
