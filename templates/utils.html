@@ -249,6 +249,10 @@
 		<a class="post_subreddit" href="/{{ community }}">{{ community }}</a>
 		<span class="dot">&bull;</span>
 		<a class="post_author {{ post.author.distinguished }}" href="/u/{{ post.author.name }}">u/{{ post.author.name }}</a>
+		{% if post.post_type == "gallery" && post.gallery.len() > 0 %}
+		<span class="dot">&bull;</span>
+		<span class="gallery_count">{{ post.gallery.len() }} {% if post.gallery.len() == 1 %}image{% else %}images{% endif %}</span>
+		{% endif %}
 		<span class="dot">&bull;</span>
 		<span class="created" title="{{ post.created }}">{{ post.rel_time }}</span>
 		{% if !post.awards.is_empty() && prefs.hide_awards != "on" %}
@@ -266,7 +270,7 @@
 				style="color:{{ post.flair.foreground_color }}; background:{{ post.flair.background_color }};"
 				dir="ltr">{% call render_flair(post.flair.flair_parts) %}</a>
 		{% endif %}
-		<a href="{{ post.permalink }}">{{ post.title }}</a>{% if post.flags.nsfw %} <small class="nsfw">NSFW</small>{% endif %}{% if post.flags.spoiler %} <small class="spoiler">Spoiler</small>{% endif %}
+		<a href="{{ post.permalink }}">{{ post.title }}</a>{% if post.post_type == "link" && !post.domain.is_empty() %} <small class="post_domain">({{ post.domain }})</small>{% endif %}{% if post.flags.nsfw %} <small class="nsfw">NSFW</small>{% endif %}{% if post.flags.spoiler %} <small class="spoiler">Spoiler</small>{% endif %}
 	</h2>
 	<!-- POST THUMBNAIL (oldreddit list rows never inline full media) -->
 	{% if post.post_type != "self" %}
@@ -308,9 +312,11 @@
     &#x2022;
     {% endif %}
     <span class="label"> Upvotes</span></div>
+	{% if !post.body.is_empty() %}
 	<div class="post_body post_preview">
 		{{ post.body|safe }}
 	</div>
+	{% endif %}
 
 	{% call poll(post) %}
 
@@ -319,6 +325,9 @@
 			<svg class="post_footer_icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
 			{{ post.comments.0 }}
 		</a>
+		{% if prefs.hide_score != "on" %}
+		<span class="post_ratio" title="Upvote ratio">{{ post.upvote_ratio }}% upvoted</span>
+		{% endif %}
 		<a href="{{ post.permalink }}" class="post_share" title="Share" onclick="if(navigator.share){navigator.share({url:'{{ post.permalink }}'});return false;}">
 			<svg class="post_footer_icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
 		</a>
