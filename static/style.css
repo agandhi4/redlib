@@ -1799,6 +1799,9 @@ summary.comment_data {
     padding: 1px 5px;
     border-radius: 3px;
     vertical-align: 2px;
+    /* Trailing the title means the chip can hit a line break; wrap it
+       as a unit instead of splitting the box across lines */
+    white-space: nowrap;
 }
 
 /* Uniform square thumbnail; letterboxed sources sit on a quiet well */
