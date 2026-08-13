@@ -107,8 +107,8 @@
 			{% endfor %}
 		{% endif %}
 		{% if prefs.use_hls == "on" %}
-		<script src="/hls.min.js"></script>
-		<script src="/playHLSVideo.js"></script>
+		<script src="/hls.min.js?v={{ env!("CARGO_PKG_VERSION") }}"></script>
+		<script src="/playHLSVideo.js?v={{ env!("CARGO_PKG_VERSION") }}"></script>
 		{% endif %}
 
 		{% if params.typed != "sr_user" %}

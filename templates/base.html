@@ -108,7 +108,7 @@
 				</div>
 			</footer>
 		{% endblock %}
-		<script src="/register-sw.js"></script>
+		<script src="/register-sw.js?v={{ env!("CARGO_PKG_VERSION") }}"></script>
 		<script src="/prefetch.js?v={{ env!("CARGO_PKG_VERSION") }}" defer></script>
 	</body>
 </html>

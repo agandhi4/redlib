@@ -48,7 +48,6 @@
     --highlighted: #363b45;
     --visited: #9aa0a8;
     --shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
-    --popup: #b80a27;
     --spoiler: #ddd;
 
     /* Hint color theme to browser for scrollbar */
@@ -152,10 +151,6 @@ body {
     padding-bottom: var(--footer-height);
     font-size: 15px;
     position: relative;
-}
-
-body.card {
-    min-height: calc(100vh - 30px);
 }
 
 body.fixed_navbar {
@@ -1536,14 +1531,6 @@ a.search_subreddit:hover {
 }
 
 /* Alternating comment depth backgrounds */
-/* (The old layout's alternating reply backgrounds lived here — removed:
-   the oldreddit depth ramp owns nesting cues, and the zebra leaked
-   through in any theme where --outside and --post visibly differ) */
-.replies > .comment {
-    margin-left: -20px;
-    padding: 2px 5px;
-}
-
 .created {
     opacity: 0.45;
     font-size: 11px;
