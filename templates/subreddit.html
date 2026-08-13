@@ -65,8 +65,8 @@
 			{% endif %}
 			{% endfor %}
 			{% if prefs.use_hls == "on" %}
-			<script src="/hls.min.js"></script>
-			<script src="/playHLSVideo.js"></script>
+			<script src="/hls.min.js?v={{ env!("CARGO_PKG_VERSION") }}"></script>
+			<script src="/playHLSVideo.js?v={{ env!("CARGO_PKG_VERSION") }}"></script>
 			{% endif %}
 			</div>
 			{% endif %}
@@ -145,14 +145,6 @@
 				<summary id="sidebar_label">Sidebar</summary>
 				<div id="sidebar_contents">
 					{{ sub.info|safe }}
-					{# <hr>
-					<h2>Moderators</h2>
-					<br>
-					<ul>
-					{% for moderator in sub.moderators %}
-					<li><a style="color: var(--accent)" href="/u/{{ moderator }}">{{ moderator }}</a></li>
-					{% endfor %}
-					</ul> #}
 				</div>
 			</details>
 			{% endif %}

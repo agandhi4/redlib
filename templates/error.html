@@ -11,7 +11,7 @@
 	<h3 id="update-status"><a id="random-instance"></a></h3>
 	<br>
 	<div id="git_commit" data-value="{{ crate::instance_info::INSTANCE_INFO.git_commit }}"></div>
-	<script src="/check_update.js"></script>
+	<script src="/check_update.js?v={{ env!("CARGO_PKG_VERSION") }}"></script>
 	
 	<h3>Expected something to work? <a
 			href="https://github.com/redlib-org/redlib/issues/new?assignees=&labels=bug&projects=&template=bug_report.md&title=%F0%9F%90%9B+Bug+Report%3A+{{ msg }}">Report

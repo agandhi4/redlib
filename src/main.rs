@@ -235,28 +235,30 @@ async fn main() {
 	app.at("/apple-touch-icon.png").get(|_| iphone_logo().boxed());
 	app.at("/opensearch.xml").get(|_| opensearch().boxed());
 	app
+		// sw.js must stay uncached: browsers refetch it to detect service worker
+		// updates, and a long Cache-Control would pin clients to an old worker
 		.at("/sw.js")
 		.get(|_| resource(include_str!("../static/sw.js"), "application/javascript", false).boxed());
 	app
 		.at("/register-sw.js")
-		.get(|_| resource(include_str!("../static/register-sw.js"), "application/javascript", false).boxed());
+		.get(|_| resource(include_str!("../static/register-sw.js"), "application/javascript", true).boxed());
 	app
 		.at("/playHLSVideo.js")
-		.get(|_| resource(include_str!("../static/playHLSVideo.js"), "text/javascript", false).boxed());
+		.get(|_| resource(include_str!("../static/playHLSVideo.js"), "text/javascript", true).boxed());
 	app
 		.at("/hls.min.js")
-		.get(|_| resource(include_str!("../static/hls.min.js"), "text/javascript", false).boxed());
+		.get(|_| resource(include_str!("../static/hls.min.js"), "text/javascript", true).boxed());
 	app
 		.at("/highlighted.js")
-		.get(|_| resource(include_str!("../static/highlighted.js"), "text/javascript", false).boxed());
+		.get(|_| resource(include_str!("../static/highlighted.js"), "text/javascript", true).boxed());
 	app
 		.at("/check_update.js")
-		.get(|_| resource(include_str!("../static/check_update.js"), "text/javascript", false).boxed());
-	app.at("/copy.js").get(|_| resource(include_str!("../static/copy.js"), "text/javascript", false).boxed());
+		.get(|_| resource(include_str!("../static/check_update.js"), "text/javascript", true).boxed());
+	app.at("/copy.js").get(|_| resource(include_str!("../static/copy.js"), "text/javascript", true).boxed());
 	app.at("/prefetch.js").get(|_| resource(include_str!("../static/prefetch.js"), "text/javascript", true).boxed());
 	app
 		.at("/comment-collapse.js")
-		.get(|_| resource(include_str!("../static/comment-collapse.js"), "text/javascript", false).boxed());
+		.get(|_| resource(include_str!("../static/comment-collapse.js"), "text/javascript", true).boxed());
 
 	app.at("/commits.atom").get(|_| async move { proxy_commit_info().await }.boxed());
 	app.at("/instances.json").get(|_| async move { proxy_instances().await }.boxed());

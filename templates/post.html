@@ -38,10 +38,10 @@
 	{% else %}
 	<meta property="og:type" content="website">
 	{% if single_thread %}
-	<script src="/highlighted.js" defer></script>
+	<script src="/highlighted.js?v={{ env!("CARGO_PKG_VERSION") }}" defer></script>
 	{% endif %}
 	{% endif %}
-	<script src="/comment-collapse.js" defer></script>
+	<script src="/comment-collapse.js?v={{ env!("CARGO_PKG_VERSION") }}" defer></script>
 {% endblock %}
 
 {% block subscriptions %}
