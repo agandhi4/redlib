@@ -2042,22 +2042,31 @@ summary.comment_data {
 
     .oldreddit .comment_footer {
         position: absolute;
-        top: 8px;
-        right: 0;
+        top: 6px;
+        right: 10px;
         min-height: 22px;
         align-items: center;
         margin: 0;
         padding: 0 0 0 10px;
+        gap: 6px;
         background: var(--post);
         opacity: 0;
         pointer-events: none;
         transition: opacity 0.12s ease 0.05s;
     }
 
-    .oldreddit summary.comment_data:hover ~ .comment_footer,
-    .oldreddit .comment_body:hover + .comment_footer,
-    .oldreddit .comment_body_filtered:hover + .comment_footer,
-    .oldreddit .comment_footer:hover,
+    /* The whole comment card is the hover surface — sibling-selector
+       triggers left dead zones (the body's 4px top margin, padding) where
+       the overlay faded out mid-approach. :not(:has(...:hover)) picks the
+       innermost hovered comment only, so ancestors of a hovered reply
+       stay quiet. */
+    .oldreddit details.comment_right:hover:not(:has(details.comment_right:hover)) > .comment_footer {
+        opacity: 1;
+        pointer-events: auto;
+    }
+
+    /* Separate rule: a browser without :has() drops any rule whose
+       selector list contains it — keyboard access must survive that */
     .oldreddit details.comment_right:focus-within > .comment_footer {
         opacity: 1;
         pointer-events: auto;
@@ -2065,12 +2074,13 @@ summary.comment_data {
 }
 
 /* Links and the save button pick up the footer's quiet color instead of
-   the base link/button styling */
+   the base link/button styling; padding grows the click/touch targets */
 .oldreddit .comment_footer a,
 .oldreddit .comment_footer button {
     color: inherit;
     font-weight: inherit;
     opacity: 1;
+    padding: 4px 5px;
 }
 
 .oldreddit .comment_footer a:hover,
