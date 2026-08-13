@@ -1,6 +1,9 @@
-# Redlib
+# Redlib (agandhi4 fork)
 
 > An alternative private front-end to Reddit, with its origins in [Libreddit](https://github.com/libreddit/libreddit).
+
+> [!NOTE]
+> **This is a personal fork**, heavily customized for a single self-hosted instance. Major divergences from upstream: a single dense "utility broadsheet" layout (system fonts, `color-mix()` design tokens), 8 curated WCAG-tuned themes including a Hacker News-inspired default, HN-grade comment ergonomics (depth ramp, hover actions, collapse controls), a mobile tab bar, offline reading via service worker, server-side saved posts, and a rendered-HTML cache. **See [`docs/fork.md`](docs/fork.md) for the full list**, and `CLAUDE.md` for architecture and conventions. Upstream docs below remain accurate for deployment and configuration.
 
 ![screenshot](https://i.ibb.co/18vrdxk/redlib-rust.png)
 
@@ -9,7 +12,7 @@
 **10-second pitch:** Redlib is a private front-end like [Invidious](https://github.com/iv-org/invidious) but for Reddit. Browse the coldest takes of [r/unpopularopinion](https://farside.link/redlib/r/unpopularopinion) without being [tracked](#reddit).
 
 - 🚀 Fast: written in Rust for blazing-fast speeds and memory safety
-- ☁️ Light: no JavaScript, no ads, no tracking, no bloat
+- ☁️ Light: minimal JavaScript (progressive enhancement only — collapse controls, prefetch, offline cache), no ads, no tracking, no bloat
 - 🕵 Private: all requests are proxied through the server, including media
 - 🔒 Secure: strong [Content Security Policy](https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP) prevents browser requests to Reddit
 
