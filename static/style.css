@@ -2071,6 +2071,17 @@ summary.comment_data {
         opacity: 1;
         pointer-events: auto;
     }
+
+    /* Stale-hover latch (set by comment-collapse.js when the pointer
+       leaves the window / focus is lost): browsers keep :hover stuck
+       until the next in-window mousemove, so the overlay lingered.
+       :not(:focus-within) keeps the keyboard reveal working while the
+       mouse is parked outside the window. !important because the
+       reveal selector above outranks any class-only override. */
+    .oldreddit.pointer_gone details.comment_right:not(:focus-within) > .comment_footer {
+        opacity: 0 !important;
+        pointer-events: none !important;
+    }
 }
 
 /* Links and the save button pick up the footer's quiet color instead of
