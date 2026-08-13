@@ -2025,18 +2025,33 @@ summary.comment_data {
     color: var(--or-num-quiet);
 }
 
-/* Reclaim the per-comment action line: on hover-capable devices the
-   footer shows only for the comment under the pointer. Scoped to the
-   comment's own summary/body via sibling selectors — matching on
-   details.comment_right:hover would light up every ancestor of a nested
-   comment, since ancestors contain their replies. The footer sits flush
-   under the body (no margin gap), so the pointer hands off to
-   .comment_footer:hover without a dead zone. Keyboard: focusing
-   anything in the comment reveals it via :focus-within. Touch devices
-   (hover: none) keep it always visible. */
+/* Comment actions on hover-capable devices: an opacity-only overlay at
+   the right end of the summary row. Absolute positioning means the
+   reveal never participates in layout — the earlier display-toggle
+   grew/shrank comments under a traveling pointer, which made targets
+   below (e.g. "More replies") move while being aimed at. Triggers are
+   scoped to the comment's own summary/body via sibling selectors
+   (details:hover would light up every ancestor of a nested comment).
+   The --post background paints cleanly over rare wrapped summaries.
+   Keyboard: :focus-within reveals it. Touch devices (hover: none) keep
+   the footer in normal flow under the body, always visible. */
 @media (hover: hover) and (pointer: fine) {
+    .oldreddit details.comment_right {
+        position: relative;
+    }
+
     .oldreddit .comment_footer {
-        display: none;
+        position: absolute;
+        top: 8px;
+        right: 0;
+        min-height: 22px;
+        align-items: center;
+        margin: 0;
+        padding: 0 0 0 10px;
+        background: var(--post);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.12s ease 0.05s;
     }
 
     .oldreddit summary.comment_data:hover ~ .comment_footer,
@@ -2044,7 +2059,8 @@ summary.comment_data {
     .oldreddit .comment_body_filtered:hover + .comment_footer,
     .oldreddit .comment_footer:hover,
     .oldreddit details.comment_right:focus-within > .comment_footer {
-        display: flex;
+        opacity: 1;
+        pointer-events: auto;
     }
 }
 
