@@ -2015,70 +2015,60 @@ summary.comment_data {
     display: none;
 }
 
+/* Actions live in the summary row (after the meta cluster, HN-style).
+   Mobile wraps them onto a second line via flex-basis in the media
+   block; collapsed comments hide them so one-line summaries stay one
+   line. */
 .oldreddit .comment_footer {
     display: flex;
-    gap: 12px;
+    align-items: center;
+    gap: 2px;
     font-size: 10.5px;
     font-weight: 600;
-    padding: 3px 5px 4px;
+    padding: 0;
     opacity: 1;
     color: var(--or-num-quiet);
 }
 
-/* Comment actions on hover-capable devices: an opacity-only overlay at
-   the right end of the summary row. Absolute positioning means the
-   reveal never participates in layout — the earlier display-toggle
-   grew/shrank comments under a traveling pointer, which made targets
-   below (e.g. "More replies") move while being aimed at. Triggers are
-   scoped to the comment's own summary/body via sibling selectors
-   (details:hover would light up every ancestor of a nested comment).
-   The --post background paints cleanly over rare wrapped summaries.
-   Keyboard: :focus-within reveals it. Touch devices (hover: none) keep
-   the footer in normal flow under the body, always visible. */
-@media (hover: hover) and (pointer: fine) {
-    .oldreddit details.comment_right {
-        position: relative;
-    }
+.oldreddit details.comment_right:not([open]) > summary .comment_footer {
+    display: none;
+}
 
-    .oldreddit .comment_footer {
-        position: absolute;
-        top: 6px;
-        right: 10px;
-        min-height: 22px;
-        align-items: center;
-        margin: 0;
-        padding: 0 0 0 10px;
-        gap: 6px;
-        background: var(--post);
+/* Comment actions on hover-capable devices: an opacity-only reveal of
+   the in-flow actions in the summary row. They occupy reserved space
+   (horizontal reservation in an existing row shifts nothing), so the
+   reveal never changes layout — a display-toggle grew/shrank comments
+   under a traveling pointer and made targets below move while being
+   aimed at. The whole comment card is the hover surface;
+   :not(:has(...:hover)) picks the innermost hovered comment only, so
+   ancestors of a hovered reply stay quiet. Touch devices (hover: none)
+   keep the actions always visible. */
+@media (hover: hover) and (pointer: fine) {
+    .oldreddit summary.comment_data .comment_footer {
         opacity: 0;
         pointer-events: none;
         transition: opacity 0.12s ease 0.05s;
     }
 
-    /* The whole comment card is the hover surface — sibling-selector
-       triggers left dead zones (the body's 4px top margin, padding) where
-       the overlay faded out mid-approach. :not(:has(...:hover)) picks the
-       innermost hovered comment only, so ancestors of a hovered reply
-       stay quiet. */
-    .oldreddit details.comment_right:hover:not(:has(details.comment_right:hover)) > .comment_footer {
+    .oldreddit details.comment_right:hover:not(:has(details.comment_right:hover)) > summary.comment_data .comment_footer {
         opacity: 1;
         pointer-events: auto;
     }
 
     /* Separate rule: a browser without :has() drops any rule whose
        selector list contains it — keyboard access must survive that */
-    .oldreddit details.comment_right:focus-within > .comment_footer {
+    .oldreddit details.comment_right:focus-within > summary.comment_data .comment_footer {
         opacity: 1;
         pointer-events: auto;
     }
 
     /* Stale-hover latch (set by comment-collapse.js when the pointer
        leaves the window / focus is lost): browsers keep :hover stuck
-       until the next in-window mousemove, so the overlay lingered.
-       :not(:focus-within) keeps the keyboard reveal working while the
-       mouse is parked outside the window. !important because the
-       reveal selector above outranks any class-only override. */
-    .oldreddit.pointer_gone details.comment_right:not(:focus-within) > .comment_footer {
+       until the next in-window mousemove. :not(:focus-within) keeps the
+       keyboard reveal working while the mouse is parked outside the
+       window. !important because the reveal selector outranks any
+       class-only override. */
+    .oldreddit.pointer_gone details.comment_right:not(:focus-within) > summary.comment_data .comment_footer {
         opacity: 0 !important;
         pointer-events: none !important;
     }
@@ -2118,13 +2108,8 @@ summary.comment_data {
     display: none;
 }
 
-.oldreddit details.comment_right:not([open]) .collapse_children {
-    display: none;
-}
-
 /* "collapse thread" affordance, added in comment.html (top level only) */
 .oldreddit .collapse_children {
-    margin-left: auto;
     font-size: 10.5px;
     font-weight: 600;
     color: var(--or-num-quiet);
@@ -3026,10 +3011,21 @@ th {
         display: none;
     }
 
-    /* Comments: thumb-sized toggles */
+    /* Comments: thumb-sized toggles; actions wrap onto their own line
+       inside the summary (no hover on touch) */
     .oldreddit summary.comment_data {
         font-size: 12px;
         min-height: 34px;
+        flex-wrap: wrap;
+    }
+
+    .oldreddit summary.comment_data .comment_footer {
+        flex-basis: 100%;
+        gap: 8px;
+    }
+
+    .oldreddit summary.comment_data .collapse_children {
+        margin-left: auto;
     }
 
     .oldreddit summary.comment_data::before {
