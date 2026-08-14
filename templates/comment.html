@@ -30,6 +30,26 @@
 			</span>
 			{% endfor %}
 			{% endif %}
+			<!-- Actions ride the meta row (HN-style, right after the meta
+			     cluster); desktop reveals them on hover, mobile wraps them
+			     to a second line, collapsed comments hide them -->
+			<span class="comment_footer">
+				<form class="save_inline_comment" method="POST" action="/save">
+					<input type="hidden" name="post_id" value="{{ id }}">
+					<input type="hidden" name="title" value="Comment by u/{{ author.name }}">
+					<input type="hidden" name="subreddit" value="">
+					<input type="hidden" name="url" value="{{ post_link }}{{ id }}/?context=3#{{ id }}">
+					<input type="hidden" name="redirect" value="{{ post_link }}">
+					<button type="submit">save</button>
+				</form>
+				<a href="{{ post_link }}{{ id }}/?context=3#{{ id }}">permalink</a>
+				{% if parent_kind == "t1" %}
+				<a href="{{ post_link }}{{ parent_id }}/?context=3#{{ parent_id }}">parent</a>
+				{% endif %}
+				{% if parent_kind == "t3" && replies.len() > 0 %}
+				<button type="button" class="collapse_children">collapse thread</button>
+				{% endif %}
+			</span>
 			{% if replies.len() > 0 %}
 			<!-- CSS shows the count only while collapsed -->
 			<span class="comment_reply_count">{{ replies.len() }} {% if replies.len() == 1 %}reply{% else %}replies{% endif %}</span>
@@ -40,23 +60,6 @@
 		{% else %}
 		<div class="comment_body {% if highlighted %}highlighted{% endif %}">{{ body|safe }}</div>
 		{% endif %}
-		<div class="comment_footer">
-			<form class="save_inline_comment" method="POST" action="/save">
-				<input type="hidden" name="post_id" value="{{ id }}">
-				<input type="hidden" name="title" value="Comment by u/{{ author.name }}">
-				<input type="hidden" name="subreddit" value="">
-				<input type="hidden" name="url" value="{{ post_link }}{{ id }}/?context=3#{{ id }}">
-				<input type="hidden" name="redirect" value="{{ post_link }}">
-				<button type="submit">save</button>
-			</form>
-			<a href="{{ post_link }}{{ id }}/?context=3#{{ id }}">permalink</a>
-			{% if parent_kind == "t1" %}
-			<a href="{{ post_link }}{{ parent_id }}/?context=3#{{ parent_id }}">parent</a>
-			{% endif %}
-			{% if parent_kind == "t3" && replies.len() > 0 %}
-			<button type="button" class="collapse_children">collapse thread</button>
-			{% endif %}
-		</div>
 		<blockquote class="replies">{% for c in replies -%}{{ c.render().unwrap()|safe }}{%- endfor %}
 		</blockquote>
 	</details>
