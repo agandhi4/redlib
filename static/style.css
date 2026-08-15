@@ -140,9 +140,17 @@ html.fixed_navbar {
     scroll-padding-top: 50px;
 }
 
+/* Remove the double-tap-to-zoom gesture (app-like feel in the PWA)
+   without breaking pinch zoom — unlike user-scalable=no, this keeps
+   accessibility zoom intact */
+html {
+    touch-action: manipulation;
+}
+
 @media screen and (max-width: 800px) {
+    /* Nav is static on mobile (see the mobile block) — no anchor offset */
     html.fixed_navbar {
-        scroll-padding-top: 100px;
+        scroll-padding-top: 0;
     }
 }
 
@@ -2768,8 +2776,11 @@ th {
 /* Mobile */
 
 @media screen and (max-width: 800px) {
+    /* Posts first, aside (sub card + Subscribe + sidebar) after — the
+       old column-reverse only made sense when asides were hidden on
+       mobile entirely */
     main {
-        flex-direction: column-reverse;
+        flex-direction: column;
         padding: 10px;
         margin: 0 0 10px 0;
         max-width: 100%;
@@ -2807,25 +2818,25 @@ th {
         max-width: unset;
     }
 
-    aside {
-        display: none;
-    }
     #subreddit,
     #user {
         margin: 0;
         max-width: 100%;
     }
     #user { margin: 0 0 20px; }
-    
+
+    /* Mobile's persistent chrome is the bottom tab bar; a fixed top nav
+       doubles the chrome, eats viewport, and needed per-page magic
+       offsets (the nav's height varies — subreddit pages add a search
+       row) that kept burying the sort chips. The fixed_navbar pref
+       still applies on desktop; on mobile the nav scrolls away. */
+    nav.fixed_navbar {
+        position: static;
+    }
+
     body.fixed_navbar {
-        min-height: calc(100vh - 75px);
-        padding-top: 45px;
-        #subreddit { margin: 49px 0 0; }
-        #user { margin: 49px 0 20px 0; }
-        #settings { margin-top: 48px; }
-        div.post.highlighted { margin-top: 49px; }
-        main:not(:has(div + aside)) { #sort { margin-top: 49px; } }
-        #column_one:has(div.post.highlighted + #commentQueryForms) { #sort { margin-top: 0 } }
+        min-height: 100vh;
+        padding-top: 0;
     }
 
     #sidebar {
@@ -2841,6 +2852,17 @@ th {
     }
 
     /* ── Old Reddit mobile: dense cards ─────────────────────────── */
+
+    /* Aside is a normal block after the posts on mobile — the desktop
+       sticky-scroll-column treatment collapses it to zero height here */
+    .oldreddit aside {
+        position: static;
+        max-width: none;
+        min-width: 0;
+        max-height: none;
+        margin: 10px 0 0;
+        overflow-y: visible;
+    }
 
     .oldreddit #posts {
         display: flex;
