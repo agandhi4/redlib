@@ -47,6 +47,13 @@
 				<a href="/r/popular">Popular</a>
 				<a href="/r/all">All</a>
 			{% endif %}
+			{% if !crate::utils::feeds().is_empty() %}
+				<p>CUSTOM FEEDS</p>
+				{# current is the rendered sub chain, which for a feed page equals the feed's sub list #}
+				{% for feed_def in crate::utils::feeds() %}
+					<a href="/f/{{ feed_def.0 }}" {% if feed_def.1 == current %}class="selected"{% endif %}>{{ feed_def.0 }}</a>
+				{% endfor %}
+			{% endif %}
 			{% if prefs.subscriptions.len() > 0 %}
 				<p>REDDIT FEEDS</p>
 				{% for sub in prefs.subscriptions %}

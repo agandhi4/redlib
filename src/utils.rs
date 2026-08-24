@@ -981,6 +981,30 @@ pub fn setting(req: &Request<Body>, name: &str) -> String {
 	}
 }
 
+/// Instance-defined named feeds (`REDLIB_DEFAULT_FEEDS`), parsed once at startup.
+/// Format: `Name:sub1+sub2|Name2:sub3+sub4` — declaration order is display order,
+/// name is shown verbatim (matched case-insensitively in the /f/:name route).
+/// Deliberately instance config rather than a user pref: feeds reference sub names
+/// directly, so they work identically on every browser regardless of subscription
+/// cookies, and stay out of the Preferences restore/bincode surface.
+/// Used by: subreddit::feed, sub_list macro (utils.html), aside panel (subreddit.html).
+pub static FEEDS: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
+	get_setting("REDLIB_DEFAULT_FEEDS")
+		.unwrap_or_default()
+		.split('|')
+		.filter_map(|entry| {
+			let (name, subs) = entry.split_once(':')?;
+			let (name, subs) = (name.trim(), subs.trim());
+			(!name.is_empty() && !subs.is_empty()).then(|| (name.to_owned(), subs.to_owned()))
+		})
+		.collect()
+});
+
+/// Template helper: the instance's named feeds (askama can't reference statics directly).
+pub fn feeds() -> &'static Vec<(String, String)> {
+	&FEEDS
+}
+
 /// Retrieve a `+`-delimited list setting (subscriptions, filters), sorted case-insensitively.
 /// Sorting here (not just at subscribe time) covers cookies written before sorting existed
 /// or restored from a settings link — display order everywhere derives from this.
