@@ -2560,18 +2560,24 @@ input[type="submit"] {
     -moz-appearance: none;
 }
 
-#settings_subs .unsubscribe {
+/* Each row is <a> + <form><button> — the form is block-level, so without
+   flex the button wraps onto its own line. clear: the legend above is floated,
+   and flex containers can't overlap floats — without clearing, the first row
+   gets squeezed beside the full-width legend into zero width. */
+#settings_subs > div,
+#settings_filters > div {
+    display: flex;
+    align-items: center;
+    clear: left;
+    margin: 10px 0;
+}
+
+#settings_subs .unsubscribe,
+#settings_filters .unfilter {
     margin-left: 30px;
 }
 
-#settings_subs a {
-    color: var(--accent);
-}
-
-#settings_filters .unsubscribe {
-    margin-left: 30px;
-}
-
+#settings_subs a,
 #settings_filters a {
     color: var(--accent);
 }

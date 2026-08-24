@@ -724,8 +724,8 @@ impl Preferences {
 			disable_visit_reddit_confirmation: setting(req, "disable_visit_reddit_confirmation"),
 			comment_sort: setting(req, "comment_sort"),
 			post_sort: setting(req, "post_sort"),
-			subscriptions: setting(req, "subscriptions").split('+').map(String::from).filter(|s| !s.is_empty()).collect(),
-			filters: setting(req, "filters").split('+').map(String::from).filter(|s| !s.is_empty()).collect(),
+			subscriptions: setting_list(req, "subscriptions"),
+			filters: setting_list(req, "filters"),
 			hide_awards: setting(req, "hide_awards"),
 			hide_score: setting(req, "hide_score"),
 			remove_default_feeds: setting(req, "remove_default_feeds"),
@@ -979,6 +979,15 @@ pub fn setting(req: &Request<Body>, name: &str) -> String {
 			.value()
 			.to_string()
 	}
+}
+
+/// Retrieve a `+`-delimited list setting (subscriptions, filters), sorted case-insensitively.
+/// Sorting here (not just at subscribe time) covers cookies written before sorting existed
+/// or restored from a settings link — display order everywhere derives from this.
+pub fn setting_list(req: &Request<Body>, name: &str) -> Vec<String> {
+	let mut list: Vec<String> = setting(req, name).split('+').map(String::from).filter(|s| !s.is_empty()).collect();
+	list.sort_by_key(|s| s.to_lowercase());
+	list
 }
 
 /// Retrieve the value of a setting by name or the default value
