@@ -42,6 +42,7 @@ Hacker News is the readability benchmark: one continuous surface, whispered meta
 - Hover/touch prefetch (`prefetch.js`) warms the server JSON cache.
 - Transient proxy failures retried (3 attempts); brotli q5 on all compressible responses; static JS served with 14-day cache headers behind `?v=` versioned URLs (`sw.js` deliberately excluded).
 - Subscriptions sidebar on front-page/popular/all/multireddit views; sidebar panels open by default; sub icon/title/name link back to the subreddit.
+- Named feeds (v0.40.0): `REDLIB_DEFAULT_FEEDS=Name:sub1+sub2|Name2:...` defines instance-level multireddits served at `/f/:name` (case-insensitive). Listed in the Feeds dropdown ("CUSTOM FEEDS") and in a "Feeds" aside panel on front-page/feed views. Instance config by design, not a user pref — feeds reference sub names directly, so they're identical on every browser regardless of subscription cookies, and stay out of the settings-restore surface. Resolution lives in `utils::FEEDS` + `subreddit::feed` (a param rewrite in front of `community()` — no separate render path).
 
 ## Operational notes
 

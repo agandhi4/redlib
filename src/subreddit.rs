@@ -1,7 +1,8 @@
 #![allow(clippy::cmp_owned)]
 
 use crate::utils::{
-	Post, Preferences, Subreddit, catch_random, error, filter_posts, format_num, format_url, get_filters, info, nsfw_landing, param, redirect, rewrite_urls, setting, template, to_absolute_url, val
+	FEEDS, Post, Preferences, Subreddit, catch_random, error, filter_posts, format_num, format_url, get_filters, info, nsfw_landing, param, redirect, rewrite_urls, setting, template,
+	to_absolute_url, val,
 };
 use crate::{client::json, server::RequestExt, server::ResponseExt};
 use crate::{config, utils};
@@ -35,6 +36,9 @@ struct SubredditTemplate {
 	/// Whether all posts were hidden because they are NSFW (and user has disabled show NSFW)
 	all_posts_hidden_nsfw: bool,
 	no_posts: bool,
+	/// Set when rendering a named feed (/f/:name) — keeps sort links rooted at
+	/// /f/:name instead of the raw /r/a+b+c chain. Display name from FEEDS.
+	feed: Option<String>,
 }
 
 #[derive(Template)]
@@ -60,9 +64,29 @@ struct WallTemplate {
 static GEO_FILTER_MATCH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"geo_filter=(?<region>\w+)").unwrap());
 
 // SERVICES
+
+/// Named feed (/f/:name): resolve the instance-configured sub list (FEEDS) and
+/// render it as a multireddit via community(), injecting the chain as the "sub"
+/// param and the display name as "feed" so the page keeps its /f/ identity.
+pub async fn feed(req: Request<Body>) -> Result<Response<Body>, String> {
+	let name = req.param("name").unwrap_or_default();
+	match FEEDS.iter().find(|(feed_name, _)| feed_name.eq_ignore_ascii_case(&name)) {
+		Some((feed_name, subs)) => {
+			let mut req = req;
+			let mut params = req.params();
+			params.insert("sub".to_string(), subs.clone());
+			params.insert("feed".to_string(), feed_name.clone());
+			req.set_params(params);
+			community(req).await
+		}
+		None => error(req, &format!("Feed \"{name}\" is not configured on this instance (REDLIB_DEFAULT_FEEDS)")).await,
+	}
+}
+
 pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 	// Build Reddit API path
 	let root = req.uri().path() == "/";
+	let feed = req.param("feed");
 	let query = req.uri().query().unwrap_or_default().to_string();
 	let subscribed = setting(&req, "subscriptions");
 	let front_page = setting(&req, "front_page");
@@ -105,8 +129,9 @@ pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 		return Ok(redirect(&["/user/", &sub_name[2..]].concat()));
 	}
 
-	// Request subreddit metadata
-	let sub = if !sub_name.contains('+') && sub_name != subscribed && sub_name != "popular" && sub_name != "all" {
+	// Request subreddit metadata (feed pages always render as multireddits,
+	// even when the configured chain is a single sub)
+	let sub = if feed.is_none() && !sub_name.contains('+') && sub_name != subscribed && sub_name != "popular" && sub_name != "all" {
 		// Regular subreddit
 		subreddit(&sub_name, quarantined).await.unwrap_or_default()
 	} else if sub_name == subscribed {
@@ -117,9 +142,10 @@ pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 			Subreddit::default()
 		}
 	} else {
-		// Multireddit, all, popular
+		// Multireddit, all, popular — a named feed titles the page with its name
 		Subreddit {
 			name: sub_name.clone(),
+			title: feed.clone().unwrap_or_default(),
 			..Subreddit::default()
 		}
 	};
@@ -159,6 +185,7 @@ pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 			all_posts_filtered: false,
 			all_posts_hidden_nsfw: false,
 			no_posts: false,
+			feed,
 		}))
 	} else {
 		match Post::fetch(&path, quarantined).await {
@@ -182,6 +209,7 @@ pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 					all_posts_filtered,
 					all_posts_hidden_nsfw,
 					no_posts,
+					feed,
 				}))
 			}
 			Err(msg) => match msg.as_str() {

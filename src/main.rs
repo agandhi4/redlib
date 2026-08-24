@@ -308,6 +308,10 @@ async fn main() {
 	// RSS Subscriptions
 	app.at("/r/:sub.rss").get(|r| subreddit::rss(r).boxed());
 
+	// Named feeds (instance-defined multireddits, REDLIB_DEFAULT_FEEDS)
+	app.at("/f/:name").get(|r| subreddit::feed(r).boxed());
+	app.at("/f/:name/:sort").get(|r| subreddit::feed(r).boxed());
+
 	// Subreddit services
 	app
 		.at("/r/:sub")
