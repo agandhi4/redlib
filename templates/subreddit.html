@@ -169,8 +169,23 @@
 				</ul>
 			</details>
 			{% endif %}
+			{% match feed %}
+			{% when Some with (feed_name) %}
+			{# On a feed page, sub.name is the feed's raw sub chain — list its members
+			   so the aside reflects what this feed is built from #}
+			<details class="panel" id="feed_members" open>
+				<summary id="feed_members_label">In {{ feed_name }}</summary>
+				<ul id="feed_members_list">
+					{% for member in sub.name.split('+') %}
+					<li><a href="/r/{{ member }}">r/{{ member }}</a></li>
+					{% endfor %}
+				</ul>
+			</details>
+			{% when None %}
+			{% endmatch %}
 			{% if !prefs.subscriptions.is_empty() %}
-			<details class="panel" id="subscriptions" open>
+			{# Collapsed on feed pages so the feed's own members lead #}
+			<details class="panel" id="subscriptions" {% if feed.is_none() %}open{% endif %}>
 				<summary id="subscriptions_label">Subscriptions</summary>
 				<ul id="subscriptions_list">
 					{% for sub_name in prefs.subscriptions %}
