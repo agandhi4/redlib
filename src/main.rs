@@ -14,7 +14,6 @@ use redlib::server::{self, RequestExt};
 use redlib::utils::{error, redirect, ThemeAssets};
 use redlib::{config, db, duplicates, headers, instance_info, post, search, settings, subreddit, user};
 
-
 // Create Services
 
 // Required for the manifest to be valid
@@ -256,7 +255,9 @@ async fn main() {
 		.at("/check_update.js")
 		.get(|_| resource(include_str!("../static/check_update.js"), "text/javascript", true).boxed());
 	app.at("/copy.js").get(|_| resource(include_str!("../static/copy.js"), "text/javascript", true).boxed());
-	app.at("/prefetch.js").get(|_| resource(include_str!("../static/prefetch.js"), "text/javascript", true).boxed());
+	app
+		.at("/prefetch.js")
+		.get(|_| resource(include_str!("../static/prefetch.js"), "text/javascript", true).boxed());
 	app
 		.at("/comment-collapse.js")
 		.get(|_| resource(include_str!("../static/comment-collapse.js"), "text/javascript", true).boxed());

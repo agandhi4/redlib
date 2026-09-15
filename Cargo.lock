@@ -673,15 +673,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fake_user_agent"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b525286f3f8402e322df2beaa7328503acdd1ba176985ff854759899c3e9e65f"
-dependencies = [
- "fastrand",
-]
-
-[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1696,7 +1687,7 @@ dependencies = [
 
 [[package]]
 name = "redlib"
-version = "0.40.2"
+version = "0.40.3"
 dependencies = [
  "arc-swap",
  "askama",
@@ -1711,7 +1702,6 @@ dependencies = [
  "clap",
  "cookie",
  "dotenvy",
- "fake_user_agent",
  "fastrand",
  "futures-lite",
  "htmlescape",

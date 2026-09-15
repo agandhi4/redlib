@@ -1,9 +1,9 @@
 #![allow(clippy::cmp_owned)]
 use crate::client::json;
 use crate::config::get_setting;
+use crate::db;
 use crate::server::RequestExt;
 use crate::subreddit::{can_access_quarantine, quarantine};
-use crate::db;
 use crate::utils::{
 	error, format_num, get_filters, nsfw_landing, param, parse_post, redirect, rewrite_emotes, setting, template, time, val, Author, Awards, Comment, Flair, FlairPart, Post,
 	Preferences, Subreddit,
@@ -49,20 +49,12 @@ static RENDERED_POST_CACHE: LazyLock<Mutex<TimedSizedCache<String, String>>> =
 	LazyLock::new(|| Mutex::new(TimedSizedCache::with_size_and_lifespan(20, std::time::Duration::from_secs(30))));
 
 fn html_response(html: String) -> Response<Body> {
-	Response::builder()
-		.status(200)
-		.header("content-type", "text/html")
-		.body(html.into())
-		.unwrap_or_default()
+	Response::builder().status(200).header("content-type", "text/html").body(html.into()).unwrap_or_default()
 }
 
 pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 	// Serve a recently rendered copy if one exists (see RENDERED_POST_CACHE)
-	let cache_key = format!(
-		"{}|{}",
-		req.uri(),
-		req.headers().get("cookie").and_then(|c| c.to_str().ok()).unwrap_or_default()
-	);
+	let cache_key = format!("{}|{}", req.uri(), req.headers().get("cookie").and_then(|c| c.to_str().ok()).unwrap_or_default());
 	if let Some(html) = RENDERED_POST_CACHE.lock().unwrap().cache_get(&cache_key).cloned() {
 		return Ok(html_response(html));
 	}

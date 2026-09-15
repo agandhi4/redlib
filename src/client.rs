@@ -1,5 +1,5 @@
 use crate::dbg_msg;
-use crate::oauth::{force_refresh_token, token_daemon, Oauth, OauthBackendImpl};
+use crate::oauth::{force_refresh_token, token_daemon, Oauth};
 use crate::server::RequestExt;
 use crate::utils::{format_url, Post};
 use arc_swap::ArcSwap;
@@ -491,12 +491,6 @@ async fn self_check(sub: &str) -> Result<(), String> {
 }
 
 pub async fn rate_limit_check() -> Result<(), String> {
-	// First, test the Oauth client: we can perform a rate limit check if the OAuth backend is MobileSpoof; if GenericWeb, we skip the check.
-	if matches!(oauth_client().load().backend, OauthBackendImpl::GenericWeb(_)) {
-		warn!("[⚠️] Cannot perform rate limit check, running as GenericWeb. Skipping check.");
-		return Ok(());
-	}
-
 	// First, check a subreddit.
 	self_check("reddit").await?;
 	// This will reduce the rate limit to 99. Assert this check.
@@ -555,6 +549,9 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_rate_limit_check() {
 		init_oauth_client().await;
+		// The check asserts a fresh token's budget (99); other tests in this process share the
+		// client and have already spent some, so refresh first — matches main's ordering.
+		force_refresh_token().await;
 		rate_limit_check().await.unwrap();
 	}
 
@@ -567,6 +564,7 @@ mod tests {
 
 			// check rate limit
 			init_oauth_client().await;
+			force_refresh_token().await;
 			rate_limit_check().await.unwrap();
 		});
 	}

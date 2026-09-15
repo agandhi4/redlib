@@ -3,9 +3,5 @@
 // Please do not edit manually
 // Filled in with real app versions
 pub const _IOS_APP_VERSION_LIST: &[&str; 1] = &[""];
-pub const ANDROID_APP_VERSION_LIST: &[&str; 3] = &[
-	"Version 2026.28.0/Build 2628061",
-	"Version 2026.29.0/Build 2629001",
-	"Version 2026.30.0/Build 2630060",
-];
+pub const ANDROID_APP_VERSION_LIST: &[&str; 3] = &["Version 2026.28.0/Build 2628061", "Version 2026.29.0/Build 2629001", "Version 2026.30.0/Build 2630060"];
 pub const _IOS_OS_VERSION_LIST: &[&str; 1] = &[""];
