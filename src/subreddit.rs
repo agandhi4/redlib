@@ -129,33 +129,29 @@ pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 		return Ok(redirect(&["/user/", &sub_name[2..]].concat()));
 	}
 
-	// Request subreddit metadata (feed pages always render as multireddits,
-	// even when the configured chain is a single sub)
-	let sub = if feed.is_none() && !sub_name.contains('+') && sub_name != subscribed && sub_name != "popular" && sub_name != "all" {
-		// Regular subreddit
-		subreddit(&sub_name, quarantined).await.unwrap_or_default()
-	} else if sub_name == subscribed {
-		// Subscription feed
-		if req.uri().path().starts_with("/r/") {
+	// Subreddit metadata and the post listing are independent Reddit calls, so they run
+	// concurrently: one upstream round-trip per cache-cold page instead of two. Feed pages
+	// always render as multireddits, even when the configured chain is a single sub.
+	let metadata = async {
+		if feed.is_none() && !sub_name.contains('+') && sub_name != subscribed && sub_name != "popular" && sub_name != "all" {
+			// Regular subreddit
 			subreddit(&sub_name, quarantined).await.unwrap_or_default()
+		} else if sub_name == subscribed {
+			// Subscription feed
+			if req.uri().path().starts_with("/r/") {
+				subreddit(&sub_name, quarantined).await.unwrap_or_default()
+			} else {
+				Subreddit::default()
+			}
 		} else {
-			Subreddit::default()
-		}
-	} else {
-		// Multireddit, all, popular — a named feed titles the page with its name
-		Subreddit {
-			name: sub_name.clone(),
-			title: feed.clone().unwrap_or_default(),
-			..Subreddit::default()
+			// Multireddit, all, popular — a named feed titles the page with its name
+			Subreddit {
+				name: sub_name.clone(),
+				title: feed.clone().unwrap_or_default(),
+				..Subreddit::default()
+			}
 		}
 	};
-
-	let req_url = req.uri().to_string();
-	// Return landing page if this post if this is NSFW community but the user
-	// has disabled the display of NSFW content or if the instance is SFW-only.
-	if sub.nsfw && crate::utils::should_be_nsfw_gated(&req, &req_url) {
-		return Ok(nsfw_landing(req, req_url).await.unwrap_or_default());
-	}
 
 	let mut params = String::from("&raw_json=1");
 	if sub_name == "popular" {
@@ -172,8 +168,27 @@ pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 	let filters = get_filters(&req);
 
 	// If all requested subs are filtered, we don't need to fetch posts.
-	if sub_name.split('+').all(|s| filters.contains(s)) {
-		Ok(template(&SubredditTemplate {
+	let is_filtered = sub_name.split('+').all(|s| filters.contains(s));
+	let listing = async {
+		if is_filtered {
+			None
+		} else {
+			Some(Post::fetch(&path, quarantined).await)
+		}
+	};
+
+	let (sub, listing) = tokio::join!(metadata, listing);
+
+	let req_url = req.uri().to_string();
+	// Return landing page if this is an NSFW community but the user has disabled the
+	// display of NSFW content or if the instance is SFW-only. (The listing was already
+	// fetched alongside the metadata; that one wasted request is the price of the join.)
+	if sub.nsfw && crate::utils::should_be_nsfw_gated(&req, &req_url) {
+		return Ok(nsfw_landing(req, req_url).await.unwrap_or_default());
+	}
+
+	match listing {
+		None => Ok(template(&SubredditTemplate {
 			sub,
 			posts: Vec::new(),
 			sort: (sort, param(&path, "t").unwrap_or_default()),
@@ -186,39 +201,36 @@ pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 			all_posts_hidden_nsfw: false,
 			no_posts: false,
 			feed,
-		}))
-	} else {
-		match Post::fetch(&path, quarantined).await {
-			Ok((mut posts, after)) => {
-				let (_, all_posts_filtered) = filter_posts(&mut posts, &filters);
-				let no_posts = posts.is_empty();
-				let all_posts_hidden_nsfw = !no_posts && (posts.iter().all(|p| p.flags.nsfw) && setting(&req, "show_nsfw") != "on");
-				if sort == "new" {
-					posts.sort_by_key(|post| std::cmp::Reverse(post.created_ts));
-					posts.sort_by_key(|post| std::cmp::Reverse(post.flags.stickied));
-				}
-				Ok(template(&SubredditTemplate {
-					sub,
-					posts,
-					sort: (sort, param(&path, "t").unwrap_or_default()),
-					ends: (param(&path, "after").unwrap_or_default(), after),
-					prefs: Preferences::new(&req),
-					url,
-					redirect_url,
-					is_filtered: false,
-					all_posts_filtered,
-					all_posts_hidden_nsfw,
-					no_posts,
-					feed,
-				}))
+		})),
+		Some(Ok((mut posts, after))) => {
+			let (_, all_posts_filtered) = filter_posts(&mut posts, &filters);
+			let no_posts = posts.is_empty();
+			let all_posts_hidden_nsfw = !no_posts && (posts.iter().all(|p| p.flags.nsfw) && setting(&req, "show_nsfw") != "on");
+			if sort == "new" {
+				posts.sort_by_key(|post| std::cmp::Reverse(post.created_ts));
+				posts.sort_by_key(|post| std::cmp::Reverse(post.flags.stickied));
 			}
-			Err(msg) => match msg.as_str() {
-				"quarantined" | "gated" => Ok(quarantine(&req, sub_name, &msg)),
-				"private" => error(req, &format!("r/{sub_name} is a private community")).await,
-				"banned" => error(req, &format!("r/{sub_name} has been banned from Reddit")).await,
-				_ => error(req, &msg).await,
-			},
+			Ok(template(&SubredditTemplate {
+				sub,
+				posts,
+				sort: (sort, param(&path, "t").unwrap_or_default()),
+				ends: (param(&path, "after").unwrap_or_default(), after),
+				prefs: Preferences::new(&req),
+				url,
+				redirect_url,
+				is_filtered: false,
+				all_posts_filtered,
+				all_posts_hidden_nsfw,
+				no_posts,
+				feed,
+			}))
 		}
+		Some(Err(msg)) => match msg.as_str() {
+			"quarantined" | "gated" => Ok(quarantine(&req, sub_name, &msg)),
+			"private" => error(req, &format!("r/{sub_name} is a private community")).await,
+			"banned" => error(req, &format!("r/{sub_name} has been banned from Reddit")).await,
+			_ => error(req, &msg).await,
+		},
 	}
 }
 

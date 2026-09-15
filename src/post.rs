@@ -85,8 +85,10 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 	let single_thread = req.param("comment_id").is_some();
 	let highlighted_comment = &req.param("comment_id").unwrap_or_default();
 
-	// Send a request to the url, receive JSON in response
-	match json(path, quarantined).await {
+	// The thread JSON and the subreddit sidebar are independent Reddit calls; fetch them
+	// concurrently so a cache-cold post page costs one round-trip, not two.
+	let (response, sidebar) = tokio::join!(json(path, quarantined), crate::subreddit::subreddit(&sub, quarantined));
+	match response {
 		// Otherwise, grab the JSON output from the request
 		Ok(response) => {
 			// Parse the JSON into Post and Comment structs
@@ -114,8 +116,7 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 				_ => query_comments(&response[1], &post.permalink, &post.author.name, highlighted_comment, &get_filters(&req), &query, &req),
 			};
 
-			// Fetch subreddit sidebar data
-			let sub_data = crate::subreddit::subreddit(&sub, quarantined).await.unwrap_or_default();
+			let sub_data = sidebar.unwrap_or_default();
 
 			// Record visit and check saved status
 			db::record_visit(&post.id, &post.title, &post.community, &post.permalink);

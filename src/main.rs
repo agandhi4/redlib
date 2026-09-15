@@ -22,6 +22,7 @@ async fn pwa_logo() -> Result<Response<Body>, String> {
 		Response::builder()
 			.status(200)
 			.header("content-type", "image/png")
+			.header("Cache-Control", "public, max-age=1209600, s-maxage=86400")
 			.body(include_bytes!("../static/logo.png").as_ref().into())
 			.unwrap_or_default(),
 	)
@@ -33,6 +34,7 @@ async fn iphone_logo() -> Result<Response<Body>, String> {
 		Response::builder()
 			.status(200)
 			.header("content-type", "image/png")
+			.header("Cache-Control", "public, max-age=1209600, s-maxage=86400")
 			.body(include_bytes!("../static/apple-touch-icon.png").as_ref().into())
 			.unwrap_or_default(),
 	)
