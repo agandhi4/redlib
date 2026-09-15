@@ -3,7 +3,7 @@
 > An alternative private front-end to Reddit, with its origins in [Libreddit](https://github.com/libreddit/libreddit).
 
 > [!NOTE]
-> **This is a personal fork**, heavily customized for a single self-hosted instance. Major divergences from upstream: a single dense "utility broadsheet" layout (system fonts, `color-mix()` design tokens), 8 curated WCAG-tuned themes including a Hacker News-inspired default, HN-grade comment ergonomics (depth ramp, hover actions, collapse controls), a mobile tab bar, offline reading via service worker, server-side saved posts, and a rendered-HTML cache. **See [`docs/fork.md`](docs/fork.md) for the full list**, and `CLAUDE.md` for architecture and conventions. Upstream docs below remain accurate for deployment and configuration.
+> **This is a personal fork**, heavily customized for a single self-hosted instance. Major divergences from upstream: a single dense "utility broadsheet" layout (system fonts, `color-mix()` design tokens), 8 curated WCAG-tuned themes including a Hacker News-inspired default, HN-grade comment ergonomics (depth ramp, hover actions, collapse controls), a mobile tab bar, offline reading via service worker, server-side saved posts, a rendered-HTML cache, a stale-while-revalidate Reddit cache with idle prefetch of the posts you're likely to open next, concurrent upstream fetches, and an async OAuth bootstrap that can't wedge on a bad network. **See [`docs/fork.md`](docs/fork.md) for the full list**, and `CLAUDE.md` for architecture and conventions. Upstream docs below remain accurate for deployment and configuration.
 
 ![screenshot](https://i.ibb.co/18vrdxk/redlib-rust.png)
 
