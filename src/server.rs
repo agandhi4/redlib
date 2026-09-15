@@ -690,7 +690,7 @@ async fn compress_response(req_headers: &HeaderMap<header::HeaderValue>, res: &m
 
 // I've chosen a TTL of 600 (== 10 minutes) since compression is
 // computationally expensive and we don't want to be doing it often. This is
-// larger than client::json's TTL, but that's okay, because if client::json
+// larger than client::json's fresh window, but that's okay, because if client::json
 // returns a new serde_json::Value, body_bytes changes, so this function will
 // execute again.
 #[cached(size = 100, time = 600, result = true)]

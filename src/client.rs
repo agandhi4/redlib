@@ -4,15 +4,18 @@ use crate::server::RequestExt;
 use crate::utils::{format_url, Post};
 use arc_swap::ArcSwap;
 use cached::proc_macro::cached;
+use cached::{Cached, TimedSizedCache};
 use futures_lite::{future::Boxed, FutureExt};
 use hyper::{body::Buf, header, Body, Request as HyperRequest, Response as HyperResponse};
-use log::{error, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use percent_encoding::{percent_encode, CONTROLS};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::result::Result;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU16};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::OnceCell;
 use wreq::redirect::Policy;
 use wreq::{header as wreq_header, Client as WreqClient, EmulationFactory, Method, Response as WreqResponse};
@@ -359,9 +362,56 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 	.boxed()
 }
 
-/// Make a request to a Reddit API and parse the JSON response
-#[cached(size = 100, time = 30, result = true)]
+// Reddit JSON cache with stale-while-revalidate. A hit younger than JSON_FRESH is served
+// as-is; one older than that (up to JSON_STALE_MAX) is served immediately while a single
+// background refresh replaces it, so revisiting a sub or thread within a few minutes never
+// waits on Reddit. Only Ok results are cached. Values are cloned on hit, as the old
+// `#[cached]` macro did. Worst case ~100 thread JSONs (~1MB each) resident for 5 minutes.
+const JSON_FRESH: Duration = Duration::from_secs(30);
+const JSON_STALE_MAX: Duration = Duration::from_secs(300);
+type JsonKey = (String, bool);
+static JSON_CACHE: LazyLock<Mutex<TimedSizedCache<JsonKey, (Instant, Value)>>> = LazyLock::new(|| Mutex::new(TimedSizedCache::with_size_and_lifespan(100, JSON_STALE_MAX)));
+// Keys with a background refresh in flight, so a burst of stale hits spawns one fetch.
+static JSON_REFRESHING: LazyLock<Mutex<HashSet<JsonKey>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Make a request to a Reddit API and parse the JSON response, through the
+/// stale-while-revalidate cache above.
 pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
+	let key: JsonKey = (path, quarantine);
+	let hit = JSON_CACHE.lock().unwrap().cache_get(&key).cloned();
+	if let Some((fetched_at, value)) = hit {
+		let age = fetched_at.elapsed();
+		if age > JSON_FRESH {
+			debug!("Serving stale JSON ({}s old) and refreshing: {}", age.as_secs(), key.0);
+			spawn_json_refresh(key);
+		}
+		return Ok(value);
+	}
+	// Cold misses are not single-flighted: two simultaneous first requests for one key both
+	// go upstream. Rare for one user, and the cost is a duplicate request, not a wrong answer.
+	let value = fetch_json(key.0.clone(), quarantine).await?;
+	JSON_CACHE.lock().unwrap().cache_set(key, (Instant::now(), value.clone()));
+	Ok(value)
+}
+
+fn spawn_json_refresh(key: JsonKey) {
+	if !JSON_REFRESHING.lock().unwrap().insert(key.clone()) {
+		return;
+	}
+	tokio::spawn(async move {
+		match fetch_json(key.0.clone(), key.1).await {
+			Ok(value) => {
+				JSON_CACHE.lock().unwrap().cache_set(key.clone(), (Instant::now(), value));
+			}
+			// Keep serving the stale copy; it ages out at JSON_STALE_MAX on its own.
+			Err(e) => warn!("Background JSON refresh failed for {}: {e}", key.0),
+		}
+		JSON_REFRESHING.lock().unwrap().remove(&key);
+	});
+}
+
+/// Fetch and parse one Reddit JSON document. Uncached; every caller goes through `json()`.
+async fn fetch_json(path: String, quarantine: bool) -> Result<Value, String> {
 	// Closure to quickly build errors
 	let err = |msg: &str, e: String, path: String| -> Result<Value, String> {
 		// eprintln!("{} - {}: {}", url, msg, e);

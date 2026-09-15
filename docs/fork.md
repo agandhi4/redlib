@@ -49,6 +49,8 @@ Hacker News is the readability benchmark: one continuous surface, whispered meta
 
 - Concurrent upstream fetches (v0.41.0): a subreddit page's `about.json` + listing, and a post page's thread JSON + sidebar, are `tokio::join!`ed instead of awaited back to back, so a cache-cold page costs one Reddit round-trip. Measured on the instance before the change: r/rust cold TTFB 0.68s vs 0.41s for single-fetch pages. Cost: an NSFW-gated sub or post, or a failed thread fetch, now also wastes the paired request. HLS scripts are `defer`red (412KB no longer parser-blocking on video posts); PWA icons get the 14-day cache header; the SW's versioned CSS/JS cache is capped at 20 entries like the page and media caches.
 
+- Stale-while-revalidate JSON cache + idle prefetch (v0.42.0): `client::json` serves a cached Reddit response as-is for 30s, then for up to 5 minutes serves it immediately while one background task refreshes it (`JSON_REFRESHING` dedupes). Revisits within that window never wait on Reddit; the copy is at most one visit stale. `prefetch.js` adds an idle-time pass on listing pages: first 3 posts by position, top 3 by comment count, and the next page, 400ms apart, so the likely next click is already warm. Roughly 7 extra upstream requests per listing view, against a per-token budget of ~100 that the client already rolls over.
+
 ## Operational notes
 
 Deploy chain: push to `main` → GHCR image build (`cargo build --locked` — keep `Cargo.lock` synced with every version bump) → manual NAS pull → verify version in the `reddit.box/settings` footer. Instance defaults (theme, subscriptions) are env vars in the NAS compose file.
