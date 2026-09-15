@@ -54,13 +54,8 @@ pub fn record_visit(post_id: &str, title: &str, subreddit: &str, url: &str) {
 pub fn visited_ids() -> std::collections::HashSet<String> {
 	let cutoff = now() - (7 * 24 * 60 * 60);
 	let db = DB.lock().unwrap();
-	let mut stmt = db
-		.prepare("SELECT post_id FROM reading_history WHERE visited_at > ?1")
-		.unwrap();
-	stmt.query_map(params![cutoff], |row| row.get(0))
-		.unwrap()
-		.filter_map(|r| r.ok())
-		.collect()
+	let mut stmt = db.prepare("SELECT post_id FROM reading_history WHERE visited_at > ?1").unwrap();
+	stmt.query_map(params![cutoff], |row| row.get(0)).unwrap().filter_map(|r| r.ok()).collect()
 }
 
 /// Save a post/thread.
@@ -87,8 +82,7 @@ pub fn unsave_item(post_id: &str) {
 /// Check if a post is saved.
 pub fn is_saved(post_id: &str) -> bool {
 	let db = DB.lock().unwrap();
-	db.query_row("SELECT 1 FROM saved_items WHERE post_id = ?1", params![post_id], |_| Ok(()))
-		.is_ok()
+	db.query_row("SELECT 1 FROM saved_items WHERE post_id = ?1", params![post_id], |_| Ok(())).is_ok()
 }
 
 /// A saved item returned from the database.
@@ -153,10 +147,7 @@ pub fn cleanup_history() {
 }
 
 fn now() -> i64 {
-	std::time::SystemTime::now()
-		.duration_since(std::time::UNIX_EPOCH)
-		.unwrap()
-		.as_secs() as i64
+	std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
 fn format_timestamp(ts: i64) -> String {

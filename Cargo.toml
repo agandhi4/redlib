@@ -3,7 +3,7 @@ name = "redlib"
 description = " Alternative private front-end to Reddit"
 license = "AGPL-3.0-only"
 repository = "https://github.com/redlib-org/redlib"
-version = "0.40.2"
+version = "0.40.3"
 authors = [
     "Matthew Esposito <matt+cargo@matthew.science>",
     "spikecodes <19519553+spikecodes@users.noreply.github.com>",
@@ -59,7 +59,6 @@ htmlescape = "0.3.1"
 bincode = "1.3.3"
 base2048 = "2.0.2"
 revision = "0.17.0"
-fake_user_agent = "0.2.2"
 wreq = { version = "6.0.0-rc.28", features = ["brotli", "gzip", "deflate", "zstd", "json", "stream", "socks"] }
 wreq-util = { version = "3.0.0-rc.10" }
 

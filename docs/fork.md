@@ -45,6 +45,7 @@ Hacker News is the readability benchmark: one continuous surface, whispered meta
 - Named feeds (v0.40.0): `REDLIB_DEFAULT_FEEDS=Name:sub1+sub2|Name2:...` defines instance-level multireddits served at `/f/:name` (case-insensitive). Listed in the Feeds dropdown ("CUSTOM FEEDS") and in a "Feeds" aside panel on front-page/feed views. Instance config by design, not a user pref — feeds reference sub names directly, so they're identical on every browser regardless of subscription cookies, and stay out of the settings-restore surface. Resolution lives in `utils::FEEDS` + `subreddit::feed` (a param rewrite in front of `community()` — no separate render path).
 
 - OAuth bootstrap is explicitly async (v0.40.2): `client::init_oauth_client()` runs in `main` before the rate-limit check, replacing upstream's `LazyLock` + `futures_lite::block_on` initializer. The nested foreign executor inside tokio never resets the cooperative budget, so on a degraded network the main thread could spin at 100% CPU before the listener ever opened — the Sept 2026 ten-day outage. Use sites read `client::oauth_client()`; tests call the init explicitly.
+- GenericWebAuth fallback removed (v0.40.3): Reddit returns 401 to the hardcoded web client id it sends (verified with curl; upstream `main` ships the same id), so the "fall back after 5 mobile failures" branch could never succeed and its test failed on every run. Bootstrap is MobileSpoof only, 10 attempts, then exit for the restart policy. Re-add from upstream if they ever ship a working credential.
 
 ## Operational notes
 
