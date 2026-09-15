@@ -3,7 +3,7 @@
 //
 // Bump SW_VERSION on any policy or precache change: the byte-diff
 // triggers SW reinstall, which is the only thing that refreshes caches.
-const SW_VERSION = "redlib-v4";
+const SW_VERSION = "redlib-v5";
 const STATIC_CACHE = SW_VERSION + "-static";
 const PAGE_CACHE = SW_VERSION + "-pages";
 const MEDIA_CACHE = SW_VERSION + "-media";
@@ -23,6 +23,9 @@ const STATIC_ASSETS = [
 // front approximates FIFO.
 const PAGE_LIMIT = 100;
 const MEDIA_LIMIT = 300;
+// CSS/JS are versioned URLs (?v=crate version), so each deploy adds a fresh set and the
+// old ones are dead weight. ~10 assets per version; keep two versions' worth.
+const ASSET_LIMIT = 20;
 
 // Image proxy routes worth keeping offline. /vid and /hls are video
 // streams (range requests) — never cached.
@@ -133,8 +136,7 @@ self.addEventListener("fetch", (event) => {
               stamped(res).then((copy) => prunedPut(PAGE_CACHE, request, copy, PAGE_LIMIT))
             );
           } else if (type.includes("text/css") || type.includes("javascript")) {
-            const copy = res.clone();
-            event.waitUntil(caches.open(ASSET_CACHE).then((c) => c.put(request, copy)));
+            event.waitUntil(prunedPut(ASSET_CACHE, request, res.clone(), ASSET_LIMIT));
           }
         }
         return res;
