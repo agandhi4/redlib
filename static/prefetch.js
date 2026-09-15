@@ -1,7 +1,11 @@
-// Hover/touch prefetch: a GET for an internal page warms redlib's 30s
-// server-side JSON cache, so the real navigation skips the Reddit round
-// trip (~350ms -> ~40ms). The response body is discarded — this is purely
-// a server-side cache warmer, not a browser cache play.
+// Prefetch: a GET for an internal page warms redlib's server-side JSON
+// cache (fresh 30s, then stale-while-revalidate for 5 min), so the real
+// navigation skips the Reddit round trip (~350ms -> ~40ms). The response
+// body is discarded — this is a server-side cache warmer, not a browser
+// cache play (the service worker does keep the HTML for offline).
+//
+// Two triggers: hover/touch intent on any link, and an idle-time pass on
+// listing pages for the posts most likely to be opened next.
 (function () {
 	"use strict";
 
@@ -48,4 +52,43 @@
 		var a = e.target.closest && e.target.closest("a");
 		if (eligible(a)) prefetch(a);
 	}, { passive: true });
+
+	// Idle warm on listing pages: the first few posts by position, the most
+	// commented posts, and the next page. Staggered so the server (and
+	// Reddit's per-token budget) sees a trickle, not a burst; abandoned if
+	// the tab is hidden. Each `.post` carries `a.post_comments` whose title
+	// is "<n> comments" with the untruncated count.
+	var IDLE_BY_POSITION = 3;
+	var IDLE_BY_COMMENTS = 3;
+	var IDLE_STAGGER_MS = 400;
+
+	function idleWarm() {
+		var posts = document.querySelectorAll(".post:not(.highlighted)");
+		if (posts.length < 2) return; // a thread page, or nothing to warm
+		var candidates = [];
+		for (var i = 0; i < posts.length; i++) {
+			var a = posts[i].querySelector("a.post_comments");
+			if (a) candidates.push({ a: a, comments: parseInt(a.title, 10) || 0 });
+		}
+		var picks = candidates.slice(0, IDLE_BY_POSITION);
+		candidates.slice().sort(function (x, y) { return y.comments - x.comments; })
+			.slice(0, IDLE_BY_COMMENTS)
+			.forEach(function (c) { if (picks.indexOf(c) < 0) picks.push(c); });
+		var queue = picks.map(function (c) { return c.a; });
+		var next = document.querySelector('a[accesskey="N"]');
+		if (next) queue.push(next);
+
+		var idx = 0;
+		(function step() {
+			if (document.hidden || idx >= queue.length) return;
+			if (eligible(queue[idx])) prefetch(queue[idx]);
+			idx++;
+			setTimeout(step, IDLE_STAGGER_MS);
+		})();
+	}
+
+	window.addEventListener("load", function () {
+		if (window.requestIdleCallback) requestIdleCallback(idleWarm, { timeout: 3000 });
+		else setTimeout(idleWarm, 1500);
+	});
 })();
