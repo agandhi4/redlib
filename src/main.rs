@@ -9,12 +9,11 @@ use std::sync::LazyLock;
 use futures_lite::FutureExt;
 use hyper::{header::HeaderValue, Body, Request, Response};
 use log::{info, warn};
-use redlib::client::{canonical_path, proxy, rate_limit_check, CLIENT};
+use redlib::client::{canonical_path, init_oauth_client, proxy, rate_limit_check, CLIENT};
 use redlib::server::{self, RequestExt};
 use redlib::utils::{error, redirect, ThemeAssets};
 use redlib::{config, db, duplicates, headers, instance_info, post, search, settings, subreddit, user};
 
-use redlib::client::OAUTH_CLIENT;
 
 // Create Services
 
@@ -146,6 +145,12 @@ async fn main() {
 		)
 		.get_matches();
 
+	// The OAuth client must exist before the rate limit check (which uses it) and before the
+	// server accepts requests. Bootstrapped here, in the runtime, rather than lazily from a
+	// blocking static initializer — see the note on `OAUTH_CLIENT` in client.rs.
+	info!("Creating OAUTH client.");
+	init_oauth_client().await;
+
 	match rate_limit_check().await {
 		Ok(()) => {
 			info!("[✅] Rate limit check passed");
@@ -182,16 +187,12 @@ async fn main() {
 
 	// Force evaluation of statics. In instance_info case, we need to evaluate
 	// the timestamp so deploy date is accurate - in config case, we need to
-	// evaluate the configuration to avoid paying penalty at first request -
-	// in OAUTH case, we need to retrieve the token to avoid paying penalty
-	// at first request
+	// evaluate the configuration to avoid paying penalty at first request.
 
 	info!("Evaluating config.");
 	LazyLock::force(&config::CONFIG);
 	info!("Evaluating instance info.");
 	LazyLock::force(&instance_info::INSTANCE_INFO);
-	info!("Creating OAUTH client.");
-	LazyLock::force(&OAUTH_CLIENT);
 	info!("Initializing SQLite database.");
 	db::init();
 

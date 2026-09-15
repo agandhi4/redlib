@@ -1,5 +1,5 @@
 use crate::{
-	client::{CLIENT, OAUTH_CLIENT, OAUTH_IS_ROLLING_OVER, OAUTH_RATELIMIT_REMAINING},
+	client::{oauth_client, CLIENT, OAUTH_IS_ROLLING_OVER, OAUTH_RATELIMIT_REMAINING},
 	oauth_resources::ANDROID_APP_VERSION_LIST,
 };
 use base64::{engine::general_purpose, Engine as _};
@@ -161,7 +161,7 @@ pub async fn token_daemon() {
 	// Monitor for refreshing token
 	loop {
 		// Get expiry time - be sure to not hold the read lock
-		let expires_in = { OAUTH_CLIENT.load_full().expires_in };
+		let expires_in = { oauth_client().load_full().expires_in };
 
 		// sleep for the expiry time minus 2 minutes
 		let duration = Duration::from_secs(expires_in - 120);
@@ -187,7 +187,7 @@ pub async fn force_refresh_token() {
 
 	trace!("Rolling over refresh token. Current rate limit: {}", OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst));
 	let new_client = Oauth::new().await;
-	OAUTH_CLIENT.swap(new_client.into());
+	oauth_client().swap(new_client.into());
 	OAUTH_RATELIMIT_REMAINING.store(99, Ordering::SeqCst);
 	OAUTH_IS_ROLLING_OVER.store(false, Ordering::SeqCst);
 }
@@ -472,6 +472,7 @@ fn choose<T: Copy>(list: &[T]) -> T {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::client::init_oauth_client;
 
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_mobile_spoof_backend() {
@@ -501,24 +502,28 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_oauth_client() {
 		// Integration test - tests the overall Oauth client
-		assert!(OAUTH_CLIENT.load_full().headers_map.contains_key("Authorization"));
+		init_oauth_client().await;
+		assert!(oauth_client().load_full().headers_map.contains_key("Authorization"));
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_oauth_client_refresh() {
+		init_oauth_client().await;
 		force_refresh_token().await;
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_oauth_token_exists() {
-		let client = OAUTH_CLIENT.load_full();
+		init_oauth_client().await;
+		let client = oauth_client().load_full();
 		let auth_header = client.headers_map.get("Authorization").unwrap();
 		assert!(auth_header.starts_with("Bearer "));
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_oauth_headers_len() {
-		assert!(OAUTH_CLIENT.load_full().headers_map.len() >= 3);
+		init_oauth_client().await;
+		assert!(oauth_client().load_full().headers_map.len() >= 3);
 	}
 
 	#[test]
