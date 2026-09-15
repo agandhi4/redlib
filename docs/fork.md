@@ -53,4 +53,8 @@ Hacker News is the readability benchmark: one continuous surface, whispered meta
 
 ## Operational notes
 
-Deploy chain: push to `main` → GHCR image build (`cargo build --locked` — keep `Cargo.lock` synced with every version bump) → manual NAS pull → verify version in the `reddit.box/settings` footer. Instance defaults (theme, subscriptions) are env vars in the NAS compose file.
+Deploy chain: push to `main` → GHCR image build (`cargo build --locked` — keep `Cargo.lock` synced with every version bump) → NAS pull via the homelab repo's hourly `deploy.sh update` timer, or by hand (`CLAUDE.md` has the exact command) → verify version in the `reddit.box/settings` footer. Instance defaults (theme, subscriptions, feeds) are env vars in the NAS compose file, which lives in the homelab repo.
+
+Resilience (Sept 2026): after a wifi blip the instance sat `Up 10 days (unhealthy)` behind a 502 — the OAuth bootstrap was a nested `block_on` inside tokio that spun the main thread at 100% before the listener opened, and Docker's restart policy only fires on exit. Two fixes: the bootstrap is now async (v0.40.2), and homeinfra runs autoheal, which restarts any container labelled `autoheal: "true"` whose healthcheck goes red. Recognise the old failure by `docker stats` showing a full core with zero log output.
+
+Measured on the instance (v0.42.0): cold page ~0.40s (one Reddit round-trip), fresh or stale cache hit ~0.02s, idle-prefetched post ~0.015s vs ~0.27s for an unpicked one.
