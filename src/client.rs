@@ -4,7 +4,6 @@ use crate::server::RequestExt;
 use crate::utils::{format_url, Post};
 use arc_swap::ArcSwap;
 use cached::proc_macro::cached;
-use futures_lite::future::block_on;
 use futures_lite::{future::Boxed, FutureExt};
 use hyper::{body::Buf, header, Body, Request as HyperRequest, Response as HyperResponse};
 use log::{error, info, trace, warn};
@@ -14,6 +13,7 @@ use std::result::Result;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU16};
 use std::sync::LazyLock;
+use tokio::sync::OnceCell;
 use wreq::redirect::Policy;
 use wreq::{header as wreq_header, Client as WreqClient, EmulationFactory, Method, Response as WreqResponse};
 use wreq_util::{Emulation, EmulationOS, EmulationOption};
@@ -29,11 +29,31 @@ const ALTERNATIVE_REDDIT_URL_BASE_HOST: &str = "www.reddit.com";
 
 pub static CLIENT: LazyLock<WreqClient> = LazyLock::new(build_client);
 
-pub static OAUTH_CLIENT: LazyLock<ArcSwap<Oauth>> = LazyLock::new(|| {
-	let client = block_on(Oauth::new());
-	tokio::spawn(token_daemon());
-	ArcSwap::new(client.into())
-});
+// Populated once by `init_oauth_client()` at startup. This used to be a `LazyLock` whose
+// initializer ran `futures_lite::block_on(Oauth::new())` from inside the tokio runtime; a
+// nested foreign executor never resets tokio's cooperative budget, so on a slow/degraded
+// network every timer and socket returned Pending+wake forever and the main thread spun at
+// 100% CPU before the server ever listened (Sept 2026 outage). Bootstrapping must stay async.
+static OAUTH_CLIENT: OnceCell<ArcSwap<Oauth>> = OnceCell::const_new();
+
+/// Bootstraps the OAuth client and starts the token-refresh daemon. Must complete, inside the
+/// tokio runtime, before anything calls `oauth_client()`. Idempotent: concurrent or repeated
+/// calls (tests) share the first initialization.
+pub async fn init_oauth_client() {
+	OAUTH_CLIENT
+		.get_or_init(|| async {
+			let client = Oauth::new().await;
+			tokio::spawn(token_daemon());
+			ArcSwap::new(client.into())
+		})
+		.await;
+}
+
+/// The live OAuth client. Panics if `init_oauth_client()` has not completed — that is a
+/// startup-ordering bug in `main`, never a runtime condition.
+pub fn oauth_client() -> &'static ArcSwap<Oauth> {
+	OAUTH_CLIENT.get().expect("OAuth client used before init_oauth_client() completed")
+}
 
 pub static OAUTH_RATELIMIT_REMAINING: AtomicU16 = AtomicU16::new(99);
 
@@ -183,7 +203,7 @@ pub async fn proxy(req: HyperRequest<Body>, format: &str) -> Result<HyperRespons
 
 		// Add User-Agent header of the currently spoofed device
 		{
-			let client = OAUTH_CLIENT.load_full();
+			let client = oauth_client().load_full();
 			builder = builder.header("User-Agent", client.user_agent());
 		}
 
@@ -267,7 +287,7 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 	];
 
 	{
-		let client = OAUTH_CLIENT.load_full();
+		let client = oauth_client().load_full();
 		for (key, value) in client.headers_map.clone() {
 			headers.push((key, value));
 		}
@@ -348,7 +368,7 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 		Err(format!("{msg}: {e} | {path}"))
 	};
 
-	// First, handle rolling over the OAUTH_CLIENT if need be.
+	// First, handle rolling over the OAuth client if need be.
 	let current_rate_limit = OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst);
 	let is_rolling_over = OAUTH_IS_ROLLING_OVER.load(Ordering::SeqCst);
 	if current_rate_limit < 10 && !is_rolling_over {
@@ -472,7 +492,7 @@ async fn self_check(sub: &str) -> Result<(), String> {
 
 pub async fn rate_limit_check() -> Result<(), String> {
 	// First, test the Oauth client: we can perform a rate limit check if the OAuth backend is MobileSpoof; if GenericWeb, we skip the check.
-	if matches!(OAUTH_CLIENT.load().backend, OauthBackendImpl::GenericWeb(_)) {
+	if matches!(oauth_client().load().backend, OauthBackendImpl::GenericWeb(_)) {
 		warn!("[⚠️] Cannot perform rate limit check, running as GenericWeb. Skipping check.");
 		return Ok(());
 	}
@@ -534,6 +554,7 @@ mod tests {
 
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_rate_limit_check() {
+		init_oauth_client().await;
 		rate_limit_check().await.unwrap();
 	}
 
@@ -545,18 +566,21 @@ mod tests {
 			assert!(subscriptions.is_some());
 
 			// check rate limit
+			init_oauth_client().await;
 			rate_limit_check().await.unwrap();
 		});
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_localization_popular() {
+		init_oauth_client().await;
 		let val = json(POPULAR_URL.to_string(), false).await.unwrap();
 		assert_eq!("GLOBAL", val["data"]["geo_filter"].as_str().unwrap());
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_obfuscated_share_link() {
+		init_oauth_client().await;
 		let share_link = "/r/rust/s/kPgq8WNHRK".into();
 		// Correct link without share parameters
 		let canonical_link = "/r/rust/comments/18t5968/why_use_tuple_struct_over_standard_struct/kfbqlbc/".into();
@@ -565,6 +589,7 @@ mod tests {
 
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_private_sub() {
+		init_oauth_client().await;
 		let link = json("/r/suicide/about.json?raw_json=1".into(), true).await;
 		assert!(link.is_err());
 		assert_eq!(link, Err("private".into()));
@@ -572,6 +597,7 @@ mod tests {
 
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_banned_sub() {
+		init_oauth_client().await;
 		let link = json("/r/aaa/about.json?raw_json=1".into(), true).await;
 		assert!(link.is_err());
 		assert_eq!(link, Err("banned".into()));
@@ -579,6 +605,7 @@ mod tests {
 
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_gated_sub() {
+		init_oauth_client().await;
 		// quarantine to false to specifically catch when we _don't_ catch it
 		let link = json("/r/drugs/about.json?raw_json=1".into(), false).await;
 		assert!(link.is_err());
