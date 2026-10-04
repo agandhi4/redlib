@@ -1,5 +1,5 @@
 use crate::dbg_msg;
-use crate::oauth::{force_refresh_token, token_daemon, Oauth};
+use crate::oauth::{force_refresh_token, refresh_blocked_token, token_daemon, Oauth};
 use crate::server::RequestExt;
 use crate::utils::{format_url, Post};
 use arc_swap::ArcSwap;
@@ -516,7 +516,11 @@ async fn fetch_json(path: String, quarantine: bool) -> Result<Value, String> {
 						}
 						Err(e) => {
 							error!("Got an invalid response from reddit {e}. Status code: {status}");
-							if status.is_server_error() {
+							// A non-JSON 403 is Reddit's network-policy block page, not an API error.
+							if status.as_u16() == 403 {
+								let () = refresh_blocked_token().await;
+								Err("Reddit blocked this session. A new one was issued; refresh the page.".to_string())
+							} else if status.is_server_error() {
 								Err("Reddit is having issues, check if there's an outage".to_string())
 							} else {
 								err("Failed to parse page JSON data", e.to_string(), path)

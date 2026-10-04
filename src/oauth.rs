@@ -3,9 +3,13 @@ use crate::{
 	oauth_resources::ANDROID_APP_VERSION_LIST,
 };
 use base64::{engine::general_purpose, Engine as _};
-use log::{error, info, trace};
+use log::{error, info, trace, warn};
 use serde_json::json;
-use std::{collections::HashMap, sync::atomic::Ordering, time::Duration};
+use std::{
+	collections::HashMap,
+	sync::atomic::Ordering,
+	time::{Duration, Instant},
+};
 use tegen::tegen::TextGenerator;
 use tokio::time::{error::Elapsed, timeout};
 
@@ -15,6 +19,10 @@ const AUTH_ENDPOINT: &str = "https://www.reddit.com";
 
 const OAUTH_MAX_ATTEMPTS: u32 = 10;
 const OAUTH_TIMEOUT: Duration = Duration::from_secs(5);
+
+// A token younger than this is never rotated for being blocked: if a fresh token is
+// refused too, the block is on the IP, and minting more would only hammer the auth endpoint.
+const BLOCKED_TOKEN_REFRESH_COOLDOWN: Duration = Duration::from_secs(60);
 
 // Response from OAuth backend authentication
 #[derive(Debug, Clone)]
@@ -36,6 +44,7 @@ trait OauthBackend: Send + Sync {
 pub struct Oauth {
 	pub(crate) headers_map: HashMap<String, String>,
 	expires_in: u64,
+	minted_at: Instant,
 	pub(crate) backend: MobileSpoofAuth,
 }
 
@@ -94,6 +103,7 @@ impl Oauth {
 			Ok(Self {
 				headers_map,
 				expires_in: response.expires_in,
+				minted_at: Instant::now(),
 				backend,
 			})
 		})
@@ -157,6 +167,20 @@ pub async fn force_refresh_token() {
 	oauth_client().swap(new_client.into());
 	OAUTH_RATELIMIT_REMAINING.store(99, Ordering::SeqCst);
 	OAUTH_IS_ROLLING_OVER.store(false, Ordering::SeqCst);
+}
+
+/// Reddit sometimes flags a long-lived token/device pair and answers every request with a
+/// 403 HTML "blocked due to a network policy" page, while a freshly minted pair from the same
+/// IP works (Oct 2026). Rotating both here is what a container restart used to do by hand.
+/// Used by `client::fetch_json` on a non-JSON 403.
+pub async fn refresh_blocked_token() {
+	let age = oauth_client().load().minted_at.elapsed();
+	if age < BLOCKED_TOKEN_REFRESH_COOLDOWN {
+		warn!("[🚫] Reddit blocked a token minted {age:?} ago; not rotating again yet (possible IP-level block)");
+		return;
+	}
+	warn!("[🚫] Reddit blocked the current token (minted {age:?} ago). Rotating token and device...");
+	force_refresh_token().await;
 }
 
 #[derive(Debug, Clone, Default)]
