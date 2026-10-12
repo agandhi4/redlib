@@ -28,9 +28,9 @@ Rust + hyper + Askama (server-rendered HTML), vanilla CSS/JS. No frontend framew
 
 ## Commands
 
-- Build: `cargo build` (machine-specific toolchain quirks — mise, pip libclang — live in Claude project memory, not here)
+- Build: `cargo build` in CI/Docker only — there is no Rust toolchain on the Mac. Verify locally in a `rust:latest` container (recipe and pitfalls in `docs/fork.md` → Operational notes).
 - Run locally: `REDLIB_DB_PATH=<scratch>/redlib.db ./target/debug/redlib -p 8199` (panics without a writable DB path)
-- Instance config lives in the NAS compose file (e.g. `REDLIB_DEFAULT_THEME=paper`)
+- Instance config lives in the NAS compose file (e.g. `REDLIB_DEFAULT_THEME=paper`). Feeds parse once at startup (recreate the container after env edits), and a browser's `subscriptions` cookie overrides `REDLIB_DEFAULT_SUBSCRIPTIONS` — verify env changes with a cookie-less client.
 
 ## Workflow
 
