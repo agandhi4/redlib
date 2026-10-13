@@ -1,0 +1,97 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Shared Renovate preset for the work-loop app repos. Consumers extend github>agandhi4/devkit//renovate/default (see consumer.example.json). automerge is OFF everywhere: an app repo's real merge gate is the Mac-posted `local-gate` status, which a Renovate PR only gets if the merge queue picks it up, so a Renovate self-merge would land code no gate has run. homelab keeps its own automerge + ignoreTests config and does not extend this preset.",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "timezone": "America/Los_Angeles",
+  "schedule": ["before 6am on monday"],
+  "labels": ["dependencies"],
+  "prConcurrentLimit": 5,
+  "rangeStrategy": "bump",
+  "automerge": false,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on the first day of the month"],
+    "automerge": false
+  },
+  "vulnerabilityAlerts": {
+    "labels": ["dependencies", "security"]
+  },
+  "packageRules": [
+    {
+      "description": "One weekly minor+patch PR per ecosystem (Renovate category: js, python, docker, ci, ...) keeps the queue short. Majors get their own PRs below.",
+      "matchCategories": ["js"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "js minor and patch"
+    },
+    {
+      "matchCategories": ["python"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "python minor and patch"
+    },
+    {
+      "matchCategories": ["docker"],
+      "matchUpdateTypes": ["minor", "patch", "digest", "pinDigest"],
+      "groupName": "docker images"
+    },
+    {
+      "description": "GitHub Actions are SHA-pinned with a `# vX.Y.Z` comment (helpers:pinGitHubActionDigests); one grouped PR moves the SHAs and comments together, like finplat's Dependabot `actions-all` group.",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest", "pinDigest"],
+      "groupName": "github actions"
+    },
+    {
+      "description": "Majors need a paired code change, so they are flagged for explicit human review.",
+      "matchUpdateTypes": ["major"],
+      "addLabels": ["major-bump"]
+    },
+    {
+      "description": "Node is declared once, in .nvmrc (devkit/docs/decisions.md: 'Node is declared once'). Every copy Renovate can see (nvm's .nvmrc, the `node` Docker image, engines) moves in ONE PR: a Dockerfile-only bump fails toolchain_check.sh in ci-quick by design, so a half-bump would sit red. Must stay after the category groups so its groupName wins.",
+      "matchDepNames": ["node"],
+      "groupName": "node toolchain"
+    },
+    {
+      "description": "Python base image: the CPython feature release (3.13 -> 3.14) is a deliberate per-repo choice reviewed against the ci-image smoke, and Docker versioning calls that step a MINOR, so both major and minor wait for a Dependency Dashboard click instead of opening on their own. Patch and digest bumps still flow weekly.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["python"],
+      "matchUpdateTypes": ["major", "minor"],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Ported from finplat's Dependabot `ignore` list. Renovate-native form: the update waits on the Dependency Dashboard (visible, one click to open) instead of being hidden, and vulnerabilityAlerts still bypass it, matching Dependabot's 'security advisories override ignore'. Framework majors: type-check and build behaviour shift with them.",
+      "matchPackageNames": ["react", "react-dom", "vite", "tailwindcss"],
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "shadcn-coupled: a major needs `pnpm dlx shadcn@latest add <component>` to regenerate the wrapper (react-day-picker@10 broke finplat main on 2026-05-25 by deprecating ClassNames.table without a paired calendar.tsx update).",
+      "matchPackageNames": ["react-day-picker", "lucide-react"],
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "The TypeScript + ESLint toolchain moves as a unit: tsc and the ESLint plugins together, never piecemeal.",
+      "matchPackageNames": ["typescript", "@types/node", "eslint", "@eslint/js", "typescript-eslint", "eslint-plugin-react-hooks"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "typescript and eslint majors",
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "FastAPI + Starlette + uvicorn are a coupled trio: FastAPI pins a tight Starlette range and uvicorn's ASGI changes ripple into middleware. Bump them together.",
+      "matchPackageNames": ["fastapi", "starlette", "uvicorn"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "fastapi stack majors",
+      "dependencyDashboardApproval": true
+    },
+    {
+      "matchPackageNames": ["httpx"],
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Minor releases break too. yfinance: column renames, per-ticker parse regressions, removed kwargs; verify against a known-good ticker. slowapi, python-multipart, @base-ui/react: pre-1.x, every minor is breaking. ty: alpha, every release reshapes the warning set suppressed in [tool.ty.overrides].",
+      "matchPackageNames": ["yfinance", "slowapi", "python-multipart", "ty", "@base-ui/react"],
+      "matchUpdateTypes": ["major", "minor"],
+      "dependencyDashboardApproval": true
+    }
+  ]
+}

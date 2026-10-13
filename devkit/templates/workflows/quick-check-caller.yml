@@ -1,0 +1,34 @@
+name: Quick check
+
+# Copy to <repo>/.github/workflows/quick-check.yml. The job body lives in devkit's reusable
+# workflow; this file owns only WHEN it runs. Requires devkit's Actions access set to
+# "Accessible from repositories owned by the user" (see the header of
+# agandhi4/devkit/.github/workflows/quick-check.yml).
+#
+# The merge gate is `local-gate`; this is the ~1 billed minute of lint/format/types on PRs.
+
+on:
+  pull_request:
+    branches: [main]
+    # ready_for_review: drafts are skipped, so marking one ready gets its first run.
+    types: [opened, synchronize, reopened, ready_for_review]
+    # Docs-only PRs never run quick-check; their merge gate is `local-gate` alone.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+# A new push to a PR cancels that PR's superseded run.
+concurrency:
+  group: quick-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quick-check:
+    if: github.event.pull_request.draft == false
+    uses: agandhi4/devkit/.github/workflows/quick-check.yml@main
+    # Only the inputs that differ from the defaults (.nvmrc, ci-quick, repo root), e.g.:
+    # with:
+    #   pnpm-package-json: frontend/package.json
