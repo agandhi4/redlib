@@ -16,6 +16,11 @@
 #   - every `rust-version` (MSRV) in Cargo.toml (root and one level down) is <= the channel
 #   - actions-rust-lang/setup-rust-toolchain steps leave `toolchain:` unset (then it reads the file);
 #     dtolnay/rust-toolchain cannot read the file at all, so any use of it fails
+# Swift (.swift-version, MAJOR.MINOR or MAJOR.MINOR.PATCH; Xcode's compiler, so macOS only):
+#   - `swift --version` (the toolchain xcode-select points at, which xcodebuild and xcrun use)
+#     reports that version, compared on the precision the file gives (6.2 admits 6.2.4).
+#     Off macOS it is skipped, not failed: Linux runners ship an unrelated swift, and an iOS
+#     repo's Linux tier (Actions) builds nothing with it.
 # A missing declaration file skips that toolchain (Node-only repos have no .python-version).
 # Dockerfiles are scanned at the root and one level down (orbit/frontend/Dockerfile).
 # Usage: devkit/bin/toolchain_check.sh [repo-root]      (part of ci-quick)
@@ -28,8 +33,8 @@ fail() { echo "toolchain-check: $*" >&2; rc=1; }
 warn() { echo "toolchain-check: warning: $*" >&2; }
 
 has_rust() { [ -f rust-toolchain.toml ] || [ -f rust-toolchain ]; }
-if [ ! -f .nvmrc ] && [ ! -f .python-version ] && ! has_rust; then
-  echo "toolchain-check: no .nvmrc, .python-version or rust-toolchain.toml; nothing to check"; exit 0
+if [ ! -f .nvmrc ] && [ ! -f .python-version ] && ! has_rust && [ ! -f .swift-version ]; then
+  echo "toolchain-check: no .nvmrc, .python-version, rust-toolchain.toml or .swift-version; nothing to check"; exit 0
 fi
 
 dockerfiles() { for f in Dockerfile Dockerfile.* */Dockerfile */Dockerfile.*; do [ -f "$f" ] && echo "$f"; done; }
@@ -172,9 +177,31 @@ check_rust() {
   checked+=("rust $version")
 }
 
+check_swift() {
+  if [ ! -f .swift-version ]; then echo "toolchain-check: no .swift-version; swift not checked"; return; fi
+  local version found
+  version=$(tr -d '[:space:]' < .swift-version)
+  if [[ ! "$version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+    fail ".swift-version must hold MAJOR.MINOR or MAJOR.MINOR.PATCH like 6.2 (got '$version')"; return
+  fi
+  if [ "$(uname)" != Darwin ]; then
+    echo "toolchain-check: not macOS; swift $version (Xcode's) not checked"; return
+  fi
+  command -v swift >/dev/null || { fail ".swift-version says $version but swift is not on PATH (install Xcode)"; return; }
+  # "Apple Swift version 6.2.4 (swiftlang-…)"; a .0 patch is printed as 6.2, so pad it.
+  found=$(swift --version 2>&1 | sed -nE 's/.*Swift version ([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/p' | head -1)
+  [ -n "$found" ] || { fail "cannot read a version from 'swift --version'"; return; }
+  [[ "$found" == *.*.* ]] || found=$found.0
+  case "$found." in
+    "$version".*) checked+=("swift $version") ;;
+    *) fail "swift is $found; .swift-version says $version (xcode-select another Xcode, or move the pin)" ;;
+  esac
+}
+
 check_node
 check_python
 check_rust
+check_swift
 
 if [ $rc = 0 ]; then
   summary=$(IFS=,; echo "${checked[*]}"); echo "toolchain-check: ok (${summary//,/, })"

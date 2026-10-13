@@ -1,6 +1,9 @@
 name: ci
 on:
   pull_request:
+    # ready_for_review: drafts are skipped (job `if:`), so marking one ready gets its first run.
+    # Without it a PR opened as a draft had no CI until its next push.
+    types: [opened, synchronize, reopened, ready_for_review]
     # Docs-only PRs skip CI, except for the files devkit's own docs_check judges. devkit has no
     # local gate, so this run is the only check before every consumer vendors a missing
     # CLAUDE.md symlink (2026-10-13). GitHub applies `paths` in order; a later match wins.

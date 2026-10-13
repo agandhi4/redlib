@@ -10,8 +10,7 @@ standard; this file holds only what is specific to __NAME__. Do not restate a co
 ## Architecture
 <!-- Replace: what __NAME__ is, the top-level directories and what each owns, the data flow in
      one paragraph. Link docs/decisions.md for the why. -->
-A __STACK__ service scaffolded with health endpoints (`/health/live`, `/health/ready`) and
-nothing else yet.
+__ARCHITECTURE__
 
 ## Convention deltas
 Deliberate deviations from the conventions, one line each, linking the `docs/decisions.md`
@@ -40,9 +39,9 @@ skips them with a note. Replace a stub with the real target when the tier exists
 the `skip` from `scripts/ci/gate_plan.sh` in the same change.
 
 ## CI and the PR gate
-- Actions runs one `quick-check` job per ready PR (`make ci-quick`, via devkit's reusable
-  workflow). Everything else runs in the local gate, `make gate PR=<n>`, which posts the
-  `local-gate` status the merge queue reads. Open PRs as drafts; mark ready when done.
+- Actions runs one `quick-check` job per ready PR (`make __QUICK_CHECK_TARGET__`, via devkit's
+  reusable workflow). Everything else runs in the local gate, `make gate PR=<n>`, which posts
+  the `local-gate` status the merge queue reads. Open PRs as drafts; mark ready when done.
 #@image
 - A push to `main` runs one `publish` job: build the image, `make ci-smoke` on that exact
   image, push `sha-<7>` + `latest`, then `devkit/bin/ship_tag.sh` tags the commit
@@ -52,14 +51,17 @@ the `skip` from `scripts/ci/gate_plan.sh` in the same change.
   goes into `scripts/ci/smoke_image.sh`'s `BOOT_ENV` in the same PR, or every publish fails.
 #@end
 #@no-image
-- No image is published (`devkit new --no-image`). Adding one: Dockerfile with the
-  `ARG`/`ENV`/`LABEL APP_VERSION` trio in the final stage, `.github/workflows/publish.yml`
-  (copy one from a sibling repo), real `ci-image`/`ci-smoke` targets. `release-check` holds
-  the Dockerfile to the contract once it exists.
+- No image is published (__NO_IMAGE_NOTE__).
+#@end
+#@no-image-chosen
+  Adding one: Dockerfile with the `ARG`/`ENV`/`LABEL APP_VERSION` trio in the final stage,
+  `.github/workflows/publish.yml` (copy one from a sibling repo), real `ci-image`/`ci-smoke`
+  targets. `release-check` holds the Dockerfile to the contract once it exists.
 #@end
 - Git hooks are devkit's templates verbatim; the steps are in `scripts/ci/hooks.conf`
-  (pre-commit `ci-quick`, pre-push `ci-unit`). `make hooks-check` reports a repointed
-  `core.hooksPath`; `make install` heals it. Never `--no-verify`.
+  (__HOOKS__).
+  `make hooks-check` reports a repointed `core.hooksPath`; `make install` heals it. Never
+  `--no-verify`.
 - Never edit `devkit/` here: `devkit-check` fails `ci-quick` on it. Change devkit upstream,
   merge, then `make devkit-sync`.
 - Toolchains are declared once (__PINS__); `toolchain-check` fails every other copy that

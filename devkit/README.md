@@ -12,11 +12,11 @@ Design: `~/projects/solo/standardization/PLAN.md` §1 (layer L5) and `docs/decis
 |---|---|
 | `bin/local_gate.sh` | The PR gate skeleton: gates `<pr>` merged into `origin/main`, posts the `local-gate` status, emits the `GATE`/`VERDICT` lines the merge queues parse. The repo supplies `scripts/ci/gate_plan.sh` (contract in the script header). |
 | `bin/devkit-sync.sh` | Fetch upstream, replace `devkit/` with its tree, record `<commit> <tree>` in `.devkit-rev`, commit. Conflict-free by construction. `--stage` leaves it in the index for the caller's own commit. |
-| `bin/devkit-new.sh`, `templates/new/` | `devkit new <name> --stack <stack> [--dir <parent>] [--no-image]`: a new repo that passes every guard on its first commit, which is made through the hooks. Stacks: `python-fastapi`, `node-service`; each is a directory under `templates/new/stacks/` (how to add one: `templates/new/README.md`). See "New project". |
+| `bin/devkit-new.sh`, `templates/new/` | `devkit new <name> --stack <stack> [--dir <parent>] [--no-image]`: a new repo that passes every guard on its first commit, which is made through the hooks. Stacks: `python-fastapi`, `node-service`, `rust`, `next-vercel`, `swift-app`; each is a directory under `templates/new/stacks/` (how to add one: `templates/new/README.md`). See "New project". |
 | `bin/devkit-check.sh` | Offline guard for `ci-quick` and pre-commit: the staged `devkit/` tree equals the staged `.devkit-rev` (both read from the index). Fails on in-repo edits. |
 | `bin/node_toolchain.sh` | Provides the exact Node in the repo's `.nvmrc`: uses PATH's node when it matches, else a checksum-verified install cached under `~/.local/share/devkit/node`. The gate calls it; hooks can too. |
 | `bin/rust_toolchain.sh` | Provides the exact Rust in `rust-toolchain.toml` (or `rust-toolchain`): uses PATH's cargo when it matches, else installs through rustup (PATH's, or a private one bootstrapped under `~/.local/share/devkit/rust`) and prints the toolchain's sysroot bin, so callers export PATH only. `--declared` prints the version. The gate calls it. |
-| `bin/toolchain_check.sh` | Guard for `ci-quick`: `.nvmrc` is exact, every `FROM node:` major and every setup-node step agree with it; same for `.python-version` and `rust-toolchain.toml` (`FROM rust:` minor, `Cargo.toml` `rust-version` not above it, no inline `toolchain:`). |
+| `bin/toolchain_check.sh` | Guard for `ci-quick`: `.nvmrc` is exact, every `FROM node:` major and every setup-node step agree with it; same for `.python-version` and `rust-toolchain.toml` (`FROM rust:` minor, `Cargo.toml` `rust-version` not above it, no inline `toolchain:`); `.swift-version` against `swift --version` on macOS only (Xcode's compiler; skipped elsewhere). |
 | `bin/throwaway_pg.sh` | One throwaway Postgres container for tests and smoke boots: `up` prints `PG_PORT=<n>`, `url`, `down`. tmpfs on by default (the volume-leak fix), TCP readiness, loopback only; env-driven. |
 | `bin/boot_image.sh` | Boots a built app image on a private network (optionally with `throwaway_pg.sh` Postgres as `<name>-pg`), waits for its health endpoint with early exit on container death, prints `BASE=<url>`; `down` removes everything. Post-boot assertions stay in each repo. Env-driven (`BOOT_*`); `BOOT_EXPECT_VERSION` also requires the health JSON `version` to equal it. |
 | `bin/contract_probe.sh` | `<base> --live P --health P --request-id P --json-log FILE\|CONTAINER --metrics P --require-metric NAME --proxy-404 URL`: the observability contract asserted against a booted app, each assertion opt-in so repos switch them on as they comply. Called from a smoke after `boot_image.sh up`; `BOOT_EXPECT_VERSION` is checked in health, logs and `app_info`. One `probe <name> PASS\|FAIL` line each, every assertion runs. |
@@ -40,22 +40,25 @@ Design: `~/projects/solo/standardization/PLAN.md` §1 (layer L5) and `docs/decis
 ## New project
 
 ```sh
-~/projects/solo/devkit/bin/devkit-new.sh <name> --stack python-fastapi   # or node-service; --no-image for a repo that publishes nothing
+~/projects/solo/devkit/bin/devkit-new.sh <name> --stack python-fastapi   # or node-service, rust, next-vercel, swift-app; --no-image for a repo that publishes nothing
 ```
 
-Run it from an up-to-date devkit checkout (`--list` prints the stacks). It needs git, make
-and the stack's package tool (`uv` or `npm`) on PATH, and makes `<cwd>/<name>` (`--dir`
-chooses the parent) as a git repo with one commit holding: the vendored `devkit/` +
+Run it from an up-to-date devkit checkout (`--list` prints the stacks; the table in
+`templates/new/README.md` says which repo each was extracted from). It needs git, make
+and the stack's package tool (`uv` or `npm`; for `rust`, curl or rustup, since the scaffold
+provisions the pinned toolchain itself; for `swift-app`, Xcode, plus `xcodegen` from
+`ci-swift` on) on PATH, and makes `<cwd>/<name>` (`--dir` chooses the parent) as a git repo with one commit holding: the vendored `devkit/` +
 `.devkit-rev`; a Makefile with the full standard target set (tiers the stack lacks are
 `exit 2` stubs that say so); `scripts/ci/gate_plan.sh`; `.githooks/` + `scripts/ci/hooks.conf`
-(pre-commit `ci-quick`, pre-push `ci-unit`); `.github/workflows/quick-check.yml` calling the
-reusable workflow, and for image stacks `publish.yml` (build, `ci-smoke`, push `sha-<7>` +
-`latest`, ship tag, never cancelled) with a Dockerfile carrying the `APP_VERSION` trio;
+(pre-commit `ci-quick`, pre-push `ci-unit`; `ci-swift-lint` for swift-app, whose tests take
+minutes); `.github/workflows/quick-check.yml` calling the reusable workflow (swift-app's runs
+`make ci-guards`, the only tier that runs off a Mac), and for image stacks `publish.yml`
+(build, `ci-smoke`, push `sha-<7>` + `latest`, ship tag, never cancelled) with a Dockerfile carrying the `APP_VERSION` trio;
 `renovate.json` on the shared preset; `.claude/settings.json` (claude-kit plugins); `AGENTS.md`
 (the project delta only: Stack + `Conventions:`, Architecture placeholder, Convention deltas,
 Commands, Workflow) with `CLAUDE.md` symlinked; `docs/decisions.md` with its first entry; the
 toolchain pin; the stack's lockfile; the smallest app that serves `/health/live` and
-`/health/ready`, with a test per tier. The first commit runs through pre-commit, so
+`/health/ready` (swift-app: shows its build identity), with a test per tier. The first commit runs through pre-commit, so
 `make ci-quick` (devkit-check, toolchain-check, docs-check, release-check, workflows-check,
 own-commit-check for Python, then lint/format/typecheck) has passed on it before you see it.
 `tests/new_contract.bats` holds every stack to this.
@@ -113,6 +116,12 @@ either fails `toolchain-check` until `.nvmrc` moves with it, which is the point.
 and write `scripts/ci/gate_plan.sh`. The three existing plans (finplat, Orbit, locus) are
 the reference: scalar config at the top, a `gate_plan()` that maps changed paths to `job`
 calls, an optional `gate_cleanup()`.
+
+Gate environment (full contract in the script header):
+
+| Variable | Default | What |
+|---|---|---|
+| `GATE_SLOTS` | `1` | How many gates may run at once on this machine, across repos. `1` keeps the single lock file `GATE_LOCK`; `N` > 1 uses `GATE_LOCK.1` … `GATE_LOCK.N`. The merge queues and linux-box keep `1`; raising it on a laptop accepts load-induced timing-test failures (2026-10-05). |
 
 ## Metrics ratchet (ci-metrics)
 

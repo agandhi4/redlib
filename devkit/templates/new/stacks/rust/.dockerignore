@@ -1,0 +1,8 @@
+.git/
+.github/
+.claude/
+devkit/
+docs/
+scripts/
+target/
+.env

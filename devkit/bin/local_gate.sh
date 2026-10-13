@@ -35,6 +35,16 @@
 #   process group gets TERM (KILL after 10s), the status is `error`, the EXIT trap cleans up, and
 #   the run stops with GATE <job> WATCHDOG, VERDICT FAIL and exit 2: the box failed, not the code.
 #
+# Concurrency: GATE_SLOTS (default 1; an integer >= 1) is how many gates may run on this machine
+#   at once, across every repo. 1 is the 2026-10-05 rule: overlapping full suites caused
+#   load-induced timing-test failures in suites the PR never touched. The merge queues and
+#   linux-box keep 1, and with 1 the lock file is exactly $GATE_LOCK, so they keep sharing it.
+#   With N > 1 the slots are $GATE_LOCK.1 .. $GATE_LOCK.N; a gate takes the first free one,
+#   else prints the waiting line and polls each slot with `flock -w 5` until one frees. A human
+#   raising it on a laptop (eight PR gates once queued serially for over an hour, 2026-10-13)
+#   accepts that timing-test risk. Gates run with different GATE_SLOTS lock different files and
+#   do not bound each other: set it once per machine (shell profile), not per invocation.
+#
 # Output contract, parsed by the merge queues and worker.py — keep it:
 #   GATE <job> PASS|FAIL|SKIPPED [(...)]            one line per job
 #   GATE <job> WATCHDOG (silent for <n> min; log: <path>)   then the run stops
@@ -52,7 +62,8 @@ set -uo pipefail
 
 readonly STATUS_CONTEXT=local-gate
 # Machine-wide, shared with every repo's gate on this box (closet's included): parallel full
-# suites on one machine cause load-induced test timeouts, so only one gate runs at a time.
+# suites on one machine cause load-induced test timeouts, so by default only one gate runs at a
+# time. GATE_SLOTS widens that deliberately (header, "Concurrency").
 readonly LOCK=${GATE_LOCK:-/tmp/linux-box-local-gate.lock}
 
 usage() { echo "usage: $0 <pr-number> [--no-post]"; }
@@ -73,6 +84,9 @@ readonly SILENT_MINUTES=${GATE_SILENT_MINUTES:-15}
   || { echo "local_gate: GATE_SILENT_MINUTES must be a number of minutes (got '$SILENT_MINUTES')" >&2; exit 2; }
 SILENT_SECS=$(awk -v m="$SILENT_MINUTES" 'BEGIN { s = int(m * 60 + 0.5); print (m > 0 && s < 1) ? 1 : s }')
 readonly SILENT_SECS
+readonly SLOTS=${GATE_SLOTS:-1}
+[[ "$SLOTS" =~ ^[1-9][0-9]*$ ]] \
+  || { echo "local_gate: GATE_SLOTS must be an integer >= 1 (got '$SLOTS')" >&2; exit 2; }
 command -v flock >/dev/null || { echo "local_gate: flock not found (macOS: brew install flock)" >&2; exit 2; }
 
 ROOT=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel) || exit 2
@@ -110,8 +124,25 @@ fi
 # would otherwise leak its command-line variables into every nested make via MAKEFLAGS.
 unset MAKEFLAGS MFLAGS MAKELEVEL
 
-exec 9>"$LOCK"
-if ! flock -n 9; then echo "GATE waiting for another repo's gate to finish"; flock 9; fi
+# slot_lock <n>: one slot keeps the plain $LOCK path, so the queues and linux-box share the file.
+slot_lock() { if [ "$SLOTS" = 1 ]; then echo "$LOCK"; else echo "$LOCK.$1"; fi; }
+# try_slots <flock-args...>: lock fd 9 on the first slot that yields; sets SLOT. The fd stays
+# open (and the lock held) until the process exits; reopening fd 9 on a miss drops nothing held.
+try_slots() {
+  local n=1
+  while [ "$n" -le "$SLOTS" ]; do
+    exec 9>"$(slot_lock "$n")"
+    if flock "$@" 9; then SLOT=$n; return 0; fi
+    n=$((n + 1))
+  done
+  return 1
+}
+SLOT=""
+if ! try_slots -n; then
+  echo "GATE waiting for another repo's gate to finish"
+  until try_slots -w 5; do :; done
+fi
+echo "GATE slot $SLOT/$SLOTS"
 
 HEAD_SHA=""
 MAIN_SHA=""

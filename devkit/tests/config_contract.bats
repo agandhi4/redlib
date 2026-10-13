@@ -92,6 +92,14 @@ unpinned_uses() { # <file>...
   grep -qE '^[[:space:]]*bin/workflows_check\.sh \. ' "$ci"
 }
 
+@test "devkit CI runs when a draft PR is marked ready, not only on its next push" {
+  local ci="$ROOT/.github/workflows/ci.yml"
+  # The job skips drafts, and pull_request's default types omit ready_for_review, so without it
+  # a PR opened as a draft got no CI run until another push (2026-10-13).
+  grep -qxF '    types: [opened, synchronize, reopened, ready_for_review]' "$ci"
+  grep -qF "github.event.pull_request.draft == false" "$ci"
+}
+
 @test "ruff base is valid TOML with the shared keys and no project-specific ones" {
   python3 -c 'import tomllib' 2>/dev/null || skip "python3 lacks tomllib (needs 3.11+)"
   run python3 -c '

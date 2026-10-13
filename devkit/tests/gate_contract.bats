@@ -251,6 +251,16 @@ status_posted() {
   [[ "$output" == *"GATE_SILENT_MINUTES must be a number of minutes (got 'soon')"* ]]
 }
 
+@test "GATE_SLOTS: junk, zero and negative values are usage errors before any work" {
+  local junk
+  for junk in two 0 -1 1.5; do
+    GATE_SLOTS=$junk run_gate "$PR"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"GATE_SLOTS must be an integer >= 1 (got '$junk')"* ]]
+  done
+  no_gh_call_matching '.'
+}
+
 # 0.05 min = 3s. The OrbStack incident (2026-10-13): a job blocked forever, its log stopped growing.
 @test "watchdog: a silent job is stopped, error status, cleanup runs, later jobs do not, exit 2" {
   make_pr hang/x.txt "zzz"
@@ -315,6 +325,52 @@ status_posted() {
   wait "$holder"
   [ "$status" -eq 0 ]
   has_line "GATE waiting for another repo's gate to finish"
+  has_line "VERDICT PASS head=$HEAD_SHA main=$(main_sha)"
+}
+
+@test "slots: the default takes the plain GATE_LOCK path, never a numbered slot" {
+  make_pr src/app.txt "hello"
+  run_gate "$PR"
+  [ "$status" -eq 0 ]
+  has_line "GATE slot 1/1"
+  [ -e "$GATE_LOCK" ]
+  [ ! -e "$GATE_LOCK.1" ]
+}
+
+# hold_lock <path>: a stand-in gate holding <path> until release_lock; sets HOLDER. `flock -o`
+# keeps the lock in flock itself, so killing its sleep releases it.
+hold_lock() {
+  flock -o "$1" sleep 60 >/dev/null 2>&1 &
+  HOLDER=$!
+  sleep 0.5
+}
+release_lock() { pkill -P "$1" sleep || true; wait "$1" 2>/dev/null || true; }
+
+@test "slots: GATE_SLOTS=2 runs beside one busy gate, and a third waits for a slot to free" {
+  make_pr src/app.txt "hello"
+  hold_lock "$GATE_LOCK.1"
+  local first=$HOLDER
+
+  GATE_SLOTS=2 run_gate "$PR"
+  [ "$status" -eq 0 ]
+  has_line "GATE slot 2/2"
+  no_output_line_matching '^GATE waiting'
+  [ ! -e "$GATE_LOCK" ]
+
+  hold_lock "$GATE_LOCK.2"
+  local second=$HOLDER
+  GATE_SLOTS=2 "$ROOT/devkit/bin/local_gate.sh" "$PR" >"$TMP/third.out" 2>&1 &
+  local third=$!
+  sleep 2
+  grep -qxF "GATE waiting for another repo's gate to finish" "$TMP/third.out"
+  kill -0 "$third"   # still blocked: both slots are held
+  release_lock "$second"
+  local rc=0
+  wait "$third" || rc=$?
+  release_lock "$first"
+  output=$(cat "$TMP/third.out")
+  [ "$rc" -eq 0 ]
+  has_line "GATE slot 2/2"
   has_line "VERDICT PASS head=$HEAD_SHA main=$(main_sha)"
 }
 
