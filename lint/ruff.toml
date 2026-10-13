@@ -1,0 +1,9 @@
+# Shared ruff base: the settings finplat (backend/pyproject.toml) and locus (pyproject.toml)
+# had byte for byte. Consumers `extend` it; see lint/README.md.
+# Per-project on purpose, never here: `src`, `exclude`, `[lint.isort] known-first-party`
+# (it names the project's own package).
+target-version = "py313"
+line-length = 100
+
+[lint]
+select = ["E", "F", "I", "N", "W", "UP"]
