@@ -3,7 +3,7 @@
 > An alternative private front-end to Reddit, with its origins in [Libreddit](https://github.com/libreddit/libreddit).
 
 > [!NOTE]
-> **This is a personal fork**, heavily customized for a single self-hosted instance. Major divergences from upstream: a single dense "utility broadsheet" layout (system fonts, `color-mix()` design tokens), 8 curated WCAG-tuned themes including a Hacker News-inspired default, HN-grade comment ergonomics (depth ramp, hover actions, collapse controls), a mobile tab bar, offline reading via service worker, server-side saved posts, a rendered-HTML cache, a stale-while-revalidate Reddit cache with idle prefetch of the posts you're likely to open next, concurrent upstream fetches, and an async OAuth bootstrap that can't wedge on a bad network. **See [`docs/fork.md`](docs/fork.md) for the full list**, and `CLAUDE.md` for architecture and conventions. Upstream docs below remain accurate for configuration; deployment is the fork's own (see [Deployment](#deployment)).
+> **This is a personal fork**, heavily customized for a single self-hosted instance. Major divergences from upstream: a single dense "utility broadsheet" layout (system fonts, `color-mix()` design tokens), 8 curated WCAG-tuned themes including a Hacker News-inspired default, HN-grade comment ergonomics (depth ramp, hover actions, collapse controls), a mobile tab bar, offline reading via service worker, server-side saved posts, a rendered-HTML cache, a stale-while-revalidate Reddit cache with idle prefetch of the posts you're likely to open next, concurrent upstream fetches, and an async OAuth bootstrap that can't wedge on a bad network. **See [`docs/fork.md`](docs/fork.md) for the full list**, and [`AGENTS.md`](AGENTS.md) for architecture and conventions. Upstream docs below remain accurate for configuration; deployment is the fork's own (see [Deployment](#deployment)).
 
 ![screenshot](https://i.ibb.co/18vrdxk/redlib-rust.png)
 
@@ -33,9 +33,13 @@
      - [Reddit](#reddit)
      - [Redlib](#redlib-1)
        - [Server](#server)
-5. [Deployment](#deployment)
-   - [Running locally](#running-locally)
+5. [Running this fork](#running-this-fork)
+   - [Getting started](#getting-started)
+   - [Commands](#commands)
+   - [Architecture](#architecture)
+   - [Deployment](#deployment)
    - [Tracking upstream](#tracking-upstream)
+   - [Documentation](#documentation)
 6. [Configuration](#configuration)
    - [Instance settings](#instance-settings)
    - [Default user settings](#default-user-settings)
@@ -156,21 +160,41 @@ For transparency, I hope to describe all the ways Redlib handles user privacy.
 
 ---
 
-# Deployment
+# Running this fork
+
+This block is the fork's own; everything outside it is upstream's text, kept for configuration reference.
+
+## Getting started
+
+```bash
+make install            # once per checkout or worktree: git hooks (core.hooksPath=.githooks)
+cp .env.example .env    # read from the working directory at startup; edit as needed
+REDLIB_DB_PATH=/tmp/redlib.db cargo run -- -p 8199
+```
+
+The listener opens only after the OAuth bootstrap against Reddit succeeds, so a local run needs network access to Reddit. The Mac has no system Rust; prefix commands with `PATH="$(devkit/bin/rust_toolchain.sh .):$PATH"` to use the pinned toolchain from `rust-toolchain.toml`.
+
+## Commands
+
+| Command | Does |
+|---|---|
+| `make ci-quick` | devkit, toolchain, workflow, docs and release guards, `cargo fmt --check`, clippy `-D warnings` |
+| `make ci-unit` | `cargo test`, offline |
+| `make ci-image` | builds the Dockerfile for this host's platform and checks its `APP_VERSION` |
+| `make test-live` | the `#[ignore]`d tests that call live Reddit, serially; gates nothing |
+| `make gate PR=<n>` | the merge gate: the PR merged into `origin/main`, posting the `local-gate` status |
+| `make help` | every target |
+
+## Architecture
+
+One Rust binary (hyper server, `src/main.rs` router) that proxies Reddit's JSON API and media, renders HTML with askama templates, and serves every static asset compiled into the binary. In-memory caches sit in front of Reddit (a stale-while-revalidate JSON cache, a rendered-post cache), saved posts live in SQLite, and an OAuth bootstrap must succeed before the listener opens. The full map, with the rules that keep it working, is [`AGENTS.md`](AGENTS.md#architecture).
+
+## Deployment
 
 This fork runs one instance (`reddit.box`), so it carries one deployment path; upstream's recipes (Docker Compose and CLI, Podman Quadlets, systemd, launchd, Replit/Heroku, NetBSD) were removed with the files they used. See [upstream's README](https://github.com/redlib-org/redlib#deployment) for those.
 
 - **Image:** every push to `main` builds `ghcr.io/agandhi4/redlib` (`.github/workflows/ghcr.yml`), tagged `sha-<7>` and `latest`, and creates the git tag `ship-<YYYY-MM-DD>-<sha7>`. The bare `<sha7>` is the image's `APP_VERSION`, its OCI version label and the version in the page footer.
 - **Stack:** the compose file lives in the homelab repo (`stacks/redlib/docker-compose.yml`); its hourly `deploy.sh update` timer pulls `latest`. Instance settings are env vars there.
-
-## Running locally
-
-```bash
-cp .env.example .env    # read from the working directory at startup; edit as needed
-REDLIB_DB_PATH=/tmp/redlib.db cargo run -- -p 8199
-```
-
-The listener opens only after the OAuth bootstrap against Reddit succeeds, so a local run needs network access to Reddit.
 
 ## Tracking upstream
 
@@ -180,6 +204,14 @@ This is a hard fork of [redlib-org/redlib](https://github.com/redlib-org/redlib)
 git remote add upstream https://github.com/redlib-org/redlib.git
 git fetch upstream && git log --oneline main..upstream/main
 ```
+
+## Documentation
+
+- [`docs/fork.md`](docs/fork.md): what the fork changes and why, the fork point and the upstream sync policy.
+- [`AGENTS.md`](AGENTS.md): architecture, conventions, CI and the PR gate, for humans and agent sessions alike.
+- [`docs/decisions.md`](docs/decisions.md): dated decisions, newest last.
+- [`devkit/README.md`](devkit/README.md): the vendored fleet tooling behind the `make` checks, hooks and gate.
+- [`.env.example`](.env.example): every instance setting with its default.
 
 ---
 
