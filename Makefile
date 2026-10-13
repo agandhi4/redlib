@@ -13,7 +13,7 @@ CI_IMAGE ?= redlib:ci
 CI_BUILD_VERSION ?= ci-$(shell git rev-parse --short=7 HEAD)
 
 .DEFAULT_GOAL := help
-.PHONY: help ci-quick ci-unit test-live ci-image gate devkit-sync devkit-check toolchain-check workflows-check docs-check release-check
+.PHONY: help ci-quick ci-unit test-live ci-image gate install hooks-check devkit-sync devkit-check toolchain-check workflows-check docs-check release-check
 
 help: ## list targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
@@ -33,14 +33,15 @@ ci-unit: ## cargo test, offline (live-Reddit tests are #[ignore]d)
 test-live: ## the #[ignore]d tests that call live Reddit (needs outbound network)
 	$(CARGO) test --locked -- --ignored --test-threads=1
 
-# linux/amd64 like ghcr.yml: the builder cross-compiles to x86_64 musl, so an arm64 host's
-# default platform would wrap that binary in an arm64 Alpine that cannot run it.
+# Builds for the host's platform (the Dockerfile picks its builder by TARGETARCH), so the gate on
+# the arm64 Mac compiles natively instead of under QEMU (issue #7). ghcr.yml publishes linux/amd64
+# from the same Dockerfile; the two differ only in which builder stage runs.
 #
 # No boot: the listener opens only after OAuth bootstrap against live Reddit (AGENTS.md "Startup
 # order"), so devkit's boot_image.sh BOOT_EXPECT_VERSION cannot run here. The build arg is checked
 # where it lands instead: the image's ENV (what the app reads) and its OCI version label.
 ci-image: ## build Dockerfile as $(CI_IMAGE) with APP_VERSION=$(CI_BUILD_VERSION), then assert ENV + label carry it
-	$(DOCKER) build --platform linux/amd64 --build-arg APP_VERSION="$(CI_BUILD_VERSION)" -t $(CI_IMAGE) .
+	$(DOCKER) build --build-arg APP_VERSION="$(CI_BUILD_VERSION)" -t $(CI_IMAGE) .
 	@env=$$($(DOCKER) image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $(CI_IMAGE) | sed -n 's/^APP_VERSION=//p'); \
 	label=$$($(DOCKER) image inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' $(CI_IMAGE)); \
 	if [ "$$env" = "$(CI_BUILD_VERSION)" ] && [ "$$label" = "$(CI_BUILD_VERSION)" ]; then \
@@ -52,6 +53,13 @@ ci-image: ## build Dockerfile as $(CI_IMAGE) with APP_VERSION=$(CI_BUILD_VERSION
 gate: ## make gate PR=<n> [GATE_ARGS=--no-post]
 	@test -n "$(PR)" || { echo "usage: make gate PR=<number> [GATE_ARGS=--no-post]" >&2; exit 2; }
 	devkit/bin/local_gate.sh "$(PR)" $(GATE_ARGS)
+
+# --fix rewrites core.hooksPath, so a tool that repointed it is undone by the next install.
+install: devkit-check ## one-time per checkout/worktree: install the git hooks (.githooks, steps in scripts/ci/hooks.conf)
+	devkit/bin/hooks_check.sh --fix
+
+hooks-check: ## core.hooksPath must be .githooks, with executable pre-commit and pre-push
+	devkit/bin/hooks_check.sh
 
 devkit-sync: ## pull the latest devkit and record it in .devkit-rev
 	devkit/bin/devkit-sync.sh
