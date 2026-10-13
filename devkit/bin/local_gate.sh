@@ -296,6 +296,9 @@ job() { # <name> <make target> [VAR=val...]
   # Backgrounded under `set -m` so the job leads its own process group: the watchdog can stop
   # everything under make, and a TERM to the gate runs its trap now instead of after the job.
   set -m
+  # The child opens $log after it is forked; create it first so the watchdog's first size read
+  # never races a missing file (it printed a `wc` error line before the job's redirect ran).
+  : >"$log"
   make -C "$WT" --no-print-directory "$@" </dev/null >"$log" 2>&1 &
   JOB_PGID=$!
   set +m

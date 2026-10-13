@@ -214,13 +214,14 @@ echo "devkit-new: first commit, through the hooks (pre-commit runs make ci-quick
 git commit -q -m "Create $NAME with devkit new ($STACK, devkit $DEVKIT_SHA7)
 
 Scaffolded by devkit/bin/devkit-new.sh: vendored devkit/, the standard ci-* Makefile,
-scripts/ci/gate_plan.sh, git hooks, the quick-check caller, Renovate's shared preset,
-AGENTS.md and docs/decisions.md. This commit passed make ci-quick in its pre-commit hook."
+scripts/ci/gate_plan.sh, git hooks, the quick-check caller, Renovate's shared preset and
+the standard docs (README.md, AGENTS.md, docs/decisions.md, docs/architecture.md). This
+commit passed make ci-quick in its pre-commit hook."
 
 cat <<MSG
 devkit-new: $REPO is ready ($(git rev-parse --short=7 HEAD)).
 Next, from the devkit checkout, once the GitHub repo exists (gh repo create agandhi4/$NAME --private --source $REPO --push):
   1. add "$NAME": {} to github/repos.json, then github/repo_settings.sh $NAME and github/labels_sync.sh $NAME
   2. grant the Mend Renovate app access to agandhi4/$NAME (renovate.json extends devkit's preset)
-  3. write the Architecture section of AGENTS.md; add a homelab stack under stacks/$NAME when it deploys
+  3. replace the <!-- --> placeholders in README.md, docs/architecture.md and AGENTS.md's Architecture; add a homelab stack under stacks/$NAME when it deploys
 MSG

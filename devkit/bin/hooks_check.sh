@@ -12,6 +12,10 @@
 # templates/githooks pre-push chains `git lfs pre-push` through hook_steps.sh; this check fails
 # when .gitattributes uses LFS and .githooks/pre-push neither chains it nor calls run_hook_steps.
 #
+# scripts/ci/hooks.conf, when present, must parse: every step goes through hook_steps.sh's own
+# parser, so a bad path filter (unknown key, empty glob list) fails install and the gate
+# preflight, naming the step, instead of blocking the next commit.
+#
 # Usage: devkit/bin/hooks_check.sh [--fix] [repo-root]
 #   repo-root defaults to the current checkout. --fix sets core.hooksPath to .githooks (the
 #   relative form, so each worktree runs its own checkout's hooks) before checking.
@@ -35,6 +39,9 @@ if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
 fi
 
 fail() { echo "hooks-check: $*"; exit 1; }
+
+# shellcheck source=/dev/null  # bin/hook_steps.sh: _hook_parse_step, the one parser for hooks.conf steps
+. "$(dirname "${BASH_SOURCE[0]}")/hook_steps.sh"
 
 ROOT=$(git -C "${ROOT:-.}" rev-parse --show-toplevel 2>/dev/null) || fail "${ROOT:-.} is not a git checkout"
 ROOT=$(cd "$ROOT" && pwd -P)
@@ -66,6 +73,25 @@ done
 
 if grep -qs 'filter=lfs' "$ROOT/.gitattributes" && ! grep -qE 'git lfs pre-push|run_hook_steps pre-push' "$ROOT/.githooks/pre-push"; then
   fail ".gitattributes uses LFS but .githooks/pre-push does not chain 'git lfs pre-push', so LFS objects never upload"
+fi
+
+CONF=$ROOT/scripts/ci/hooks.conf
+if [ -f "$CONF" ]; then
+  check_steps() { # <array name> <steps...>: print the first bad step's error
+    local name=$1 step
+    shift
+    for step in "$@"; do
+      _hook_parse_step "$step" || { echo "$name: $HOOK_STEP_ERROR"; return 0; }
+    done
+  }
+  conf_error=$(
+    PRE_COMMIT_STEPS=() PRE_PUSH_STEPS=()
+    # shellcheck source=/dev/null
+    . "$CONF" || { echo "cannot be sourced"; exit 0; }
+    check_steps PRE_COMMIT_STEPS ${PRE_COMMIT_STEPS[@]+"${PRE_COMMIT_STEPS[@]}"}
+    check_steps PRE_PUSH_STEPS ${PRE_PUSH_STEPS[@]+"${PRE_PUSH_STEPS[@]}"}
+  )
+  [ -z "$conf_error" ] || fail "scripts/ci/hooks.conf ${conf_error%%$'\n'*}"
 fi
 
 echo "hooks-check: ok"

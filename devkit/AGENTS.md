@@ -2,10 +2,17 @@
 
 Shared scripts vendored into every app repo by `bin/devkit-sync.sh` (only the paths in `VENDOR_PATHS`). Read `README.md` first.
 
+## Architecture
+Scripts in `bin/`, vendored by consumers (the paths in `VENDOR_PATHS`); fleet operations in
+`github/`; `devkit new` scaffolds in `templates/new/`; contract tests in `tests/`. The path map
+is README.md "Architecture".
+
 ## Invariants
 - Portable shell: macOS bash 3.2 + GNU bash; BSD + GNU coreutils. Empty arrays under `set -u`
   use `${a[@]+"${a[@]}"}`. No `readarray`, no `declare -A`, no GNU-only `sed -i` without `''`.
-- `shellcheck -s bash` clean; `bats tests/` green before any push. CI runs both.
+- `shellcheck -s bash` clean; `bats tests/` green before any push. CI runs both. On a Mac,
+  bats runs under /bin/bash 3.2, where a false `[[ … ]]` that is not a test's last line passes
+  silently: a Mac run is a smoke test, CI (bash 5, mawk) is the verdict.
 - Output contracts are APIs. `bin/local_gate.sh` prints `GATE <job> PASS|FAIL|SKIPPED|WATCHDOG|OVERBUDGET …` and
   `VERDICT PASS|FAIL head=<sha> main=<sha>`; `finplat_merge_queue.sh`, `mac_merge_queue.sh`
   and `worker.py` parse them. `.devkit-rev` is `<upstream commit> <tree sha>`,
