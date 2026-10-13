@@ -11,8 +11,9 @@ name: Build and push to GHCR
 #
 # Release identity (owner rule 2026-10-13): this job IS the deploy. homelab's `deploy.sh update`
 # timer pulls `latest` hourly, so after the push the job marks the commit shipped with the git tag
-# ship-<YYYY-MM-DD>-<sha7> (devkit/bin/ship_tag.sh). The same sha-<7> is the image's APP_VERSION
-# (ENV, read by the footer and /info) and its OCI version label: one string everywhere.
+# ship-<YYYY-MM-DD>-<sha7> (devkit/bin/ship_tag.sh). The bare <sha7> is the image's APP_VERSION
+# (ENV, read by the footer and /info) and its OCI version label (observability.md: one string,
+# the 7-char sha). `sha-` prefixes only the image tag.
 
 on:
   push:
@@ -45,10 +46,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The one version string: image tag, build arg and OCI label.
+      # The one version string, the bare 7-char sha: build arg and OCI label. The image tag is
+      # `sha-` + it (a bare hex tag reads as nothing in a registry listing).
       - name: Release version
         id: version
-        run: echo "version=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+        run: echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -68,7 +70,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=sha-${{ steps.version.outputs.version }}
             type=raw,value=latest
           labels: |
             org.opencontainers.image.version=${{ steps.version.outputs.version }}

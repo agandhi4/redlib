@@ -8,9 +8,10 @@
 CARGO ?= cargo
 DOCKER ?= docker
 CI_IMAGE ?= redlib:ci
-# The image's APP_VERSION, and what ci-image then asserts its ENV and OCI label carry: the gate
-# passes gate-<pr> (scripts/ci/gate_plan.sh); ghcr.yml's own build passes sha-<7>.
-CI_BUILD_VERSION ?= ci-$(shell git rev-parse --short=7 HEAD)
+# The image's APP_VERSION, and what ci-image then asserts its ENV and OCI label carry: the bare
+# 7-char sha, as ghcr.yml passes it; the gate passes gate-<pr> (scripts/ci/gate_plan.sh) because
+# it builds a merge commit that never ships.
+CI_BUILD_VERSION ?= $(shell git rev-parse --short=7 HEAD)
 
 .DEFAULT_GOAL := help
 .PHONY: help ci-quick ci-unit test-live ci-image gate install hooks-check devkit-sync devkit-check toolchain-check workflows-check docs-check release-check
