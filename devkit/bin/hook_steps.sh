@@ -8,9 +8,46 @@
 #   PRE_COMMIT_STEPS=("backend: static=ci-backend-static" "frontend: static=ci-frontend-static")
 #   PRE_PUSH_STEPS=("backend: unit=ci-backend-unit")
 #   ENV_REQUIRED_HOOKS="pre-push"   # hooks to skip when the worktree has no .env (optional)
-# Each step is "<label>=<make target>". Steps call the gate's own ci-* targets, never raw tools,
-# so a hook cannot drift from the gate. They run in order and stop at the first failure.
-# A listed hook loads ${HOOK_ENV_FILE:-<root>/.env} (shell-sourceable KEY=value, exported) or,
+# Each step is "<label>=<make target>[:<override>]". Steps call the gate's own ci-* targets,
+# never raw tools, so a hook cannot drift from the gate. They run in order and stop at the
+# first failure. A conf lists steps only: devkit decides which of them a change needs.
+#
+# Path scoping, by default: most repos need no conf change and no override. Each changed path
+# gets one area from the fleet layout table in _hook_classify (one `case`, first match wins,
+# derived from the five gate plans, each entry naming the repo that needs it): docs, backend,
+# frontend, native (ios/, OrbitAgent/, *.xcodeproj/: macOS-only, never run by hooks, as the gate
+# plans say) or other (Makefile, scripts/, Dockerfile, devkit/, .github/, src/, ...).
+# Each step's area comes from its make target's words (split on - and _), in either order
+# (finplat ci-backend-unit, Orbit ci-unit-backend): backend|server, frontend|web, or docs.
+#   backend target    skipped when every path is docs, frontend or native
+#   frontend target   skipped when every path is docs, backend or native
+#   docs target       runs only when some path is docs
+#   any other target  (ci-quick, ci-unit, ci-drift, ...) skipped when every path is docs or native
+# So an "other" path runs everything, as in the gate plans. A change of only docs (and native)
+# paths still runs docs-check: when no listed step is a docs target, the hook runs `make
+# docs-check` itself (if the Makefile declares it), the one check an AGENTS.md change must not
+# skip. A native-only change runs nothing and prints one line saying so.
+#
+# Overrides, for a repo whose layout or target naming the defaults misjudge (most need none):
+#   :unless=<globs>  skip the step when EVERY changed path matches one of the globs
+#   :only=<globs>    run the step only when SOME changed path matches one of the globs
+#   :always          run the step on every change
+# <globs> are comma-separated, no spaces, one override per step. A glob is a bash `case`
+# pattern over the whole repo-relative path, as in scripts/ci/gate_plan.sh: `*` also matches
+# `/`, so `*.md` matches at any depth and `docs/*` everything under docs/; `**` means `*`.
+#
+# Filters only ever remove work; the PR gate stays authoritative. Changed paths: pre-commit,
+# the staged paths; pre-push, every path touched by a commit in PUSH_RANGES (a bare sha is all
+# of its history: a new branch with no main to compare against). A rename counts as its old
+# and its new path, so a move out of an area still runs that area's steps. A merge commit
+# counts only the paths it changed against every parent (git's dense combined diff: conflict
+# resolutions), so merging main into a docs branch stays docs-only. With no changed paths (an
+# empty commit) docs and `only` steps skip and every other step runs. If git cannot list the
+# paths, every step runs, with a note. A skipped step prints "– <label> skipped (<why>)".
+# Every step is parsed before any runs, so a bad override blocks the hook up front;
+# hooks_check.sh rejects one too.
+#
+# ENV_REQUIRED_HOOKS: a listed hook loads ${HOOK_ENV_FILE:-<root>/.env} (shell-sourceable KEY=value, exported) or,
 # with no such file, skips its checks with a one-line note. Scripted vitest runs share the box
 # with agents and other worktrees, so VITEST_MAX_WORKERS defaults to 4 (closet #184).
 #
@@ -26,7 +63,8 @@
 # puts the checkout's pinned Node (.nvmrc) and Rust (rust-toolchain.toml) first on PATH, so
 # `make ci-*` here runs what the gate runs. A machine with no cargo (redlib's Mac) or another node
 # would otherwise fail the hook or test a different version. A pin that cannot be provided blocks
-# the hook, as it fails the gate. Nothing is provisioned when no step will run.
+# the hook, as it fails the gate. Nothing is provisioned when no step will run, including when
+# path scoping skips every step.
 
 # shellcheck source=/dev/null  # bin/toolchain_path.sh: toolchain_path, shared with local_gate.sh
 . "$(dirname "${BASH_SOURCE[0]}")/toolchain_path.sh"
@@ -90,17 +128,65 @@ run_hook_steps() {
       ;;
   esac
 
-  if [ "${#steps[@]}" -gt 0 ] && ! toolchain_path "$root"; then
+  # Plan every step before running any: skip reasons ("" = run), and how many will run.
+  local plan=() changed='' listed=1 runs=0 reason docs_steps=0
+  HOOK_AREAS=''
+  if [ "${#steps[@]}" -gt 0 ]; then
+    if changed=$(_hook_changed_paths "$hook"); then
+      _hook_classify "$changed"
+    else
+      echo "$hook: cannot list the changed paths; running every step"
+      listed=0
+    fi
+  fi
+  for step in ${steps[@]+"${steps[@]}"}; do
+    _hook_parse_step "$step" || { echo "$hook: $HOOK_STEP_ERROR in scripts/ci/hooks.conf"; return 1; }
+    [ "$(_hook_target_area "$HOOK_STEP_TARGET")" != docs ] || docs_steps=$((docs_steps + 1))
+    reason=
+    [ "$listed" = 0 ] || reason=$(_hook_skip_reason "$changed")
+    plan+=("$reason")
+    [ -n "$reason" ] || runs=$((runs + 1))
+  done
+  # Only docs (and native) paths, no docs step listed: docs-check is the check they must not skip.
+  if [ "$listed" = 1 ] && _hook_areas_within " docs native " && [ "$docs_steps" = 0 ] &&
+    case "$HOOK_AREAS" in *" docs "*) true ;; *) false ;; esac; then
+    if grep -qE '^docs-check[[:space:]]*:' "$root/Makefile" 2>/dev/null; then
+      steps+=("docs=docs-check")
+      plan+=("")
+      runs=$((runs + 1))
+    else
+      echo "– docs: no docs-check target in the Makefile; docs-only change checked by nothing here"
+    fi
+  fi
+
+  if [ "$runs" -gt 0 ] && ! toolchain_path "$root"; then
     echo "$hook: $TOOLCHAIN_ERROR"
     return 1
   fi
 
+  # Native-only: one line for the whole hook instead of a skip line per defaulted step.
+  local native_only=0
+  if [ "$listed" = 1 ] && [ "$HOOK_AREAS" = " native " ]; then
+    native_only=1
+    echo "– native-only change (ios/, OrbitAgent/, *.xcodeproj/): hooks run nothing for it; build and test it on the Mac"
+  fi
+
+  local i=0
   for step in ${steps[@]+"${steps[@]}"}; do
-    case "$step" in *=?*) ;; *) echo "$hook: bad step '$step' in hooks.conf (want label=make-target)"; return 1 ;; esac
+    reason=${plan[$i]}
+    i=$((i + 1))
+    _hook_parse_step "$step"
+    if [ -n "$reason" ] && [ "$native_only" = 1 ] && [ -z "$HOOK_STEP_FILTER" ]; then
+      continue
+    fi
+    if [ -n "$reason" ]; then
+      echo "– $HOOK_STEP_LABEL skipped ($reason)"
+      continue
+    fi
     rc=0
-    run_step "${step%%=*}" make -C "$root" --no-print-directory "${step#*=}" || rc=$?
+    run_step "$HOOK_STEP_LABEL" make -C "$root" --no-print-directory "$HOOK_STEP_TARGET" || rc=$?
     if [ "$rc" -ne 0 ]; then
-      echo "$hook: blocked by '${step%%=*}'; fix it and try again"
+      echo "$hook: blocked by '$HOOK_STEP_LABEL'; fix it and try again"
       return "$rc"
     fi
   done
@@ -121,3 +207,174 @@ _hook_allow_push() {
     git lfs pre-push "$@" </dev/null
   fi
 }
+
+# <step>: split one hooks.conf step into HOOK_STEP_LABEL, HOOK_STEP_TARGET, HOOK_STEP_FILTER
+# (unless, only, always or empty: the default rule) and HOOK_STEP_GLOBS (array). Returns 1 with HOOK_STEP_ERROR naming the
+# step when it is malformed. Used by: run_hook_steps, and hooks_check.sh to validate the conf.
+# The label may contain ':' ("backend: pytest"); the first '=' ends it, and the first ':' after
+# that starts the filter, since a make target name cannot hold one.
+_hook_parse_step() {
+  local step=$1 rest filter
+  HOOK_STEP_LABEL='' HOOK_STEP_TARGET='' HOOK_STEP_FILTER='' HOOK_STEP_ERROR=''
+  HOOK_STEP_GLOBS=()
+  case "$step" in
+    ?*=?*) ;;
+    *) HOOK_STEP_ERROR="bad step '$step' (want label=make-target)"; return 1 ;;
+  esac
+  HOOK_STEP_LABEL=${step%%=*}
+  rest=${step#*=}
+  HOOK_STEP_TARGET=${rest%%:*}
+  [ -n "$HOOK_STEP_TARGET" ] || { HOOK_STEP_ERROR="bad step '$step' (empty make target)"; return 1; }
+  [ "$HOOK_STEP_TARGET" != "$rest" ] || return 0
+  filter=${rest#*:}
+  case "$filter" in
+    always) HOOK_STEP_FILTER=always; return 0 ;;
+    unless=*|only=*) ;;
+    *) HOOK_STEP_ERROR="bad step '$step' (unknown override '${filter%%=*}', want unless=<globs>, only=<globs> or always)"; return 1 ;;
+  esac
+  HOOK_STEP_FILTER=${filter%%=*}
+  filter=${filter#*=}
+  case "$filter" in
+    '') HOOK_STEP_ERROR="bad step '$step' (empty glob list)"; return 1 ;;
+    ,*|*,|*,,*) HOOK_STEP_ERROR="bad step '$step' (empty glob in '$filter')"; return 1 ;;
+    *:*) HOOK_STEP_ERROR="bad step '$step' (one override per step; ':' in '$filter')"; return 1 ;;
+    *[[:space:]]*) HOOK_STEP_ERROR="bad step '$step' (whitespace in '$filter')"; return 1 ;;
+  esac
+  # read -a splits on IFS without pathname expansion, so the globs stay patterns.
+  IFS=, read -r -a HOOK_STEP_GLOBS <<<"$filter"
+}
+
+# <changed paths, one per line>: why the parsed step should be skipped, or nothing to run it.
+# The default rules read HOOK_AREAS (set by _hook_classify); the overrides read the paths.
+_hook_skip_reason() {
+  local changed=$1 path globs area others
+  case "$HOOK_STEP_FILTER" in
+    always) return 0 ;;
+    unless|only)
+      globs=$(IFS=,; echo "${HOOK_STEP_GLOBS[*]}")
+      if [ "$HOOK_STEP_FILTER" = unless ]; then
+        [ -n "$HOOK_AREAS" ] || return 0
+        while IFS= read -r path; do
+          [ -z "$path" ] || _hook_path_matches "$path" || return 0
+        done <<<"$changed"
+        echo "changed paths match unless=$globs"
+      else
+        while IFS= read -r path; do
+          [ -z "$path" ] || ! _hook_path_matches "$path" || return 0
+        done <<<"$changed"
+        echo "no changed path matches only=$globs"
+      fi
+      return 0
+      ;;
+  esac
+  area=$(_hook_target_area "$HOOK_STEP_TARGET")
+  case "$area" in
+    docs)
+      case "$HOOK_AREAS" in *" docs "*) return 0 ;; esac
+      echo "no docs path changed; default for a docs target"
+      return 0
+      ;;
+    backend) others=" frontend docs native " ;;
+    frontend) others=" backend docs native " ;;
+    *) area=generic others=" docs native " ;;
+  esac
+  # Runs on an empty change, or when any changed area is outside the skippable set.
+  [ -n "$HOOK_AREAS" ] || return 0
+  _hook_areas_within "$others" || return 0
+  local list=''
+  for path in $HOOK_AREAS; do list+=${list:+, }$path; done
+  echo "only $list paths changed; default for a $area target"
+}
+
+# <" a b ">: is every area in HOOK_AREAS one of these? True for no areas at all.
+_hook_areas_within() {
+  local area
+  for area in $HOOK_AREAS; do
+    case "$1" in *" $area "*) ;; *) return 1 ;; esac
+  done
+}
+
+# <changed paths, one per line>: set HOOK_AREAS to the areas present, " a b " ("" for none).
+# THE fleet layout table: one `case`, first match wins, so a specific entry sits above the
+# general one it carves out of. Each entry names the repo(s) whose gate plan it mirrors. A
+# layout the table misjudges gets a per-step override in that repo's hooks.conf; an entry here
+# only when it is the fleet's convention, since every repo is classified by every entry.
+_hook_classify() {
+  local path docs=0 backend=0 frontend=0 native=0 other=0
+  while IFS= read -r path; do
+    case "$path" in
+      '') ;;
+      # Read by docs-check alone (finplat, Orbit, locus, rollcall).
+      scripts/ci/docs_oversize.txt) docs=1 ;;
+      # Fixtures under docs/ that tests read (locus): rule-fixtures by pytest and vitest,
+      # sync-wire-fixtures by pytest. Above docs/* so they are not mistaken for prose.
+      docs/rule-fixtures/*.md|docs/sync-wire-fixtures/*.md) docs=1 ;;
+      docs/rule-fixtures/*) other=1 ;;
+      docs/sync-wire-fixtures/*) backend=1 ;;
+      # Prose at any depth (every repo; frontend/AGENTS.md is docs), and Orbit's specs/.
+      docs/*|*.md|specs/*) docs=1 ;;
+      # macOS-only: locus ios/, Orbit OrbitAgent/, instalite's project file. The gate plans
+      # run nothing for them; instalite's Swift sources (InstaLite/) stay other.
+      ios/*|OrbitAgent/*|*.xcodeproj/*) native=1 ;;
+      # finplat, Orbit backend/; locus server/ plus its root-level Python project (tests/,
+      # alembic, pyproject.toml, uv.lock). rollcall's tests/ lands here too, harmlessly: its
+      # steps are generic targets, which run for any non-docs area.
+      backend/*|server/*|tests/*|alembic/*|alembic.ini|pyproject.toml|uv.lock) backend=1 ;;
+      # finplat, Orbit frontend/; locus, instalite web/; Orbit's Playwright e2e/.
+      frontend/*|web/*|e2e/*) frontend=1 ;;
+      *) other=1 ;;
+    esac
+  done <<<"$1"
+  HOOK_AREAS=
+  [ "$docs" = 0 ] || HOOK_AREAS+=" docs"
+  [ "$backend" = 0 ] || HOOK_AREAS+=" backend"
+  [ "$frontend" = 0 ] || HOOK_AREAS+=" frontend"
+  [ "$native" = 0 ] || HOOK_AREAS+=" native"
+  [ "$other" = 0 ] || HOOK_AREAS+=" other"
+  [ -z "$HOOK_AREAS" ] || HOOK_AREAS+=" "
+}
+
+# <make target>: backend, frontend, docs or generic, from its words split on - and _. A target
+# naming two areas (ci-backend-frontend) is generic. Used by: the default rules, and the
+# implicit docs-check (a listed docs target makes it unnecessary).
+_hook_target_area() {
+  local word area=generic found=''
+  local words=()
+  IFS='-_' read -r -a words <<<"$1"
+  for word in ${words[@]+"${words[@]}"}; do
+    case "$word" in
+      backend|server) word=backend ;;
+      frontend|web) word=frontend ;;
+      docs) ;;
+      *) continue ;;
+    esac
+    if [ -z "$found" ]; then found=$word; elif [ "$found" != "$word" ]; then found=mixed; fi
+  done
+  case "$found" in backend|frontend|docs) area=$found ;; esac
+  echo "$area"
+}
+
+# <path>: does it match one of HOOK_STEP_GLOBS? `case` semantics, as in gate_plan.sh.
+_hook_path_matches() {
+  local glob
+  for glob in "${HOOK_STEP_GLOBS[@]}"; do
+    # shellcheck disable=SC2254  # unquoted on purpose: the glob is the pattern
+    case "$1" in $glob) return 0 ;; esac
+  done
+  return 1
+}
+
+# <hook>: the changed paths, one per line (duplicates and blank lines possible). A subshell so
+# pipefail reaches git's status: a git failure must not read as "no changed paths". -z keeps
+# git from C-quoting non-ASCII names, which would then match no glob.
+_hook_changed_paths() (
+  set -o pipefail
+  if [ "$1" = pre-commit ]; then
+    git diff --cached --name-only --no-renames -z | tr '\0' '\n'
+    exit
+  fi
+  while IFS= read -r range; do
+    [ -n "$range" ] || continue
+    git log --name-only --format= --no-renames --diff-merges=dense-combined -z "$range" | tr '\0' '\n' || exit 1
+  done <<<"$PUSH_RANGES"
+)

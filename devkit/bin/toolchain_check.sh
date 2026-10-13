@@ -11,6 +11,11 @@
 #   - every `requires-python` in pyproject.toml (root and one level down) has that MAJOR.MINOR as its
 #     lower bound; specs outside the simple forms (>=X.Y[,<…], ==X.Y.*, ~=X.Y) warn, not fail
 #   - every setup-python step uses `python-version-file: .python-version`, not `python-version:`
+#   - every subproject <dir>/pyproject.toml (one level down) has <dir>/.python-version, a regular
+#     file holding exactly the root's string: uv stops .python-version discovery at the project
+#     boundary, so `cd backend && uv sync` never sees the root pin and falls back to
+#     requires-python (uv's newest Python). The root file stays the declaration; these are mirrors
+#     the check enforces, like Dockerfile tags. Not a symlink: it dangles in images that COPY dir/.
 # Rust (rust-toolchain.toml or rust-toolchain, exact MAJOR.MINOR.PATCH; parsed by rust_toolchain.sh):
 #   - every `FROM rust[:<tag>]` in Dockerfile* has the channel's MAJOR.MINOR (untagged floats: fails)
 #   - every `rust-version` (MSRV) in Cargo.toml (root and one level down) is <= the channel
@@ -78,7 +83,7 @@ check_node() {
 
 check_python() {
   if [ ! -f .python-version ]; then echo "toolchain-check: no .python-version; python not checked"; return; fi
-  local version mm df line image tag found pp spec raw lower wf lineno
+  local version mm df line image tag found pp spec raw lower wf lineno mirror
   version=$(tr -d '[:space:]' < .python-version)
   if [[ "$version" =~ ^([0-9]+\.[0-9]+)(\.[0-9]+)?$ ]]; then
     mm=${BASH_REMATCH[1]}
@@ -115,6 +120,22 @@ check_python() {
         warn "$pp requires-python '$spec' is not a form this check parses; verify it admits python $mm by hand"
       fi
     done < <(grep -E '^[[:space:]]*requires-python[[:space:]]*=' "$pp" || true)
+  done
+
+  # uv searches the working directory and its parents for .python-version but not beyond the
+  # project boundary, so a subproject (finplat/backend, orbit/backend) needs its own copy or
+  # uv picks its own default Python (3.15 under uv 0.13 rebuilt pandas from source on CI).
+  for pp in */pyproject.toml; do
+    [ -f "$pp" ] || continue
+    mirror=${pp%/pyproject.toml}/.python-version
+    if [ -L "$mirror" ]; then
+      fail "$mirror is a symlink; it dangles inside images that COPY the directory, make it a regular file (rm $mirror && cp .python-version $mirror)"
+    elif [ ! -f "$mirror" ]; then
+      fail "$pp is a uv project but $mirror is missing; uv stops .python-version discovery at the project boundary, so copy the root pin there (cp .python-version $mirror)"
+    else
+      found=$(tr -d '[:space:]' < "$mirror")
+      [ "$found" = "$version" ] || fail "$mirror says $found; root .python-version says $version (cp .python-version $mirror)"
+    fi
   done
 
   while IFS= read -r wf; do
