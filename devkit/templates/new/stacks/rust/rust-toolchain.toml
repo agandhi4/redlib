@@ -1,0 +1,8 @@
+# The one Rust version string for this repo. rustup, devkit/bin/rust_toolchain.sh (the gate and
+# scripts/ci/cargo.sh) and the Dockerfile's builder all resolve it; toolchain-check fails when
+# a `FROM rust:` minor or Cargo.toml's rust-version disagrees. Exact MAJOR.MINOR.PATCH only:
+# `stable` resolves to different compilers on two machines.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

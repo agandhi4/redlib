@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Update the vendored devkit/ to upstream and record what was vendored.
-# Usage: devkit/bin/devkit-sync.sh [ref]      (default: main)      or: make devkit-sync
+# Usage: devkit/bin/devkit-sync.sh [--stage] [ref]      (default: main)      or: make devkit-sync
+#   --stage  replace the tree and stage it with .devkit-rev, but make no commit: the caller's
+#            own commit carries the vendoring (devkit-new.sh, whose first commit must hold the
+#            whole scaffold and go through the hooks). devkit-check reads the index, so that
+#            commit passes its own pre-commit.
 #
 # How: fetch the upstream ref and REPLACE the devkit/ tree with upstream's tree (read-tree), then
 # write .devkit-rev = "<upstream commit> <tree>". No `git subtree pull`: squash-merged PRs drop the
@@ -11,10 +15,21 @@
 # First vendoring works the same way: run this script in a repo without devkit/.
 set -euo pipefail
 readonly DEVKIT_URL=${DEVKIT_URL:-https://github.com/agandhi4/devkit.git}
-REF=${1:-main}
+STAGE=0
+REF=
+for arg in "$@"; do
+  case "$arg" in
+    --stage) STAGE=1 ;;
+    -*) echo "usage: $0 [--stage] [ref]" >&2; exit 2 ;;
+    *) [ -z "$REF" ] || { echo "usage: $0 [--stage] [ref]" >&2; exit 2; }; REF=$arg ;;
+  esac
+done
+REF=${REF:-main}
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
-if ! git diff --quiet || ! git diff --cached --quiet; then
+# --stage leaves the sync in the index, so the index may already hold the caller's files; a
+# committing sync must start clean or its commit would sweep unrelated staged changes along.
+if [ "$STAGE" = 0 ] && { ! git diff --quiet || ! git diff --cached --quiet; }; then
   echo "devkit-sync: commit or stash first; the sync makes its own commit" >&2; exit 2
 fi
 git fetch -q "$DEVKIT_URL" "$REF"
@@ -27,6 +42,9 @@ fi
 git read-tree --prefix=devkit/ -u "$UPSTREAM_TREE"
 printf '%s %s\n' "$UPSTREAM" "$UPSTREAM_TREE" > .devkit-rev
 git add .devkit-rev devkit
+if [ "$STAGE" = 1 ]; then
+  echo "devkit at ${UPSTREAM:0:7} (tree ${UPSTREAM_TREE:0:7}), staged"; exit 0
+fi
 git commit -q -m "Update devkit to ${UPSTREAM:0:7}
 
 Vendored tree ${UPSTREAM_TREE:0:7} from $DEVKIT_URL $REF (replaced wholesale; see devkit/bin/devkit-sync.sh)."

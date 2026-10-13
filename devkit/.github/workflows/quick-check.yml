@@ -9,7 +9,9 @@ name: quick-check (reusable)
 # Copy templates/workflows/quick-check-caller.yml.
 #
 # Toolchains are detected from the checkout, never declared twice:
-#   Node   - always, from `node-version-file` (.nvmrc, the repo's single Node pin).
+#   Node   - when `node-version-file` (.nvmrc, the repo's single Node pin) exists. A repo
+#            with no Node (homelab: bash, compose, one stdlib Python lint) has no .nvmrc and
+#            gets none; a Node repo without .nvmrc fails its own toolchain_check instead.
 #            npm/pnpm cache picked from whichever lockfile exists.
 #   pnpm   - when a pnpm-lock.yaml exists; version from `packageManager` in `pnpm-package-json`.
 #   Python - only when `python-version` is set (uv otherwise uses the project's own pin).
@@ -78,7 +80,8 @@ jobs:
         with:
           package_json_file: ${{ inputs.pnpm-package-json }}
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - if: hashFiles(inputs.node-version-file) != ''
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: ${{ inputs.node-version-file }}
           cache: ${{ hashFiles('**/pnpm-lock.yaml') != '' && 'pnpm' || (hashFiles('**/package-lock.json') != '' && 'npm' || '') }}

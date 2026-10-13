@@ -1,0 +1,12 @@
+# Environment (secrets); .env.example is the documented template
+.env
+
+# Claude Code: only the committed settings.json is shared
+.claude/*
+!.claude/settings.json
+
+# Agent worktrees
+.claude/worktrees/
+
+# OS
+.DS_Store

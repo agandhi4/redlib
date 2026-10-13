@@ -160,7 +160,7 @@ For transparency, I hope to describe all the ways Redlib handles user privacy.
 
 This fork runs one instance (`reddit.box`), so it carries one deployment path; upstream's recipes (Docker Compose and CLI, Podman Quadlets, systemd, launchd, Replit/Heroku, NetBSD) were removed with the files they used. See [upstream's README](https://github.com/redlib-org/redlib#deployment) for those.
 
-- **Image:** every push to `main` builds `ghcr.io/agandhi4/redlib` (`.github/workflows/ghcr.yml`), tagged `sha-<7>` and `latest`, and creates the git tag `ship-<YYYY-MM-DD>-<sha7>`. The same `sha-<7>` is the image's `APP_VERSION`, its OCI version label and the version in the page footer.
+- **Image:** every push to `main` builds `ghcr.io/agandhi4/redlib` (`.github/workflows/ghcr.yml`), tagged `sha-<7>` and `latest`, and creates the git tag `ship-<YYYY-MM-DD>-<sha7>`. The bare `<sha7>` is the image's `APP_VERSION`, its OCI version label and the version in the page footer.
 - **Stack:** the compose file lives in the homelab repo (`stacks/redlib/docker-compose.yml`); its hourly `deploy.sh update` timer pulls `latest`. Instance settings are env vars there.
 
 ## Running locally

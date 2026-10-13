@@ -136,6 +136,24 @@ run_check() { cd "$CONSUMER" && run "$CHECK"; }
   [[ "$output" == *"differs from the vendored"* ]]
 }
 
+@test "staged vs working-copy .devkit-rev: the staged one is what devkit-check judges" {
+  run_sync; [ "$status" -eq 0 ]
+  local good
+  good=$(cat "$CONSUMER/.devkit-rev")
+  # An unstaged edit to .devkit-rev is not what gets committed: the check still passes.
+  echo "$(upstream_sha) 0000000000000000000000000000000000000000" >"$CONSUMER/.devkit-rev"
+  run_check
+  [ "$status" -eq 0 ]
+  # A staged devkit/ edit plus an unstaged .devkit-rev that matches it would commit drift: fails.
+  echo "$good" >"$CONSUMER/.devkit-rev"
+  echo 'echo hacked' >"$CONSUMER/devkit/bin/tool.sh"
+  git -C "$CONSUMER" add devkit/bin/tool.sh
+  echo "$(upstream_sha) $(git -C "$CONSUMER" write-tree --prefix=devkit/)" >"$CONSUMER/.devkit-rev"
+  run_check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"differs from the vendored"* ]]
+}
+
 @test "drift is repaired by the next sync (upstream wins)" {
   run_sync; [ "$status" -eq 0 ]
   echo 'echo hacked' >"$CONSUMER/devkit/bin/tool.sh"
@@ -145,6 +163,28 @@ run_check() { cd "$CONSUMER" && run "$CHECK"; }
   [ "$status" -eq 0 ]
   [ "$(cat "$CONSUMER/devkit/bin/tool.sh")" = 'echo v4' ]
   run_check; [ "$status" -eq 0 ]
+}
+
+@test "--stage: first vendoring lands in the index with no commit, and devkit-check passes on it" {
+  cd "$CONSUMER"
+  echo 'scaffold' >"$CONSUMER/new.txt"
+  git -C "$CONSUMER" add new.txt     # a staged file the caller's own commit will carry
+  run "$SYNC" --stage
+  [ "$status" -eq 0 ]
+  [[ "$output" == *", staged" ]]
+  [ "$(git -C "$CONSUMER" rev-list --count HEAD)" -eq 1 ]
+  [ "$(git -C "$CONSUMER" write-tree --prefix=devkit/)" = "$(upstream_tree)" ]
+  [ "$(rev_field 1)" = "$(upstream_sha)" ]
+  git -C "$CONSUMER" diff --cached --name-only | grep -qx .devkit-rev
+  git -C "$CONSUMER" diff --cached --name-only | grep -qx new.txt
+  run_check
+  [ "$status" -eq 0 ]
+}
+
+@test "--stage: an unknown flag is usage" {
+  cd "$CONSUMER"
+  run "$SYNC" --bogus
+  [ "$status" -eq 2 ]
 }
 
 @test "dirty tree: sync refuses before touching anything" {

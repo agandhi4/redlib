@@ -1,0 +1,13 @@
+{
+  "bundle.frontend.kb_login": {"direction": "lower", "bound": null},
+  "bundle.frontend.kb_total": {"direction": "lower", "bound": null},
+  "complexity.backend.cognitive_max": {"direction": "lower", "bound": null},
+  "complexity.frontend.cognitive_max": {"direction": "lower", "bound": null},
+  "coupling.backend.cycles": {"direction": "lower", "bound": null},
+  "coupling.frontend.cycles": {"direction": "lower", "bound": null},
+  "coverage.backend.lines": {"direction": "higher", "bound": null},
+  "coverage.frontend.lines": {"direction": "higher", "bound": null},
+  "dead.backend.vulture": {"direction": "lower", "bound": null},
+  "dead.frontend.knip_exports": {"direction": "lower", "bound": null},
+  "duplication.repo.jscpd_percent": {"direction": "lower", "bound": null}
+}

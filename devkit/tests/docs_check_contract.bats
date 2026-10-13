@@ -212,3 +212,30 @@ run_check() { run "$DOCS_CHECK" "$REPO"; }
   [ "$status" -eq 0 ]
   [[ "$output" == *"ok (2 AGENTS.md files)"* ]]
 }
+
+@test "a root AGENTS.md without '## Convention deltas' warns but passes (warn-only until 2026-11-01)" {
+  run_check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"docs-check: warning: AGENTS.md: no '## Convention deltas' heading"* ]]
+  [[ "$output" == *"Fails from 2026-11-01"* ]]
+}
+
+@test "a '## Convention deltas' heading silences the warning; other spellings do not" {
+  printf '# root rules\n\n## Convention deltas\nNone.\n' >"$REPO/AGENTS.md"
+  commit
+  run_check
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Convention deltas"* ]]
+  printf '# root rules\n\n## Global convention files - how they apply here\n' >"$REPO/AGENTS.md"
+  commit
+  run_check
+  [[ "$output" == *"no '## Convention deltas' heading"* ]]
+}
+
+@test "a nested AGENTS.md needs no Convention deltas heading" {
+  printf '# root rules\n\n## Convention deltas\nNone.\n' >"$REPO/AGENTS.md"
+  commit
+  run_check
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"warning"* ]]
+}

@@ -148,3 +148,60 @@ by its own hook (locus `own-commit`, 2026-10-13). Comparing HEAD also let a stag
 In CI the index equals HEAD; in the hook it is exactly what will be committed.
 **Consequence**: syncs commit through the hook; consumers still on the old script need the
 sync to land once (the hook runs the new vendored copy from the working tree).
+
+## 2026-10-13 — devkit CI runs on docs-only PRs that touch what docs_check judges
+**Why**: devkit once shipped without its CLAUDE.md symlink and broke every consumer's docs-check. CI already ran `docs_check` on devkit, but `paths-ignore: ['**.md', 'docs/**']` skipped exactly the PRs that change AGENTS.md, CLAUDE.md or docs/decisions.md, and devkit has no local gate to catch them.
+**Decision**: the PR trigger is an ordered `paths` list: everything, minus markdown and docs/, plus `**/AGENTS.md`, `**/CLAUDE.md`, `docs/decisions.md`. workflows_check accepts `!**.md` in `paths`. The self-check step runs all three guards before failing. `config_contract.bats` pins the list.
+**Consequence**: a README-only PR still bills nothing; an agent-docs PR bills one run.
+
+## 2026-10-13 — Gate watchdog: a silent job log ends the run
+**Why**: OrbStack paused its VM during an auto-update; a gate's pytest waited on Postgres with no timeout for an hour, holding the machine-wide flock while its log stopped growing.
+**Decision**: `job()` backgrounds make under `set -m` (own process group, stdin from /dev/null) and polls its log size every second. Silent for `GATE_SILENT_MINUTES` (default 15, decimals allowed, 0 disables): TERM the group, KILL after 10s, post `error`, print `GATE <job> WATCHDOG (...)` and `VERDICT FAIL`, exit 2. The EXIT trap now also stops a running job, so a TERMed gate no longer waits for its job to finish.
+**Consequence**: silence, not duration, is the signal: a 40-minute suite that keeps logging is never cut. A job that legitimately prints nothing for 15 min must log progress or the repo raises the variable. Exit 2 and `error` mark the box, not the code, as failed.
+
+## 2026-10-13 — devkit-check reads .devkit-rev from the index too
+**Why**: the tree side was already read from the index, but `.devkit-rev` came from disk, so an unstaged edit to it could vouch for a staged devkit/ tree it would never be committed with (and an unstaged stray edit failed a clean commit).
+**Decision**: `git show :.devkit-rev`; missing from the index fails like a missing file. A bats case covers both directions.
+**Consequence**: devkit-check judges exactly the commit being made, on both sides.
+
+## 2026-10-13 — Reusable quick-check sets up Node only when the repo has `.nvmrc`
+
+**Why:** homelab (bash, compose, one stdlib Python lint) adopts `make ci-quick` through this workflow and has no Node. The unconditional `setup-node` step fails a repo with no `node-version-file`.
+**Decision:** The step runs under `if: hashFiles(inputs.node-version-file) != ''`. A Node repo that drops `.nvmrc` is still caught, by its own `toolchain_check`. A contract test pins the guard.
+**Consequence:** Non-Node consumers call the same reusable workflow with no `.nvmrc` stub.
+
+## 2026-10-13 — `devkit new`: templates rendered by one script, stacks as additive directories
+**Why**: a new repo took weeks to reach the fleet's bar by copying from a sibling and drifting on the way (PLAN §1: "half a day instead of three weeks"). The `ci-*` names had to converge first; they have in six repos.
+**Decision**: `bin/devkit-new.sh` renders `templates/new/common/` then `stacks/<stack>/` (placeholders plus `#@image`/`#@no-image` line blocks), vendors through `devkit-sync.sh --stage` so the scaffold and the vendored tree share ONE first commit, and makes that commit through the hooks: pre-commit runs `make ci-quick`, so every guard has judged the repo before it exists. The hooks, Renovate file and quick-check caller are copied from their one home, never re-typed. Stack choices follow the converged consumers: npm, not pnpm (closet, rollcall); `.python-version` 3.13; no `.nvmrc` in a Python-only repo (the reusable quick-check sets up Node only when `.nvmrc` exists).
+**Consequence**: a tier a stack lacks is an `exit 2` stub the gate plan skips with a note, never a silent pass. `hooks_check.sh --fix` is bypassed for `core.hooksPath` because it no-ops under CI and the contract test runs there. Migrations (alembic), logging shape and Bugsink are the first things a real project adds; the scaffold stops at the health contract. `rust`, `next-vercel` and `swift-app` are new directories, not script changes.
+
+## 2026-10-13 — Ratchet: the PR tightens, and the bounds file is held to main's copy
+**Why**: the gate checks the merged tree, so `ratchet.json` was the PR's own copy and a hand edit loosened a bound with no label. `--tighten` was "main only", but nothing runs on main after a merge, and delivery.md says the improving PR tightens (phase3-plan §2.3–2.4).
+**Decision**: owner decision A. `check` also loads main's bounds (`git show origin/main:<path>`, or `--base-bounds`) and fails on a looser bound, a flipped direction or a removed key unless `--rebaseline-ok`. An unresolvable base ref exits 2; a base without the file is first adoption. `check --tighten` is gone; `tighten` rewrites only improved bounds, run by the author. `merge` joins `build/metrics/*.json` and refuses a key from two collectors. Keys are domain-first (`docs/metrics-keys.md`), not finplat's area-first, so the domain fixes the direction. Starter bounds are `null` until `rebaseline`, so a raw copy never gates on coverage 0.
+**Consequence**: supersedes the "`--tighten` only on main" line of the earlier ratchet entry. A PR that improves a number but skips `make metrics-tighten` passes and leaves slack, a cost decision A accepted. The Makefile is still read from the merged tree, so the label flag is as trustworthy as the gate plan model (2026-10-12).
+
+## 2026-10-13 — docs_check warns on a missing "## Convention deltas" heading; it fails from 2026-11-01
+**Why**: every convention says a project deviates only by a line under Convention deltas in its AGENTS.md, and six of seven repos had no such heading (phase3-plan §2.11).
+**Decision**: check 5 in `docs_check.sh` looks for the exact `## Convention deltas` heading in the root AGENTS.md. It uses `docs_warn` for now, so no consumer's ci-quick breaks on sync.
+**Consequence**: on 2026-11-01 a devkit PR flips it to `docs_fail` and its bats test to expect exit 1. Repos add the heading, or `None.`, in their Phase 3 PRs before then.
+
+## 2026-10-13 — contract_probe.sh: the observability contract asserted at runtime, opt-in per flag
+**Why**: release_check and BOOT_EXPECT_VERSION prove only the version; health shapes, request ids, log format and metric vocabulary drifted per repo (phase3-plan §1b), and finplat's dead JobFailed alert came from an outcome nobody checked at runtime.
+**Decision**: one script, run on boot_image's BASE, with one flag per assertion so each repo opts in the PR that complies. It follows observability.md over the brief where they differ: health `status` is `up|down`, not `ok`, and a 12-hex inbound X-Request-ID must NOT come back ("never trust an inbound id"). Outcomes allow `interrupted|discarded` (decision C); log fields are the convention's `ts level logger msg version request_id`. Every assertion runs after a failure; logs run last. JSON goes through `python3 -I`, since jq is not on every box.
+**Consequence**: the smoke must give `--json-log` the container name before `boot_image.sh down` removes it. `--proxy-404` takes a full public URL for post-deploy use; `--metrics` already sends X-Forwarded-For to the container.
+
+## 2026-10-13 — `devkit new` stacks: `rust` (from redlib) and `next-vercel` (from rollcall)
+**Why**: two converged repos had no scaffold: redlib (Rust, image) and rollcall (Next on Vercel, Drizzle).
+**Decision**: `rust` takes redlib's exact `rust-toolchain.toml` pin (1.99.0), fmt + clippy `-D warnings` + `cargo test --locked`, and an Alpine release stage with the APP_VERSION trio; every cargo call goes through `scripts/ci/cargo.sh` (`rust_toolchain.sh`, then exec), so the hooks on a Rust-less Mac and devkit's reusable quick-check (no Rust step) compile with the gate's version. `next-vercel` takes rollcall's typegen/tsc/eslint, drizzle drift via `git status -- drizzle/`, `with_test_pg.sh` for db and e2e, and `next build` as ci-build; `STACK_IMAGE=0` makes `--no-image` implied. Its `.nvmrc` is rollcall's 24.21.0, not the fleet's 22.23.3: npm 10 (Node 22) crashes resolving this dependency set (`edgesOut` of null) and cannot `npm ci` npm 11's lockfile.
+**Left out**: redlib's live-Reddit tests and cross-compiling builder; axum only, no DB tier. Rollcall's Neon preview-branch isolation, CSP, auth and seeding; Vercel preview checks. `next typegen` rewrites tsconfig.json to its own shape, so the template is byte-for-byte Next's output.
+**Consequence**: a stack's `.gitignore` now appends to the common one (node-service had not ignored `node_modules/`). Rust quick-checks compile axum uncached (~1 min billed).
+
+## 2026-10-13 — local_gate: GATE_SLOTS bounded concurrency, default 1
+**Why**: the single machine-wide flock (2026-10-05: overlapping full suites failed timing tests) queued eight PR gates on the Mac serially for over an hour.
+**Decision**: `GATE_SLOTS` (integer >= 1, default 1; junk is exit 2). With 1 the lock is exactly `$GATE_LOCK`, so running queues and linux-box keep sharing the file. With N the gate takes the first free `$GATE_LOCK.<n>` non-blocking, else prints the existing waiting line and polls each slot with `flock -w 5` (no strict FIFO; good enough for a handful of gates). It prints `GATE slot <n>/<N>`, a free-form line like plans' `GATE scope`.
+**Consequence**: the merge queues and linux-box keep 1. A human raising it on a laptop accepts the 2026-10-05 timing-test risk. Mixing N=1 and N>1 gates on one box does not bound them together: they lock different files.
+
+## 2026-10-13 — `devkit new` stack `swift-app` (from instalite); `.swift-version` pin; devkit CI on ready_for_review
+**Why**: instalite's native half (XcodeGen, swift-format, Swift Testing on a simulator) is the iOS shape; a new app should start there. Nothing in it runs on Linux, and devkit's own ci.yml skipped drafts with no `ready_for_review` trigger, so a draft PR had no CI until its next push.
+**Decision**: Swift-only (instalite's `web/` tier is its delta). `ci-guards` (devkit, toolchain, docs, release, workflows) is a target so Actions has one cheap Linux status (`STACK_QUICK_CHECK_TARGET`, appended to the copied caller as `make-target`); `ci-quick` adds `xcrun swift-format lint`; `ci-swift` builds and `ci-unit` tests on a simulator, gate only, never in a hook. Pin: `.swift-version` (swiftly's file), checked against `swift --version` on macOS on the file's precision and skipped elsewhere, since Linux runners ship an unrelated swift. Types use `__PASCAL_NAME__` (a dash is no Swift identifier). AGENTS.md's architecture line, Actions target and hook steps became stack-driven (hooks read from the repo's hooks.conf) instead of a per-stack AGENTS.md copy; `#@no-image-chosen` drops "adding an image" advice from `STACK_IMAGE=0` repos. `STACK_LOCK_CMD` is optional.
+**Consequence**: an Xcode upgrade that moves Swift's minor fails toolchain-check until `.swift-version` moves with it, deliberately. `make` exits 2 for any failed recipe, so the bats stub checks only prove the stub fails with its message.

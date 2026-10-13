@@ -145,12 +145,12 @@ last_line() { echo "${lines[${#lines[@]}-1]}"; }
 
 # ---- toolchain_check.sh ----------------------------------------------------------------------
 
-@test "toolchain_check: no .nvmrc or .python-version means nothing to check, exit 0" {
+@test "toolchain_check: no declaration file at all means nothing to check, exit 0" {
   make_repo
   rm "$REPO/.nvmrc"
   run_check
   [ "$status" -eq 0 ]
-  [ "$output" = "toolchain-check: no .nvmrc, .python-version or rust-toolchain.toml; nothing to check" ]
+  [ "$output" = "toolchain-check: no .nvmrc, .python-version, rust-toolchain.toml or .swift-version; nothing to check" ]
 }
 
 @test "toolchain_check: consistent Node-only repo passes and skips python" {
@@ -536,10 +536,67 @@ EOF
   [[ "$output" == *"rust-toolchain.toml must pin an exact channel"* ]]
 }
 
-@test "toolchain_check: node + python + rust ok line lists all three" {
+@test "toolchain_check: node + python + rust + swift ok line lists all four" {
   make_py_repo
   write_rust_toml "$RUST_WANTED"
+  make_swift_repo Darwin "6.2.4"
   run_check
   [ "$status" -eq 0 ]
-  [ "$output" = "toolchain-check: ok (node $WANTED, python $PY_WANTED, rust $RUST_WANTED)" ]
+  [ "$output" = "toolchain-check: ok (node $WANTED, python $PY_WANTED, rust $RUST_WANTED, swift $SWIFT_WANTED)" ]
+}
+
+# ---- swift (.swift-version) ---------------------------------------------------------------------
+# uname and swift are PATH stubs, so the macOS branch runs on the Linux CI runner too.
+SWIFT_WANTED=6.2
+make_swift_repo() { # <uname> <swift version, or "" for no swift on PATH>
+  mkdir -p "$REPO"
+  printf '%s\n' "$SWIFT_WANTED" >"$REPO/.swift-version"
+  printf '#!/bin/sh\necho %s\n' "$1" >"$BIN/uname"
+  chmod +x "$BIN/uname"
+  if [ -n "$2" ]; then
+    printf '#!/bin/sh\necho "swift-driver version: 1.127.15 Apple Swift version %s (swiftlang-%s.1.4 clang-1700.6.4.2)"\necho "Target: arm64-apple-macosx26.0"\n' "$2" "$2" >"$BIN/swift"
+    chmod +x "$BIN/swift"
+  fi
+}
+
+@test "toolchain_check: swift on macOS matching .swift-version on its precision passes" {
+  make_swift_repo Darwin 6.2.4
+  run_check
+  [ "$status" -eq 0 ]
+  [ "$(last_line)" = "toolchain-check: ok (swift $SWIFT_WANTED)" ]
+  # Apple prints a .0 patch as MAJOR.MINOR; an exact pin still matches it.
+  make_swift_repo Darwin 6.2
+  printf '6.2.0\n' >"$REPO/.swift-version"
+  run_check
+  [ "$status" -eq 0 ]
+}
+
+@test "toolchain_check: swift on macOS that disagrees fails, and 6.2 never matches 6.20" {
+  make_swift_repo Darwin 6.1.2
+  run_check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"swift is 6.1.2; .swift-version says $SWIFT_WANTED"* ]]
+  make_swift_repo Darwin 6.20.1
+  run_check
+  [ "$status" -eq 1 ]
+}
+
+@test "toolchain_check: .swift-version off macOS is skipped, not failed; no swift on macOS fails" {
+  make_swift_repo Linux ""
+  run_check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"not macOS; swift $SWIFT_WANTED (Xcode's) not checked"* ]]
+  make_swift_repo Darwin ""
+  run env PATH="$BIN:/usr/bin:/bin" "$TOOLCHAIN_CHECK" "$REPO"
+  if command -v /usr/bin/swift >/dev/null; then skip "this machine has /usr/bin/swift"; fi
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"swift is not on PATH"* ]]
+}
+
+@test "toolchain_check: malformed .swift-version fails" {
+  make_swift_repo Darwin 6.2.4
+  printf 'latest\n' >"$REPO/.swift-version"
+  run_check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *".swift-version must hold MAJOR.MINOR"* ]]
 }
