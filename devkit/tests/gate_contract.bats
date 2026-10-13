@@ -84,6 +84,8 @@ make_repos() {
   cat >"$ROOT/Makefile" <<'EOF'
 ci-a: ; @echo ran-a
 ci-fail: ; @echo ran-fail; exit 1
+ci-hang: ; @echo started; sh -c 'echo $$$$ >"$$HANG_PID"; exec sleep 60'
+ci-chatty: ; @for i in 1 2 3 4 5; do echo tick $$i; sleep 1; done
 EOF
   cat >"$ROOT/scripts/ci/gate_plan.sh" <<'EOF'
 GATE_SLUG=test/repo
@@ -93,6 +95,8 @@ gate_plan() {
   if ! grep -qvE '\.md$' <<<"$CHANGED"; then nothing_to_run "docs only"; fi
   job a ci-a
   if changed '^bad/'; then job failing ci-fail; fi
+  if changed '^hang/'; then job hang ci-hang; fi
+  if changed '^chatty/'; then job chatty ci-chatty; fi
   skip b "not needed"
 }
 EOF
@@ -132,6 +136,7 @@ has_line() { grep -qxF -- "$1" <<<"$output"; }
 no_output_line_matching() { ! grep -q -- "$1" <<<"$output"; }
 no_gh_call_matching() { [ ! -e "$GH_LOG" ] || ! grep -q -- "$1" "$GH_LOG"; }
 ref_absent() { ! git -C "$ROOT" show-ref --verify --quiet "$1"; }
+pid_gone() { ! kill -0 "$1" 2>/dev/null; }
 
 # status_posted <state> [substring...]: a gh api call posting <state> on the PR head.
 status_posted() {
@@ -240,6 +245,54 @@ status_posted() {
   GATE_PLAN=/nonexistent run_gate "$PR"
   [ "$status" -eq 2 ]
   [[ "$output" == *"no plan at /nonexistent"* ]]
+
+  GATE_SILENT_MINUTES=soon run_gate "$PR"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"GATE_SILENT_MINUTES must be a number of minutes (got 'soon')"* ]]
+}
+
+# 0.05 min = 3s. The OrbStack incident (2026-10-13): a job blocked forever, its log stopped growing.
+@test "watchdog: a silent job is stopped, error status, cleanup runs, later jobs do not, exit 2" {
+  make_pr hang/x.txt "zzz"
+  export HANG_PID=$TMP/hang.pid
+  GATE_SILENT_MINUTES=0.05 run_gate "$PR"
+  [ "$status" -eq 2 ]
+  local log=$XDG_STATE_HOME/test-gate/logs/$PR/hang.log
+  grep -qE '^GATE a PASS \([0-9]+s\)$' <<<"$output"
+  has_line "GATE hang WATCHDOG (silent for 0.05 min; log: $log)"
+  has_line "VERDICT FAIL head=$HEAD_SHA main=$(main_sha)"
+  no_output_line_matching '^GATE b '
+  grep -qx started "$log"
+
+  status_posted error "Job hang silent for 0.05 min"
+  [ "$(grep -c 'state=error' "$GH_LOG")" -eq 1 ]   # not followed by an "interrupted" error
+  pid_gone "$(cat "$HANG_PID")"                    # the whole process group, not just make
+  [ "$(cat "$CLEANUP_MARK")" = cleanup-ran ]
+  [ ! -e "$XDG_STATE_HOME/test-gate/wt-$PR" ]
+  ref_absent "refs/gate/pr-$PR"
+}
+
+@test "watchdog: a slow job that keeps logging outlives the silence window and passes" {
+  make_pr chatty/x.txt "zzz"
+  GATE_SILENT_MINUTES=0.05 run_gate "$PR"
+  [ "$status" -eq 0 ]
+  grep -qE '^GATE chatty PASS \([0-9]+s\)$' <<<"$output"
+  no_output_line_matching 'WATCHDOG'
+  has_line "VERDICT PASS head=$HEAD_SHA main=$(main_sha)"
+}
+
+@test "interrupted gate: TERM mid-job stops the job's process group and posts error" {
+  make_pr hang/x.txt "zzz"
+  export HANG_PID=$TMP/hang.pid
+  "$ROOT/devkit/bin/local_gate.sh" "$PR" >"$TMP/out" 2>&1 &
+  local gate=$! _
+  for _ in $(seq 50); do [ -s "$HANG_PID" ] && break; sleep 0.2; done
+  [ -s "$HANG_PID" ]
+  kill -TERM "$gate"
+  wait "$gate" || true
+  pid_gone "$(cat "$HANG_PID")"
+  status_posted error "Local gate interrupted before a verdict"
+  [ ! -e "$XDG_STATE_HOME/test-gate/wt-$PR" ]
 }
 
 @test "status posting retries three times before giving up (~30s of backoff)" {

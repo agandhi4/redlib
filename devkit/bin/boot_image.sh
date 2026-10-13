@@ -3,7 +3,9 @@
 # its health endpoint. The shared boot half of locus scripts/ci/smoke_image.sh, finplat
 # scripts/ci/browser_smoke.sh, orbit e2e/run.sh and closet scripts/smoke-image.sh. What each
 # repo asserts once the app is up (SPA HTML, healthcheck.py, seed + Playwright, migration log,
-# SIGTERM exit code) stays in that repo; it calls `down` from its own EXIT trap.
+# SIGTERM exit code) stays in that repo; it calls `down` from its own EXIT trap. The shared
+# observability-contract assertions (health shape, request ids, JSON logs, /metrics) are
+# contract_probe.sh, run on the BASE this prints.
 #
 # Usage: devkit/bin/boot_image.sh up|down <name>
 #   up    replace any leftovers, create network <name>-net, boot Postgres <name>-pg on it when

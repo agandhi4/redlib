@@ -1,0 +1,31 @@
+[project]
+name = "__NAME__"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.30",
+    "pydantic-settings>=2.7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "httpx>=0.28",
+    "ruff>=0.11",
+]
+
+# The shared base (target py313, 100 columns, E F I N W UP) is devkit's; only what names this
+# project's own code lives here (devkit/lint/README.md).
+[tool.ruff]
+extend = "devkit/lint/ruff.toml"
+
+[tool.ruff.lint.isort]
+known-first-party = ["server"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

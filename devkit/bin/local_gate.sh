@@ -29,8 +29,15 @@
 #   Every job must be a Makefile target the CI workflows also call: parity is structural.
 #   Change a check in the Makefile, never in the plan.
 #
+# Watchdog: a job whose log has not grown for GATE_SILENT_MINUTES (default 15; decimals allowed;
+#   0 disables) is hung, not slow. OrbStack paused its VM mid-update and a pytest waited on
+#   Postgres with no timeout for an hour, holding the machine-wide lock (2026-10-13). The job's
+#   process group gets TERM (KILL after 10s), the status is `error`, the EXIT trap cleans up, and
+#   the run stops with GATE <job> WATCHDOG, VERDICT FAIL and exit 2: the box failed, not the code.
+#
 # Output contract, parsed by the merge queues and worker.py — keep it:
 #   GATE <job> PASS|FAIL|SKIPPED [(...)]            one line per job
+#   GATE <job> WATCHDOG (silent for <n> min; log: <path>)   then the run stops
 #   VERDICT PASS|FAIL head=<pr-head-sha> main=<origin/main-sha>
 # A queue merges only when both SHAs are still current, so the squash-merged tree is exactly
 # the tree gated here.
@@ -39,7 +46,7 @@
 # form under `set -u`. `flock` is required (brew install flock on macOS): a silent no-lock let
 # overlapping Mac gates fail timing tests in suites the PR never touched (work-loop 2026-10-05).
 #
-# Exit: 0 pass, 1 fail, 2 usage or environment.
+# Exit: 0 pass, 1 fail, 2 usage or environment (a watchdog stop included).
 # shellcheck disable=SC2329,SC2317  # helpers are called by the sourced plan and the EXIT trap (2317 is the pre-0.10 code)
 set -uo pipefail
 
@@ -61,6 +68,11 @@ for arg in "$@"; do
   esac
 done
 [ -n "$PR" ] || { usage >&2; exit 2; }
+readonly SILENT_MINUTES=${GATE_SILENT_MINUTES:-15}
+[[ "$SILENT_MINUTES" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
+  || { echo "local_gate: GATE_SILENT_MINUTES must be a number of minutes (got '$SILENT_MINUTES')" >&2; exit 2; }
+SILENT_SECS=$(awk -v m="$SILENT_MINUTES" 'BEGIN { s = int(m * 60 + 0.5); print (m > 0 && s < 1) ? 1 : s }')
+readonly SILENT_SECS
 command -v flock >/dev/null || { echo "local_gate: flock not found (macOS: brew install flock)" >&2; exit 2; }
 
 ROOT=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel) || exit 2
@@ -107,6 +119,7 @@ CHANGED=""
 STATUS_OPEN=0   # a `pending` status is on the PR head and still needs a final state
 FAILED=0
 FAILED_JOBS=""
+JOB_PGID=""     # the running job's process group; the watchdog and cleanup signal all of it
 
 post_status() { # <state> <description>; three attempts, a GitHub timeout used to turn a PASS into a queue FAIL
   [ "$POST" = 1 ] || return 0
@@ -119,7 +132,41 @@ post_status() { # <state> <description>; three attempts, a GitHub timeout used t
   echo "local_gate: could not post $STATUS_CONTEXT=$1 on $HEAD_SHA after 3 attempts" >&2
 }
 
+# TERM the running job's whole process group (make, the test runner, its workers), KILL
+# whatever is left after 10s, then reap the leader quietly.
+stop_job() {
+  [ -n "$JOB_PGID" ] || return 0
+  local waited=0
+  kill -TERM -- "-$JOB_PGID" 2>/dev/null
+  while kill -0 -- "-$JOB_PGID" 2>/dev/null && [ "$waited" -lt 10 ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  kill -KILL -- "-$JOB_PGID" 2>/dev/null
+  wait "$JOB_PGID" 2>/dev/null
+  JOB_PGID=""
+}
+
+# True once the job's log has not grown for SILENT_SECS while it still runs; false when it ends.
+# `kill -0` turns false when bash reaps the finished leader (it reaps on SIGCHLD).
+job_went_silent() { # <log>
+  local size last=-1 since=$SECONDS
+  while kill -0 "$JOB_PGID" 2>/dev/null; do
+    size=$(wc -c <"$1")
+    if [ "$size" != "$last" ]; then
+      last=$size
+      since=$SECONDS
+    elif [ "$SILENT_SECS" -gt 0 ] && [ $((SECONDS - since)) -ge "$SILENT_SECS" ]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 cleanup() {
+  # An interrupted gate must not leave a job running in the worktree it is about to remove.
+  stop_job
   # An interrupted gate must not leave the PR showing `pending` forever.
   if [ "$STATUS_OPEN" = 1 ]; then post_status error "Local gate interrupted before a verdict"; fi
   gate_cleanup >/dev/null 2>&1
@@ -139,9 +186,26 @@ verdict() { # <PASS|FAIL> <status description>; ends the run
 
 # ---- helpers for gate_plan ---------------------------------------------------------------
 job() { # <name> <make target> [VAR=val...]
-  local name=$1 t0=$SECONDS
+  local name=$1 t0=$SECONDS log=$LOGDIR/$1.log rc
   shift
-  if make -C "$WT" --no-print-directory "$@" >"$LOGDIR/$name.log" 2>&1; then
+  # Backgrounded under `set -m` so the job leads its own process group: the watchdog can stop
+  # everything under make, and a TERM to the gate runs its trap now instead of after the job.
+  set -m
+  make -C "$WT" --no-print-directory "$@" </dev/null >"$log" 2>&1 &
+  JOB_PGID=$!
+  set +m
+  if job_went_silent "$log"; then
+    stop_job
+    echo "GATE $name WATCHDOG (silent for $SILENT_MINUTES min; log: $log)"
+    post_status error "Job $name silent for $SILENT_MINUTES min; stopped by the watchdog"
+    STATUS_OPEN=0
+    echo "VERDICT FAIL head=$HEAD_SHA main=$MAIN_SHA"
+    exit 2
+  fi
+  wait "$JOB_PGID"
+  rc=$?
+  JOB_PGID=""
+  if [ "$rc" = 0 ]; then
     echo "GATE $name PASS ($((SECONDS - t0))s)"
   else
     echo "GATE $name FAIL (log: $LOGDIR/$name.log)"
