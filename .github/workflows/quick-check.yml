@@ -2,7 +2,8 @@ name: Quick check
 
 # The per-PR Actions check: the same `make` targets the local gate runs (Makefile is the API).
 # Not devkit's reusable quick-check: that one provisions Node/Python, and this repo is Rust.
-# ghcr.yml (main-only image build and push) is separate and unchanged here.
+# Also runs on push to main, so main's own status says whether the merged tree is clean.
+# ghcr.yml (main-only image build and push) is separate; it does not wait on this.
 # The merge gate is `local-gate` (make gate PR=<n>); this is the cheap public-runner signal.
 
 on:
@@ -14,10 +15,15 @@ on:
     paths-ignore:
       - '**.md'
       - 'docs/**'
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
 
-# A new push to a PR cancels that PR's superseded run.
+# A new push to a PR (or to main) cancels that ref's superseded run. Safe: this job publishes nothing.
 concurrency:
-  group: quick-check-${{ github.event.pull_request.number }}
+  group: quick-check-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -25,11 +31,15 @@ permissions:
 
 jobs:
   quick-check:
-    if: github.event.pull_request.draft == false
+    # `!= true`, not `== false`: on a push there is no pull_request, and that must still run.
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # No `toolchain:` input: the action reads rust-toolchain.toml (toolchain-check enforces it).
-      # It also restores/saves the cargo cache (Swatinem/rust-cache) by default.
+      # It also restores/saves the cargo cache: the action wraps Swatinem/rust-cache (its own
+      # pinned copy), so a second rust-cache step here would only double the cache work.
+      # It also exports CARGO_BUILD_WARNINGS=deny. No parity gap with the local gate: ci-quick's
+      # `clippy --all-targets -D warnings` already fails on any rustc warning, test code included.
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
       - run: make ci-quick ci-unit

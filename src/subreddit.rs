@@ -746,6 +746,7 @@ mod tests {
 	use super::*;
 
 	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "hits live reddit"]
 	async fn test_fetching_subreddit() {
 		crate::client::init_oauth_client().await;
 		let subreddit = subreddit("rust", false).await;
@@ -753,6 +754,7 @@ mod tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "hits live reddit"]
 	async fn test_gated_and_quarantined() {
 		crate::client::init_oauth_client().await;
 		let quarantined = subreddit("edgy", true).await;

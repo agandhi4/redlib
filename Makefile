@@ -10,21 +10,25 @@ DOCKER ?= docker
 CI_IMAGE ?= redlib:ci
 
 .DEFAULT_GOAL := help
-.PHONY: help ci-quick ci-unit ci-image gate devkit-sync devkit-check toolchain-check docs-check
+.PHONY: help ci-quick ci-unit test-live ci-image gate devkit-sync devkit-check toolchain-check workflows-check docs-check
 
 help: ## list targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
 
-ci-quick: devkit-check toolchain-check docs-check ## format, lint and repo guards (Actions + gate)
+ci-quick: devkit-check toolchain-check workflows-check docs-check ## format, lint and repo guards (Actions + gate)
 	$(CARGO) fmt --all -- --check
 	$(CARGO) clippy --locked --all-targets -- -D warnings
 
-# Serial on purpose: client::CLIENT is one process-wide pooled HTTP client, and every
-# #[tokio::test] owns its own runtime. In parallel, a test's runtime shuts down while another
-# test is using a pooled connection driven by it, and requests fail with "SendRequest". Several
-# tests also call live Reddit (oauth.reddit.com), so this target needs outbound network.
-ci-unit: ## cargo test (live Reddit; serial, see comment)
-	$(CARGO) test --locked -- --test-threads=1
+# Offline and deterministic: every test that calls live Reddit is #[ignore = "hits live reddit"]
+# (Reddit rate-limits and blocks runner IPs, so they cannot gate a PR). Run those with test-live.
+ci-unit: ## cargo test, offline (live-Reddit tests are #[ignore]d)
+	$(CARGO) test --locked
+
+# Not part of any gate. Serial on purpose: client::CLIENT is one process-wide pooled HTTP client,
+# and every #[tokio::test] owns its own runtime. In parallel, a test's runtime shuts down while
+# another test is using a pooled connection driven by it, and requests fail with "SendRequest".
+test-live: ## the #[ignore]d tests that call live Reddit (needs outbound network)
+	$(CARGO) test --locked -- --ignored --test-threads=1
 
 # linux/amd64 like ghcr.yml: the builder cross-compiles to x86_64 musl, so an arm64 host's
 # default platform would wrap that binary in an arm64 Alpine that cannot run it.
@@ -43,6 +47,9 @@ devkit-check: ## part of ci-quick: devkit/ is unedited
 
 toolchain-check: ## part of ci-quick: one Rust version string
 	devkit/bin/toolchain_check.sh
+
+workflows-check: ## part of ci-quick: SHA pins, draft skip, one PR job, uncancellable pushes
+	devkit/bin/workflows_check.sh
 
 docs-check: ## part of ci-quick: AGENTS.md real, CLAUDE.md symlink, decisions.md
 	devkit/bin/docs_check.sh

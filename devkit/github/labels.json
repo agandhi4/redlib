@@ -26,6 +26,7 @@
     { "name": "api-breaking", "color": "b60205", "description": "Intentional breaking API change: the local gate runs the contract check with BREAKING_API_OK=1" },
     { "name": "metrics-rebaseline", "color": "d4c5f9", "description": "Intentional metrics regression: the local gate runs the ratchet with --rebaseline-ok" },
     { "name": "epic", "color": "3e4b9e", "description": "Tracks a set of child issues" },
+    { "name": "fleet-audit", "color": "5319e7", "description": "Filed by the monthly fleet audit (devkit bin/monthly_audit.sh)" },
     { "name": "dependencies", "color": "0366d6", "description": "Dependency update opened by Renovate" },
     { "name": "major-bump", "color": "e99695", "description": "Major version bump: review for breaking changes" },
     { "name": "security", "color": "ee0701", "description": "Fixes a security advisory" }

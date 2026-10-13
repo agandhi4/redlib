@@ -2,7 +2,7 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2030,SC2031  # each @test is its own subshell by design; nothing leaks between tests
 # Contract tests for bin/devkit-sync.sh and bin/devkit-check.sh. Everything is local: a bare
-# "upstream" repo stands in for agandhi4/devkit (git subtree accepts a path as DEVKIT_URL) and a
+# "upstream" repo stands in for agandhi4/devkit (git fetch accepts a path as DEVKIT_URL) and a
 # "consumer" repo vendors it under devkit/. Both scripts resolve the repo from the cwd, so they are
 # run from $CONSUMER; the copies under test are this repo's bin/, not the vendored fixture's.
 
@@ -53,66 +53,59 @@ advance_upstream() {
 upstream_sha() { git -C "$UPSTREAM" rev-parse main; }
 vendored_tree() { git -C "$CONSUMER" rev-parse HEAD:devkit; }
 rev_field() { cut -d' ' -f"$1" "$CONSUMER/.devkit-rev"; }
-squash_trailer() {
-  git -C "$CONSUMER" log -1 --grep='^git-subtree-dir: devkit$' --format=%B | sed -n 's/^git-subtree-split: //p'
-}
-
-vendor_first() {
-  git -C "$CONSUMER" subtree add --prefix=devkit "$UPSTREAM" main --squash >/dev/null 2>&1
-}
+upstream_tree() { git -C "$UPSTREAM" rev-parse 'main^{tree}'; }
 
 run_sync() { cd "$CONSUMER" && run "$SYNC"; }
 run_check() { cd "$CONSUMER" && run "$CHECK"; }
 
-@test "first vendoring: sync records upstream commit + vendored tree, check passes" {
-  vendor_first
+@test "first vendoring: sync creates devkit/ from upstream, records commit + tree, check passes" {
   run_sync
   [ "$status" -eq 0 ]
-  [ -f "$CONSUMER/.devkit-rev" ]
+  [ -f "$CONSUMER/devkit/bin/tool.sh" ]
   [ "$(rev_field 1)" = "$(upstream_sha)" ]
   [ "$(rev_field 2)" = "$(vendored_tree)" ]
-  [[ "${lines[${#lines[@]}-1]}" == "devkit at $(upstream_sha | cut -c1-7) (tree "* ]]  # last line: Ubuntu git also prints the subtree merge status
-  git -C "$CONSUMER" log -1 --format=%s | grep -q "^Record devkit $(upstream_sha | cut -c1-7) in .devkit-rev$"
+  [ "$(vendored_tree)" = "$(upstream_tree)" ]
+  [[ "${lines[${#lines[@]}-1]}" == "devkit at $(upstream_sha | cut -c1-7) (tree "* ]]
+  git -C "$CONSUMER" log -1 --format=%s | grep -q "^Update devkit to $(upstream_sha | cut -c1-7)$"
+  [ -z "$(git -C "$CONSUMER" status --porcelain)" ]
   run_check
   [ "$status" -eq 0 ]
   [ "$output" = "devkit-check: ok ($(upstream_sha | cut -c1-7))" ]
 }
 
-@test "upstream advances: sync pulls the new commit, content and .devkit-rev follow" {
-  vendor_first
-  run_sync
-  [ "$status" -eq 0 ]
-  local old_sha
-  old_sha=$(upstream_sha)
+@test "upstream advances: sync replaces the tree, content and .devkit-rev follow, no conflict possible" {
+  run_sync; [ "$status" -eq 0 ]
   advance_upstream 'echo v2'
-  [ "$(upstream_sha)" != "$old_sha" ]
-
   run_sync
   [ "$status" -eq 0 ]
-  [ "$(rev_field 1)" = "$(upstream_sha)" ]
-  [ "$(rev_field 2)" = "$(vendored_tree)" ]
   [ "$(cat "$CONSUMER/devkit/bin/tool.sh")" = 'echo v2' ]
-  run_check
-  [ "$status" -eq 0 ]
+  [ "$(rev_field 1)" = "$(upstream_sha)" ]
+  [ "$(vendored_tree)" = "$(upstream_tree)" ]
+  run_check; [ "$status" -eq 0 ]
 }
 
-@test "recorded commit is the squash commit's git-subtree-split trailer, not a fresh ls-remote" {
-  vendor_first
-  run_sync
-  advance_upstream 'echo v2'
-  run_sync
-  [ "$status" -eq 0 ]
-  [ -n "$(squash_trailer)" ]
-  [ "$(rev_field 1)" = "$(squash_trailer)" ]
-  # Upstream moving after the pull must not change what the recording would report.
+@test "sync survives a squash of the vendoring commit (no subtree trailers needed)" {
+  run_sync; [ "$status" -eq 0 ]
+  # Simulate a squash-merge: rewrite the last commit without any trailer lines.
+  git -C "$CONSUMER" commit -q --amend -m "Vendor devkit (squashed PR)"
   advance_upstream 'echo v3'
-  [ "$(rev_field 1)" = "$(squash_trailer)" ]
-  [ "$(rev_field 1)" != "$(upstream_sha)" ]
+  run_sync
+  [ "$status" -eq 0 ]
+  [ "$(cat "$CONSUMER/devkit/bin/tool.sh")" = 'echo v3' ]
+  [ "$(rev_field 1)" = "$(upstream_sha)" ]
 }
 
-@test "drift: an in-repo edit under devkit/ fails check and points at devkit-sync" {
-  vendor_first
+@test "already current: sync is a no-op and makes no commit" {
+  run_sync; [ "$status" -eq 0 ]
+  before=$(git -C "$CONSUMER" rev-parse HEAD)
   run_sync
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already current"* ]]
+  [ "$(git -C "$CONSUMER" rev-parse HEAD)" = "$before" ]
+}
+
+@test "drift: a local edit under devkit/ fails devkit-check and names the fix" {
+  run_sync; [ "$status" -eq 0 ]
   echo 'echo hacked' >"$CONSUMER/devkit/bin/tool.sh"
   git -C "$CONSUMER" commit -q -am "local edit to devkit"
   run_check
@@ -121,24 +114,27 @@ run_check() { cd "$CONSUMER" && run "$CHECK"; }
   [[ "$output" == *"make devkit-sync"* ]]
 }
 
-@test "dirty tree: sync refuses before pulling" {
-  vendor_first
+@test "drift is repaired by the next sync (upstream wins)" {
+  run_sync; [ "$status" -eq 0 ]
+  echo 'echo hacked' >"$CONSUMER/devkit/bin/tool.sh"
+  git -C "$CONSUMER" commit -q -am "local edit to devkit"
+  advance_upstream 'echo v4'
   run_sync
-  echo 'dirty' >>"$CONSUMER/app.txt"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$CONSUMER/devkit/bin/tool.sh")" = 'echo v4' ]
+  run_check; [ "$status" -eq 0 ]
+}
+
+@test "dirty tree: sync refuses before touching anything" {
+  echo 'wip' >>"$CONSUMER/app.txt"
   run_sync
   [ "$status" -eq 2 ]
   [[ "$output" == *"commit or stash first"* ]]
+  [ ! -e "$CONSUMER/devkit" ]
 }
 
 @test "missing .devkit-rev: check exits 1" {
-  vendor_first
   run_check
   [ "$status" -eq 1 ]
   [[ "$output" == *".devkit-rev missing"* ]]
-}
-
-@test "no devkit/ subtree: sync exits 2" {
-  run_sync
-  [ "$status" -eq 2 ]
-  [[ "$output" == *"no devkit/ subtree"* ]]
 }

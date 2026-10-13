@@ -34,8 +34,9 @@ Rust + hyper + Askama (server-rendered HTML), vanilla CSS/JS. No frontend framew
 
 ## CI and the PR gate
 
-- `Makefile` is the check API: `ci-quick` (devkit-check, toolchain-check, docs-check, `cargo fmt --check`, clippy `-D warnings`), `ci-unit` (`cargo test`, serial, live Reddit), `ci-image` (`Dockerfile.alpine`, linux/amd64). Change a check there, never in a workflow or the gate plan.
-- Actions: `quick-check.yml` runs `make ci-quick ci-unit` on non-draft PRs. `ghcr.yml` builds and pushes the image on push to `main`.
+- `Makefile` is the check API: `ci-quick` (devkit-check, toolchain-check, workflows-check, docs-check, `cargo fmt --check`, clippy `-D warnings`), `ci-unit` (`cargo test`, offline), `ci-image` (`Dockerfile.alpine`, linux/amd64). Change a check there, never in a workflow or the gate plan.
+- **A test that calls live Reddit gets `#[ignore = "hits live reddit"]`** (Reddit blocks runner IPs, so it would make every gate flaky). `make test-live` runs those serially; it gates nothing.
+- Actions: `quick-check.yml` is the one PR job (`make ci-quick ci-unit` on non-draft PRs and on push to `main`). `ghcr.yml` publishes `sha-<7>` + `latest` and prunes old versions; both jobs carry `if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'` and run uncancellable. Every `uses:` is SHA-pinned (`make workflows-check`).
 - The merge gate is `make gate PR=<n>` on this Mac (`devkit/bin/local_gate.sh`). It gates the PR merged into `origin/main`, picks jobs by changed path in `scripts/ci/gate_plan.sh`, and posts the `local-gate` status.
 - No smoke job: the listener opens only after OAuth bootstrap against Reddit (see Startup order), so no health path answers without live Reddit.
 - `devkit/` is a vendored subtree. Never edit it here (`devkit-check` fails); change agandhi4/devkit, then `make devkit-sync`.
