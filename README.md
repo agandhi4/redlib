@@ -3,7 +3,7 @@
 > An alternative private front-end to Reddit, with its origins in [Libreddit](https://github.com/libreddit/libreddit).
 
 > [!NOTE]
-> **This is a personal fork**, heavily customized for a single self-hosted instance. Major divergences from upstream: a single dense "utility broadsheet" layout (system fonts, `color-mix()` design tokens), 8 curated WCAG-tuned themes including a Hacker News-inspired default, HN-grade comment ergonomics (depth ramp, hover actions, collapse controls), a mobile tab bar, offline reading via service worker, server-side saved posts, a rendered-HTML cache, a stale-while-revalidate Reddit cache with idle prefetch of the posts you're likely to open next, concurrent upstream fetches, and an async OAuth bootstrap that can't wedge on a bad network. **See [`docs/fork.md`](docs/fork.md) for the full list**, and `CLAUDE.md` for architecture and conventions. Upstream docs below remain accurate for deployment and configuration.
+> **This is a personal fork**, heavily customized for a single self-hosted instance. Major divergences from upstream: a single dense "utility broadsheet" layout (system fonts, `color-mix()` design tokens), 8 curated WCAG-tuned themes including a Hacker News-inspired default, HN-grade comment ergonomics (depth ramp, hover actions, collapse controls), a mobile tab bar, offline reading via service worker, server-side saved posts, a rendered-HTML cache, a stale-while-revalidate Reddit cache with idle prefetch of the posts you're likely to open next, concurrent upstream fetches, and an async OAuth bootstrap that can't wedge on a bad network. **See [`docs/fork.md`](docs/fork.md) for the full list**, and `CLAUDE.md` for architecture and conventions. Upstream docs below remain accurate for configuration; deployment is the fork's own (see [Deployment](#deployment)).
 
 ![screenshot](https://i.ibb.co/18vrdxk/redlib-rust.png)
 
@@ -34,17 +34,8 @@
      - [Redlib](#redlib-1)
        - [Server](#server)
 5. [Deployment](#deployment)
-   - [Docker](#docker)
-     - [Docker Compose](#docker-compose)
-     - [Docker CLI](#docker-cli)
-   - Podman 
-      - Quadlets
-
-   - [Binary](#binary)
-     - [Running as a systemd service](#running-as-a-systemd-service)
-   - [Building from source](#building-from-source)
-   - [Replit/Heroku/Glitch](#replit-heroku-glitch)
-   - [launchd (macOS)](#launchd-macos)
+   - [Running locally](#running-locally)
+   - [Tracking upstream](#tracking-upstream)
 6. [Configuration](#configuration)
    - [Instance settings](#instance-settings)
    - [Default user settings](#default-user-settings)
@@ -167,200 +158,28 @@ For transparency, I hope to describe all the ways Redlib handles user privacy.
 
 # Deployment
 
-This section covers multiple ways of deploying Redlib. Using [Docker](#docker) is recommended for production.
+This fork runs one instance (`reddit.box`), so it carries one deployment path; upstream's recipes (Docker Compose and CLI, Podman Quadlets, systemd, launchd, Replit/Heroku, NetBSD) were removed with the files they used. See [upstream's README](https://github.com/redlib-org/redlib#deployment) for those.
 
-For configuration options, see the [Configuration section](#Configuration).
+- **Image:** every push to `main` builds `ghcr.io/agandhi4/redlib` (`.github/workflows/ghcr.yml`), tagged `sha-<7>` and `latest`, and creates the git tag `ship-<YYYY-MM-DD>-<sha7>`. The same `sha-<7>` is the image's `APP_VERSION`, its OCI version label and the version in the page footer.
+- **Stack:** the compose file lives in the homelab repo (`stacks/redlib/docker-compose.yml`); its hourly `deploy.sh update` timer pulls `latest`. Instance settings are env vars there.
 
-## Docker
-
-[Docker](https://www.docker.com) lets you run containerized applications. Containers are loosely isolated environments that are lightweight and contain everything needed to run the application, so there's no need to rely on what's installed on the host.
-
-Container images for Redlib are available at [quay.io](https://quay.io/repository/redlib/redlib), with support for `amd64`, `arm64`, and `armv7` platforms.
-
-### Docker Compose
-
-> [!IMPORTANT]
-> These instructions assume the [Compose plugin](https://docs.docker.com/compose/migrate/#what-are-the-differences-between-compose-v1-and-compose-v2) has already been installed. If not, follow these [instructions on the Docker Docs](https://docs.docker.com/compose/install) for how to do so.
-
-Copy `compose.yaml` and modify any relevant values (for example, the ports Redlib should listen on).
-
-Start Redlib in detached mode (running in the background):
+## Running locally
 
 ```bash
-docker compose up -d
+cp .env.example .env    # read from the working directory at startup; edit as needed
+REDLIB_DB_PATH=/tmp/redlib.db cargo run -- -p 8199
 ```
 
-Stream logs from the Redlib container:
+The listener opens only after the OAuth bootstrap against Reddit succeeds, so a local run needs network access to Reddit.
+
+## Tracking upstream
+
+This is a hard fork of [redlib-org/redlib](https://github.com/redlib-org/redlib) (fork point, sync cadence and policy in [`docs/fork.md`](docs/fork.md)). Add the remote once per clone:
 
 ```bash
-docker logs -f redlib
+git remote add upstream https://github.com/redlib-org/redlib.git
+git fetch upstream && git log --oneline main..upstream/main
 ```
-
-### Docker CLI
-
-Deploy Redlib:
-
-```bash
-docker pull quay.io/redlib/redlib:latest
-docker run -d --name redlib -p 8080:8080 quay.io/redlib/redlib:latest
-```
-
-Deploy using a different port on the host (in this case, port 80):
-
-```bash
-docker pull quay.io/redlib/redlib:latest
-docker run -d --name redlib -p 80:8080 quay.io/redlib/redlib:latest
-```
-
-If you're using a reverse proxy in front of Redlib, prefix the port numbers with `127.0.0.1` so that Redlib only listens on the host port **locally**. For example, if the host port for Redlib is `8080`, specify `127.0.0.1:8080:8080`.
-
-Stream logs from the Redlib container:
-
-```bash
-docker logs -f redlib
-```
-## Podman 
-
-[Podman](https://podman.io/) lets you run containerized applications in a rootless fashion. Containers are loosely isolated environments that are lightweight and contain everything needed to run the application, so there's no need to rely on what's installed on the host.
-
-Container images for Redlib are available at [quay.io](https://quay.io/repository/redlib/redlib), with support for `amd64`, `arm64`, and `armv7` platforms.
-
-### Quadlets
-
-> [!IMPORTANT]
-> These instructions assume that you are on a systemd based distro with [podman](https://podman.io/). If not, follow these [instructions on podman's website](https://podman.io/docs/installation) for how to do so. 
-> It also assumes you have used `loginctl enable-linger <username>` to enable the service to start for your user without logging in. 
-
-Copy the `redlib.container` and `.env.example` files to `.config/containers/systemd/` and modify any relevant values (for example, the ports Redlib should listen on, renaming the .env file and editing its values, etc.).
-
-To start Redlib either reboot or follow the instructions below:
-
-Notify systemd of the new files
-```bash
-systemctl --user daemon-reload
-```
-
-Start the newly generated service file
-
-```bash
-systemctl --user start redlib.service
-```
-
-You can check the status of your container by using the following command:
-```bash 
-systemctl --user status redlib.service
-```
-
-## Binary
-
-If you're on Linux, you can grab a binary from [the newest release](https://github.com/redlib-org/redlib/releases/latest) from GitHub.
-
-Download the binary using [Wget](https://www.gnu.org/software/wget/):
-
-```bash
-wget https://github.com/redlib-org/redlib/releases/download/v0.31.0/redlib
-```
-
-Make the binary executable and change its ownership to `root`:
-
-```bash
-sudo chmod +x redlib && sudo chown root:root redlib
-```
-
-Copy the binary to `/usr/bin`:
-
-```bash
-sudo cp ./redlib /usr/bin/redlib
-```
-
-Deploy Redlib to `0.0.0.0:8080`:
-
-```bash
-redlib
-```
-
-> [!IMPORTANT]
-> If you're proxying Redlib through NGINX (see [issue #122](https://github.com/libreddit/libreddit/issues/122#issuecomment-782226853)), add
->
-> ```nginx
-> proxy_http_version 1.1;
-> ```
->
-> to your NGINX configuration file above your `proxy_pass` line.
-
-### Running as a systemd service
-
-You can use the systemd service available in `contrib/redlib.service`
-(install it on `/etc/systemd/system/redlib.service`).
-
-That service can be optionally configured in terms of environment variables by
-creating a file in `/etc/redlib.conf`. Use the `contrib/redlib.conf` as a
-template. You can also add the `REDLIB_DEFAULT__{X}` settings explained
-above.
-
-When "Proxying using NGINX" where the proxy is on the same machine, you should
-guarantee nginx waits for this service to start. Edit
-`/etc/systemd/system/redlib.service.d/reverse-proxy.conf`:
-
-```conf
-[Unit]
-Before=nginx.service
-```
-
-## Building from source
-
-To deploy Redlib with changes not yet included in the latest release, you can build the application from source.
-
-```bash
-git clone https://github.com/redlib-org/redlib && cd redlib
-cargo run
-```
-
-## Replit/Heroku
-
-> [!WARNING]
-> These are free hosting options, but they are _not_ private and will monitor server usage to prevent abuse. If you need a free and easy setup, this method may work best for you.
-
-<a href="https://repl.it/github/redlib-org/redlib"><img src="https://repl.it/badge/github/redlib-org/redlib" alt="Run on Repl.it" height="32" /></a>
-[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/redlib-org/redlib)
-
-## launchd (macOS)
-
-If you are on macOS, you can use the [launchd](https://en.wikipedia.org/wiki/Launchd) service available in `contrib/redlib.plist`.
-
-Install it with `cp contrib/redlib.plist ~/Library/LaunchAgents/`.
-
-Load and start it with `launchctl load ~/Library/LaunchAgents/redlib.plist`.
-
-<!-- ## Cargo
-
-Make sure Rust stable is installed along with `cargo`, Rust's package manager.
-
-```bash
-cargo install libreddit
-``` -->
-
-<!-- ## AUR
-
-For ArchLinux users, Redlib is available from the AUR as [`libreddit-git`](https://aur.archlinux.org/packages/libreddit-git).
-
-```bash
-yay -S libreddit-git
-```
-## NetBSD/pkgsrc
-
-For NetBSD users, Redlib is available from the official repositories.
-
-```bash
-pkgin install libreddit
-```
-
-Or, if you prefer to build from source
-
-```bash
-cd /usr/pkgsrc/libreddit
-make install
-``` -->
 
 ---
 
@@ -384,17 +203,7 @@ REDLIB_DEFAULT_USE_HLS = "on"
 ```
 
 > [!NOTE]
-> If you're deploying Redlib using the **Docker CLI or Docker Compose**, environment variables can be defined in a [`.env` file](https://docs.docker.com/compose/environment-variables/set-environment-variables/), allowing you to centralize and manage configuration in one place.
->
-> To configure Redlib using a `.env` file, copy the `.env.example` file to `.env` and edit it accordingly.
->
-> If using the Docker CLI, add ` --env-file .env` to the command that runs Redlib. For example:
->
-> ```bash
-> docker run -d --name redlib -p 8080:8080 --env-file .env quay.io/redlib/redlib:latest
-> ```
->
-> If using Docker Compose, no changes are needed as the `.env` file is already referenced in `compose.yaml` via the `env_file: .env` line.
+> The binary loads a `.env` file from its working directory at startup, so for a local run copy `.env.example` (every setting this fork reads, with its default) to `.env` and edit it. The instance's settings are env vars in the homelab compose file.
 
 ## Command Line Flags
 

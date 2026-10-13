@@ -13,7 +13,7 @@ pub const DEFAULT_PUSHSHIFT_FRONTEND: &str = "undelete.pullpush.io";
 /// config file. `Config::Default()` contains None for each setting.
 /// When adding more config settings, add it to `Config::load`,
 /// `get_setting_from_config`, both below, as well as
-/// `instance_info::InstanceInfo.to_string`(), README.md and app.json.
+/// `instance_info::InstanceInfo.to_string`(), README.md and .env.example.
 #[derive(Default, Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
 	#[serde(rename = "REDLIB_SFW_ONLY")]
