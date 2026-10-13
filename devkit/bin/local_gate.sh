@@ -9,8 +9,9 @@
 #   --no-post  run everything, post no commit status
 #
 # What is shared vs per-repo:
-#   This file owns the mechanics: Node from .nvmrc (node_toolchain.sh), Rust from rust-toolchain.toml (rust_toolchain.sh), lock, fetch (with the missing-pull-ref fallback), worktree,
-#   merge, job runner with per-job logs, status posting with retries, cleanup, verdict.
+#   This file owns the mechanics: Node and Rust from their pin files (toolchain_path.sh), lock,
+#   fetch (with the missing-pull-ref fallback), worktree, merge, job runner with per-job logs,
+#   status posting with retries, cleanup, verdict.
 #   The repo owns WHICH jobs run for WHICH changed paths, in scripts/ci/gate_plan.sh,
 #   sourced from the invoking checkout. Plan contract:
 #     GATE_SLUG=owner/repo                   required
@@ -35,6 +36,21 @@
 #   process group gets TERM (KILL after 10s), the status is `error`, the EXIT trap cleans up, and
 #   the run stops with GATE <job> WATCHDOG, VERDICT FAIL and exit 2: the box failed, not the code.
 #
+# Budgets (owner directive 2026-10-13: whole gate <= 10 min, no job > 5 min): GATE_JOB_BUDGET_MINUTES
+#   (default 5) per job and GATE_BUDGET_MINUTES (default 10) for the whole gate, counted from the
+#   moment a slot is held (waiting for a slot is not the PR's cost). Decimals allowed; 0 disables.
+#   An over-budget job still runs to completion (budgets never kill real work; the watchdog
+#   handles hangs) and then prints GATE <job> OVERBUDGET (<n>s > <budget>s); the whole gate prints
+#   GATE total OVERBUDGET (...). Either makes the verdict FAIL, with the job named in the status
+#   description, unless GATE_BUDGET_ENFORCE=0 (default 1), which keeps the lines and the verdict
+#   PASS: for a queue adopting budgets before its suites fit.
+#
+# Job seconds: after each job the gate writes $WT/build/metrics/gate.json, flat keys
+#   gate.<job>.seconds, plus gate.total.seconds once the jobs are done (docs/metrics-keys.md,
+#   domain `gate`, direction lower). Rewritten after every job, so a metrics job the plan runs
+#   last can merge the earlier jobs' seconds; a copy lands in $LOGDIR/gate.json, which outlives
+#   the worktree. Job names are therefore [A-Za-z0-9_-]+ and never `total` (exit 2 otherwise).
+#
 # Concurrency: GATE_SLOTS (default 1; an integer >= 1) is how many gates may run on this machine
 #   at once, across every repo. 1 is the 2026-10-05 rule: overlapping full suites caused
 #   load-induced timing-test failures in suites the PR never touched. The merge queues and
@@ -43,11 +59,21 @@
 #   else prints the waiting line and polls each slot with `flock -w 5` until one frees. A human
 #   raising it on a laptop (eight PR gates once queued serially for over an hour, 2026-10-13)
 #   accepts that timing-test risk. Gates run with different GATE_SLOTS lock different files and
-#   do not bound each other: set it once per machine (shell profile), not per invocation.
+#   do not bound each other: set it once per machine (gate.env below), not per invocation.
+#
+# Per-machine defaults: ${XDG_CONFIG_HOME:-$HOME/.config}/devkit/gate.env, if present, holds
+#   GATE_SLOTS, GATE_SILENT_MINUTES, GATE_JOB_BUDGET_MINUTES, GATE_BUDGET_MINUTES and
+#   GATE_BUDGET_ENFORCE `KEY=value` lines (blank lines and full-line `#` comments
+#   allowed; GATE_REMOTE* lines are gate.sh's and skipped). It is parsed, never sourced: any other
+#   key, quoting, `export` or other shell syntax is a usage error (exit 2) naming the line. An explicit environment variable wins over the
+#   file, so `GATE_SLOTS=1 make gate` still forces one slot. Asking every agent to set
+#   GATE_SLOTS did not stick (eight lanes queued >1 h serially, 2026-10-13); a file does. The
+#   merge queues and linux-box never create it, so they keep the defaults.
 #
 # Output contract, parsed by the merge queues and worker.py — keep it:
 #   GATE <job> PASS|FAIL|SKIPPED [(...)]            one line per job
 #   GATE <job> WATCHDOG (silent for <n> min; log: <path>)   then the run stops
+#   GATE <job>|total OVERBUDGET (<n>s > <budget>s)  after the job's PASS|FAIL line / before VERDICT
 #   VERDICT PASS|FAIL head=<pr-head-sha> main=<origin/main-sha>
 # A queue merges only when both SHAs are still current, so the squash-merged tree is exactly
 # the tree gated here.
@@ -79,17 +105,37 @@ for arg in "$@"; do
   esac
 done
 [ -n "$PR" ] || { usage >&2; exit 2; }
+
+# Per-machine defaults (header). An allowlist, not GATE_*: GATE_LOCK or GATE_PLAN in a file would
+# silently split this box's lock from the queues' or swap the plan, which is no per-machine
+# default. The GATE_REMOTE* lines in the same file belong to gate.sh/remote_gate.sh and are
+# skipped here, so one file configures both (one parser: _gate_env.sh).
+# shellcheck source=bin/_gate_env.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_gate_env.sh"
+gate_env_load local_gate "$GATE_LOCAL_KEYS" "$GATE_REMOTE_KEYS"
+# minutes_to_secs <VAR> <minutes>: whole seconds; a positive fraction never rounds to 0 (which
+# means "off"). Junk is a usage error naming the variable.
+minutes_to_secs() {
+  [[ "$2" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
+    || { echo "local_gate: $1 must be a number of minutes (got '$2')" >&2; return 2; }
+  awk -v m="$2" 'BEGIN { s = int(m * 60 + 0.5); print (m > 0 && s < 1) ? 1 : s }'
+}
 readonly SILENT_MINUTES=${GATE_SILENT_MINUTES:-15}
-[[ "$SILENT_MINUTES" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
-  || { echo "local_gate: GATE_SILENT_MINUTES must be a number of minutes (got '$SILENT_MINUTES')" >&2; exit 2; }
-SILENT_SECS=$(awk -v m="$SILENT_MINUTES" 'BEGIN { s = int(m * 60 + 0.5); print (m > 0 && s < 1) ? 1 : s }')
-readonly SILENT_SECS
+SILENT_SECS=$(minutes_to_secs GATE_SILENT_MINUTES "$SILENT_MINUTES") || exit 2
+JOB_BUDGET_SECS=$(minutes_to_secs GATE_JOB_BUDGET_MINUTES "${GATE_JOB_BUDGET_MINUTES:-5}") || exit 2
+GATE_BUDGET_SECS=$(minutes_to_secs GATE_BUDGET_MINUTES "${GATE_BUDGET_MINUTES:-10}") || exit 2
+readonly SILENT_SECS JOB_BUDGET_SECS GATE_BUDGET_SECS
+readonly BUDGET_ENFORCE=${GATE_BUDGET_ENFORCE:-1}
+[[ "$BUDGET_ENFORCE" =~ ^[01]$ ]] \
+  || { echo "local_gate: GATE_BUDGET_ENFORCE must be 0 or 1 (got '$BUDGET_ENFORCE')" >&2; exit 2; }
 readonly SLOTS=${GATE_SLOTS:-1}
 [[ "$SLOTS" =~ ^[1-9][0-9]*$ ]] \
   || { echo "local_gate: GATE_SLOTS must be an integer >= 1 (got '$SLOTS')" >&2; exit 2; }
 command -v flock >/dev/null || { echo "local_gate: flock not found (macOS: brew install flock)" >&2; exit 2; }
 
 ROOT=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel) || exit 2
+# shellcheck source=/dev/null  # bin/toolchain_path.sh: toolchain_path, shared with the hooks
+. "$(dirname "${BASH_SOURCE[0]}")/toolchain_path.sh"
 PLAN=${GATE_PLAN:-$ROOT/scripts/ci/gate_plan.sh}
 [ -f "$PLAN" ] || { echo "local_gate: no plan at $PLAN" >&2; exit 2; }
 GATE_WORKTREE_PREFIX=wt-
@@ -143,6 +189,7 @@ if ! try_slots -n; then
   until try_slots -w 5; do :; done
 fi
 echo "GATE slot $SLOT/$SLOTS"
+readonly GATE_T0=$SECONDS   # the whole-gate budget starts once a slot is held
 
 HEAD_SHA=""
 MAIN_SHA=""
@@ -151,6 +198,8 @@ STATUS_OPEN=0   # a `pending` status is on the PR head and still needs a final s
 FAILED=0
 FAILED_JOBS=""
 JOB_PGID=""     # the running job's process group; the watchdog and cleanup signal all of it
+OVERBUDGET=""   # "<name> (<n>s > <b>s)" entries, comma-separated, for the status description
+JOB_SECONDS=""  # "<name> <seconds>" lines, in run order, for gate.json
 
 post_status() { # <state> <description>; three attempts, a GitHub timeout used to turn a PASS into a queue FAIL
   [ "$POST" = 1 ] || return 0
@@ -215,10 +264,35 @@ verdict() { # <PASS|FAIL> <status description>; ends the run
   if [ "$result" = PASS ]; then exit 0; else exit 1; fi
 }
 
+# check_budget <name> <seconds> <budget-seconds>: the OVERBUDGET line; a FAIL unless enforcement is off.
+check_budget() {
+  [ "$3" -gt 0 ] && [ "$2" -gt "$3" ] || return 0
+  echo "GATE $1 OVERBUDGET (${2}s > ${3}s)"
+  OVERBUDGET="${OVERBUDGET:+"$OVERBUDGET, "}$1 (${2}s > ${3}s)"
+  [ "$BUDGET_ENFORCE" = 0 ] || FAILED=1
+}
+
+# write_gate_metrics [<total-seconds>]: gate.json in the worktree (for the plan's metrics job) and
+# in $LOGDIR (which survives cleanup). Names were validated by job(), so no JSON escaping applies.
+write_gate_metrics() {
+  local dir=$WT/build/metrics name secs sep="" body=""
+  while read -r name secs; do
+    [ -n "$name" ] || continue
+    body="$body$sep  \"gate.$name.seconds\": $secs"
+    sep=$',\n'
+  done <<<"$JOB_SECONDS"
+  [ -z "${1:-}" ] || body="$body$sep  \"gate.total.seconds\": $1"
+  mkdir -p "$dir" && printf '{\n%s\n}\n' "$body" >"$dir/gate.json" && cp "$dir/gate.json" "$LOGDIR/gate.json"
+}
+
 # ---- helpers for gate_plan ---------------------------------------------------------------
 job() { # <name> <make target> [VAR=val...]
-  local name=$1 t0=$SECONDS log=$LOGDIR/$1.log rc
+  local name=$1 t0=$SECONDS log=$LOGDIR/$1.log rc secs
   shift
+  if [[ ! "$name" =~ ^[A-Za-z0-9_-]+$ ]] || [ "$name" = total ]; then
+    echo "local_gate: job name '$name' must match [A-Za-z0-9_-]+ and not be 'total' (it becomes the key gate.<name>.seconds)" >&2
+    exit 2
+  fi
   # Backgrounded under `set -m` so the job leads its own process group: the watchdog can stop
   # everything under make, and a TERM to the gate runs its trap now instead of after the job.
   set -m
@@ -236,13 +310,17 @@ job() { # <name> <make target> [VAR=val...]
   wait "$JOB_PGID"
   rc=$?
   JOB_PGID=""
+  secs=$((SECONDS - t0))
   if [ "$rc" = 0 ]; then
-    echo "GATE $name PASS ($((SECONDS - t0))s)"
+    echo "GATE $name PASS (${secs}s)"
   else
     echo "GATE $name FAIL (log: $LOGDIR/$name.log)"
     FAILED=1
     FAILED_JOBS="${FAILED_JOBS:+"$FAILED_JOBS, "}$name"
   fi
+  check_budget "$name" "$secs" "$JOB_BUDGET_SECS"
+  JOB_SECONDS=$(grep -v "^$name " <<<"$JOB_SECONDS"; echo "$name $secs")
+  write_gate_metrics
 }
 skip() { echo "GATE $1 SKIPPED ($2)"; }
 note() { echo "GATE note: $*"; }
@@ -293,28 +371,13 @@ fi
 # Toolchains come from the MERGED tree, not the invoking checkout: the declaration (.nvmrc,
 # rust-toolchain.toml) describes the code under test, so a PR that bumps it is gated on its own
 # version. (Gate policy, by contrast, is read from $ROOT: see the plan contract.) The Mac's Node
-# 25 failed every vitest suite CI passed on 22; node_toolchain.sh/rust_toolchain.sh cache
-# checksum-verified installs. An environment the gate cannot provide is a FAIL verdict, never a
-# silent fallback (and never a dangling `pending` status).
-TOOLCHAIN_NOTES=""
-if [ -f "$WT/.nvmrc" ]; then
-  if ! NODE_BIN=$("$(dirname "${BASH_SOURCE[0]}")/node_toolchain.sh" "$WT"); then
-    echo "GATE toolchain FAIL (cannot provide node $(tr -d '[:space:]' < "$WT/.nvmrc") declared in .nvmrc)"
-    verdict FAIL "Gate box cannot provide the declared Node"
-  fi
-  [ -n "$NODE_BIN" ] && export PATH="$NODE_BIN:$PATH"
-  export COREPACK_ENABLE_DOWNLOAD_PROMPT=0   # a corepack prompt would hang an unattended gate
-  TOOLCHAIN_NOTES="node $(node --version) from .nvmrc"
-fi
-RUST_DECL=""
-for f in rust-toolchain.toml rust-toolchain; do [ -f "$WT/$f" ] && { RUST_DECL=$f; break; }; done
-if [ -n "$RUST_DECL" ]; then
-  if ! RUST_BIN=$("$(dirname "${BASH_SOURCE[0]}")/rust_toolchain.sh" "$WT"); then
-    echo "GATE toolchain FAIL (cannot provide the rust toolchain declared in $RUST_DECL)"
-    verdict FAIL "Gate box cannot provide the declared Rust toolchain"
-  fi
-  [ -n "$RUST_BIN" ] && export PATH="$RUST_BIN:$PATH"
-  TOOLCHAIN_NOTES="${TOOLCHAIN_NOTES:+$TOOLCHAIN_NOTES; }rust $( (cd "$WT" && cargo --version) | awk '{print $2}') from $RUST_DECL"
+# 25 failed every vitest suite CI passed on 22. toolchain_path.sh, shared with the hooks, puts
+# the cached, checksum-verified node_toolchain.sh/rust_toolchain.sh installs first on PATH. An
+# environment the gate cannot provide is a FAIL verdict, never a silent fallback (and never a
+# dangling `pending` status).
+if ! toolchain_path "$WT"; then
+  echo "GATE toolchain FAIL ($TOOLCHAIN_ERROR)"
+  verdict FAIL "Gate box cannot provide the declared $TOOLCHAIN_FAILED"
 fi
 [ -n "$TOOLCHAIN_NOTES" ] && note "$TOOLCHAIN_NOTES"
 
@@ -323,8 +386,17 @@ CHANGED=$(git -C "$WT" diff --name-only "$MAIN_SHA" HEAD)
 # ---- the repo decides what runs --------------------------------------------------------------
 gate_plan
 
+TOTAL_SECS=$((SECONDS - GATE_T0))
+check_budget total "$TOTAL_SECS" "$GATE_BUDGET_SECS"
+write_gate_metrics "$TOTAL_SECS"
+if [ -n "$OVERBUDGET" ] && [ "$BUDGET_ENFORCE" = 0 ]; then
+  note "over budget, not enforced (GATE_BUDGET_ENFORCE=0): $OVERBUDGET"
+fi
+
 if [ "$FAILED" = 0 ]; then
   verdict PASS "Passed on main ${MAIN_SHA:0:7}"
-else
-  verdict FAIL "Failed: ${FAILED_JOBS}. Logs: $LOGDIR"
 fi
+DESCRIPTION=""
+[ -z "$FAILED_JOBS" ] || DESCRIPTION="Failed: $FAILED_JOBS. "
+[ -z "$OVERBUDGET" ] || [ "$BUDGET_ENFORCE" = 0 ] || DESCRIPTION="${DESCRIPTION}Over budget: $OVERBUDGET. "
+verdict FAIL "${DESCRIPTION}Logs: $LOGDIR"

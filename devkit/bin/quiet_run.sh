@@ -7,7 +7,8 @@
 # Usage, executed:  devkit/bin/quiet_run.sh <label> -- <cmd...>
 #        sourced:   . devkit/bin/quiet_run.sh; run_step <label> <cmd...>
 #   Pass:  "✓ <label> (<n>s)", plus " — <summary>" when the output has a test/lint summary line
-#          (pytest/vitest/Playwright counts, ruff "All checks passed", "already formatted").
+#          (pytest/vitest/Playwright counts, ruff "All checks passed", "already formatted"; cargo's
+#          per-binary "test result:" lines summed into one).
 #   Fail:  "✗ <label> (<n>s)", then the last QUIET_TAIL (default 40) ANSI-stripped lines between
 #          markers naming the kept log; exits with the command's code.
 #   QUIET_VERBOSE=1 streams the output instead of capturing it; the status line still follows.
@@ -40,9 +41,7 @@ run_step() {
   dur=$(( $(date +%s) - start ))
 
   if [ "$rc" -eq 0 ]; then
-    # The LAST summary-shaped line: vitest prints an unrelated tip after its real summary.
-    # `|| true` because a non-matching grep must not trip a sourcing caller's `set -e`.
-    summary=$(_quiet_strip_ansi <"$log" | grep -aE '[0-9]+ (passed|failed|errors?|warnings?|deselected|skipped|flaky)|already formatted|All checks passed|no issues found' | tail -n 1 | sed 's/^[[:space:]]*//') || true
+    summary=$(_quiet_strip_ansi <"$log" | _quiet_summary) || true
     rm -f "$log"
     if [ -n "$summary" ]; then
       echo "✓ $label (${dur}s) — $summary"
@@ -56,6 +55,28 @@ run_step() {
     echo "--- end log: $log ---"
   fi
   return "$rc"
+}
+
+# stdin: a passing step's ANSI-stripped output. stdout: its one-line summary, or nothing.
+# cargo prints one "test result:" line per test binary and the doctests come last, so the last
+# line read "0 passed" for redlib's whole unit suite; those lines are summed instead. Otherwise
+# the LAST summary-shaped line wins: vitest prints an unrelated tip after its real summary.
+# Always exits 0: a non-matching grep must not trip a sourcing caller's `set -e`.
+_quiet_summary() {
+  awk '
+    /^test result: / {
+      suites++
+      for (i = 2; i <= NF; i++) {
+        if ($i ~ /^passed;?$/) passed += $(i - 1)
+        if ($i ~ /^ignored;?$/) ignored += $(i - 1)
+      }
+      next
+    }
+    /[0-9]+ (passed|failed|errors?|warnings?|deselected|skipped|flaky)|already formatted|All checks passed|no issues found/ { last = $0 }
+    END {
+      if (suites) printf "cargo test: %d passed; %d ignored (%d suites)\n", passed, ignored, suites
+      else if (last != "") { sub(/^[[:space:]]+/, "", last); print last }
+    }'
 }
 
 _quiet_strip_ansi() {

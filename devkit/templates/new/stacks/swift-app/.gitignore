@@ -1,7 +1,0 @@
-# Xcode (appended to the common .gitignore by devkit new). The project is generated from
-# project.yml; DerivedData stays in the checkout (Makefile) so worktrees never share one.
-# Anchored: core.ignorecase is true on macOS, so an unanchored rule also matches a source
-# directory of the same name in any case (instalite's decisions.md, 2026-10-13).
-/*.xcodeproj/
-/DerivedData/
-xcuserdata/

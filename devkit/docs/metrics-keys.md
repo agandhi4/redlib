@@ -14,7 +14,8 @@ snapshot and refuses a key that two collectors both emit.
 - **Numbers only, no whitespace in a key.** Output lines are space-separated, so a space in a
   key breaks every reader. Lists, strings, booleans and nulls are skipped as non-metrics.
 - **Deterministic collectors only** feed the bounds: the same commit must give the same
-  number. Timings and Lighthouse stay in the report (delivery.md, Coverage and Metrics).
+  number. Timings and Lighthouse stay in the report (delivery.md, Coverage and Metrics); the
+  one exception is the gate's own `gate.*` seconds, below.
 - **Statements** are `statements.<METHOD>:<route template>`, exact counts written by the
   test suite's statement fixture to `build/metrics/statements.json`, held at tolerance 0
   (decision H, 2026-10-13). Example: `statements.GET:/api/v1/accounts/{account_id}`.
@@ -29,6 +30,18 @@ snapshot and refuses a key that two collectors both emit.
 | `bundle` | lower | `bundle.frontend.kb_total`, `bundle.frontend.kb_login` |
 | `statements` | lower | `statements.POST:/api/items` |
 | `allowlist` | lower | `allowlist.backend.own_commit` (shrink-only allow-lists) |
+| `gate` | lower | `gate.backend-unit.seconds`, `gate.total.seconds` (wall-clock seconds) |
+
+**Gate seconds** come from `local_gate.sh`, not a repo collector: after every job it rewrites
+`build/metrics/gate.json` in the merged worktree with `gate.<job>.seconds` for the jobs run so
+far, and adds `gate.total.seconds` after the last one (a copy stays in the gate's log dir). A
+metrics job the plan runs last therefore merges every earlier job's seconds, but never its own
+or the total. They are the one timing domain allowed into a snapshot (owner directive
+2026-10-13: job seconds only ever get faster); the hard limits are the gate's budgets
+(`GATE_JOB_BUDGET_MINUTES`, `GATE_BUDGET_MINUTES`). Wall-clock seconds are noisy and the
+ratchet has no tolerance, so a repo that tracks a `gate.*` key sets its bound with headroom by
+hand rather than with `tighten`. The worktree's `build/` must be git-ignored, as it already is
+for every other collector.
 
 A repo-specific collector (finplat's reinvention registry, closet's `audit-pages`) uses its
 own domain name and states the direction in `ratchet.json`.

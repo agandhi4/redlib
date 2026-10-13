@@ -1,3 +1,0 @@
-# npm install output and the tsc build (appended to the common .gitignore by devkit new)
-node_modules/
-dist/

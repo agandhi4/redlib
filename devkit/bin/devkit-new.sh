@@ -43,6 +43,8 @@ set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DEVKIT=$(cd "$HERE/.." && pwd)
+# shellcheck source=/dev/null  # bin/toolchain_path.sh: toolchain_path, shared with the gate and hooks
+. "$HERE/toolchain_path.sh"
 TEMPLATES=$DEVKIT/templates/new
 STACKS=$TEMPLATES/stacks
 
@@ -193,9 +195,15 @@ if [ "$IMAGE" = 0 ]; then
   for f in $STACK_IMAGE_FILES; do rm -f "$f"; done
 fi
 
+# On the pins (toolchain_path), so the lockfile comes from the npm or cargo that the first
+# commit's hooks and the gate then install from, not whatever PATH holds. Subshell: PATH
+# returns to the caller's for the rest of the script.
 if [ -n "$STACK_LOCK_CMD" ]; then
   echo "devkit-new: $STACK_LOCK_CMD"
-  $STACK_LOCK_CMD
+  (
+    toolchain_path "$PWD" || die "$TOOLCHAIN_ERROR"
+    $STACK_LOCK_CMD
+  )
 fi
 
 # Set directly rather than through hooks_check.sh --fix: that script is a no-op under CI, and

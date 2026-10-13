@@ -1,7 +1,7 @@
 # devkit
 
 Shared, executable delivery tooling for agandhi4's apps. One copy of each script, vendored
-into every repo as a `git subtree` at `devkit/`, so a clone can reproduce "what must pass"
+into every repo at `devkit/` (the paths in `VENDOR_PATHS`, by `devkit-sync.sh`), so a clone can reproduce "what must pass"
 offline and worktrees, Actions and Docker build contexts see plain files.
 
 Design: `~/projects/solo/standardization/PLAN.md` §1 (layer L5) and `docs/decisions.md`.
@@ -10,12 +10,15 @@ Design: `~/projects/solo/standardization/PLAN.md` §1 (layer L5) and `docs/decis
 
 | Path | What |
 |---|---|
-| `bin/local_gate.sh` | The PR gate skeleton: gates `<pr>` merged into `origin/main`, posts the `local-gate` status, emits the `GATE`/`VERDICT` lines the merge queues parse. The repo supplies `scripts/ci/gate_plan.sh` (contract in the script header). |
-| `bin/devkit-sync.sh` | Fetch upstream, replace `devkit/` with its tree, record `<commit> <tree>` in `.devkit-rev`, commit. Conflict-free by construction. `--stage` leaves it in the index for the caller's own commit. |
+| `bin/local_gate.sh` | The PR gate skeleton: gates `<pr>` merged into `origin/main`, posts the `local-gate` status, emits the `GATE`/`VERDICT` lines the merge queues parse, holds jobs to their time budgets and writes their seconds to `build/metrics/gate.json` (`docs/metrics-keys.md`). The repo supplies `scripts/ci/gate_plan.sh` (contract in the script header). |
+| `bin/gate.sh` | What `make gate` calls: `remote_gate.sh` when this machine names a gate host, else `local_gate.sh`. See "Remote gate". |
+| `bin/remote_gate.sh` | Runs the repo's gate on the gate host over ssh (clone if absent, reset to `origin/main`, `local_gate.sh` there); same output, exit code and `local-gate` status. |
+| `bin/devkit-sync.sh` | Fetch upstream, replace `devkit/` with its tree filtered to `VENDOR_PATHS`, record `<commit> <filtered tree>` in `.devkit-rev`, commit. Conflict-free by construction. `--stage` leaves it in the index for the caller's own commit. |
 | `bin/devkit-new.sh`, `templates/new/` | `devkit new <name> --stack <stack> [--dir <parent>] [--no-image]`: a new repo that passes every guard on its first commit, which is made through the hooks. Stacks: `python-fastapi`, `node-service`, `rust`, `next-vercel`, `swift-app`; each is a directory under `templates/new/stacks/` (how to add one: `templates/new/README.md`). See "New project". |
-| `bin/devkit-check.sh` | Offline guard for `ci-quick` and pre-commit: the staged `devkit/` tree equals the staged `.devkit-rev` (both read from the index). Fails on in-repo edits. |
-| `bin/node_toolchain.sh` | Provides the exact Node in the repo's `.nvmrc`: uses PATH's node when it matches, else a checksum-verified install cached under `~/.local/share/devkit/node`. The gate calls it; hooks can too. |
-| `bin/rust_toolchain.sh` | Provides the exact Rust in `rust-toolchain.toml` (or `rust-toolchain`): uses PATH's cargo when it matches, else installs through rustup (PATH's, or a private one bootstrapped under `~/.local/share/devkit/rust`) and prints the toolchain's sysroot bin, so callers export PATH only. `--declared` prints the version. The gate calls it. |
+| `bin/devkit-check.sh` | Offline guard for `ci-quick` and pre-commit: the staged `devkit/` tree equals the staged `.devkit-rev` (both read from the index). Fails on in-repo edits, and on a tree holding paths outside its own `VENDOR_PATHS` (vendored whole by a pre-manifest sync: rerun `make devkit-sync`). |
+| `bin/node_toolchain.sh` | Provides the exact Node in the repo's `.nvmrc`: uses PATH's node when it matches, else a checksum-verified install cached under `~/.local/share/devkit/node`. The gate and the hooks call it through `toolchain_path.sh`. |
+| `bin/rust_toolchain.sh` | Provides the exact Rust in `rust-toolchain.toml` (or `rust-toolchain`): uses PATH's cargo when it matches, else installs through rustup (PATH's, or a private one bootstrapped under `~/.local/share/devkit/rust`) and prints the toolchain's sysroot bin, so callers export PATH only. `--declared` prints the version. The gate and the hooks call it through `toolchain_path.sh`. |
+| `bin/toolchain_path.sh` | Sourced: `toolchain_path <tree>` puts the tree's pinned Node (`.nvmrc`) and Rust (`rust-toolchain.toml`) first on PATH through the two scripts above, or fails naming the pin. The one provisioning path for `local_gate.sh` (merged worktree) and `hook_steps.sh` (the hook's checkout), so a hook runs the gate's node and cargo on a machine with none. Python needs nothing: uv reads `.python-version`. |
 | `bin/toolchain_check.sh` | Guard for `ci-quick`: `.nvmrc` is exact, every `FROM node:` major and every setup-node step agree with it; same for `.python-version` and `rust-toolchain.toml` (`FROM rust:` minor, `Cargo.toml` `rust-version` not above it, no inline `toolchain:`); `.swift-version` against `swift --version` on macOS only (Xcode's compiler; skipped elsewhere). |
 | `bin/throwaway_pg.sh` | One throwaway Postgres container for tests and smoke boots: `up` prints `PG_PORT=<n>`, `url`, `down`. tmpfs on by default (the volume-leak fix), TCP readiness, loopback only; env-driven. |
 | `bin/boot_image.sh` | Boots a built app image on a private network (optionally with `throwaway_pg.sh` Postgres as `<name>-pg`), waits for its health endpoint with early exit on container death, prints `BASE=<url>`; `down` removes everything. Post-boot assertions stay in each repo. Env-driven (`BOOT_*`); `BOOT_EXPECT_VERSION` also requires the health JSON `version` to equal it. |
@@ -25,7 +28,7 @@ Design: `~/projects/solo/standardization/PLAN.md` §1 (layer L5) and `docs/decis
 | `bin/workflows_check.sh`, `bin/_workflows_lib.sh` | Guard for `ci-quick`: Actions follows the minutes and supply-chain rules. Every `uses:` is a commit SHA with a `# vX.Y.Z` comment (devkit reusable workflows may float on `@main`). A `pull_request` workflow runs one job, skips drafts, cancels superseded runs and ignores `**.md`; more jobs need a top-level `# workflows-check: multi-job ok: <reason>`. A job pushing an image on main runs with `cancel-in-progress: false`. The lib's push-step detection is shared with `release_check.sh`. |
 | `bin/playwright_browsers.sh` | Installs the Playwright browsers the lockfile pins (default `chromium`) with the lockfile's runner and the `.nvmrc` Node; idempotent via Playwright's cache. `--with-deps` is honoured on Linux, ignored on macOS. |
 | `bin/docs_check.sh` | Guard for `ci-quick`: every `AGENTS.md` is the real file with `CLAUDE.md` symlinked to it, size caps (30 KB root, 16 KB nested, shrink-only allowlist in `scripts/ci/docs_oversize.txt`), `docs/decisions.md` exists, no retired-tool words; repo extras in `scripts/ci/docs_rules.sh`. |
-| `bin/quiet_run.sh`, `bin/hook_steps.sh`, `bin/push_ranges.sh`, `bin/hooks_check.sh`, `templates/githooks/` | Git hooks: one line per step, 40-line tail on failure; per-repo steps in `scripts/ci/hooks.conf`; `hooks_check` asserts `core.hooksPath=.githooks` (a tool install silently repointed finplat's for two months) and `--fix` self-heals; LFS chained when the repo uses it. |
+| `bin/quiet_run.sh`, `bin/hook_steps.sh`, `bin/push_ranges.sh`, `bin/hooks_check.sh`, `templates/githooks/` | Git hooks: one line per step, 40-line tail on failure; per-repo steps in `scripts/ci/hooks.conf`; `hooks_check` asserts `core.hooksPath=.githooks` (a tool install silently repointed finplat's for two months) and `--fix` self-heals; LFS chained when the repo uses it. Before the first step the pinned Node and Rust go first on PATH, as in the gate (`toolchain_path.sh`), so `hooks.conf` lists steps only. A passing cargo step's summary sums every `test result:` line (the last one is the doctests). |
 | `bin/metrics_ratchet.py` | The "never worse than main" gate. `check` holds a snapshot to `docs/metrics/ratchet.json` and that file to main's copy (`git show origin/main:…`), so a PR cannot loosen its own bounds; `tighten` locks in BETTER numbers in the improving PR; `merge` joins `build/metrics/*.json` into one flat snapshot. Loosening needs the fail-closed `metrics-rebaseline` PR label. Wiring below. |
 | `templates/metrics/ratchet.json`, `docs/metrics-keys.md` | Starter bounds (all `null` until `rebaseline` fills them, so `check` refuses a raw copy) and the flat `<domain>.<scope>.<stat>` key shape every collector emits. |
 | `bin/own_commit_check.py` | Transaction-boundary guard: AST scan fails a raw `.commit()` on a session the function did not open itself (`with … as db` / `db = Session()`), and pins every `commit_now(…, reason=…)` call to a shrink-only `path::qualname` allow-list. Prints `own_commit_allowlist_entries=<n>` for `metrics_ratchet.py` (direction lower). Opener regex and excludes are per repo. |
@@ -87,12 +90,17 @@ Updates are `make devkit-sync`. The sync fetches upstream and replaces `devkit/`
 (`git read-tree`), so it never conflicts; `devkit-check` compares the tree hash. There is no
 `git subtree` involved any more: squash merges drop the trailers subtree needs.
 
+Only what consumers run is vendored: `VENDOR_PATHS` at this repo's root lists it (`bin/`, the
+hook, workflow and metrics templates, `lint/`, `renovate/`, the docs consumers read). Stack
+scaffolds (`templates/new/`), `tests/`, `.github/` and `github/` stay here; `devkit new` and the
+monthly audit read them from a full checkout. Adding a path a consumer needs is a one-line
+manifest change.
+
 Then add to the Makefile (every repo uses the same three targets):
 
 ```make
-gate:            ## make gate PR=<n> [GATE_ARGS=--no-post]
-	@test -n "$(PR)" || { echo "usage: make gate PR=<number> [GATE_ARGS=--no-post]" >&2; exit 2; }
-	devkit/bin/local_gate.sh "$(PR)" $(GATE_ARGS)
+gate:            ## make gate PR=<n> [GATE_ARGS=--no-post]; local or the gate host
+	devkit/bin/gate.sh "$(PR)" $(GATE_ARGS)
 devkit-sync:     ## pull the latest devkit and record it
 	devkit/bin/devkit-sync.sh
 devkit-check:    ## part of ci-quick
@@ -122,6 +130,54 @@ Gate environment (full contract in the script header):
 | Variable | Default | What |
 |---|---|---|
 | `GATE_SLOTS` | `1` | How many gates may run at once on this machine, across repos. `1` keeps the single lock file `GATE_LOCK`; `N` > 1 uses `GATE_LOCK.1` … `GATE_LOCK.N`. The merge queues and linux-box keep `1`; raising it on a laptop accepts load-induced timing-test failures (2026-10-05). |
+| `GATE_SILENT_MINUTES` | `15` | Watchdog: a job whose log has not grown for this long is stopped, status `error`, exit 2. `0` disables. |
+| `GATE_JOB_BUDGET_MINUTES` | `5` | Per-job budget (owner directive 2026-10-13). An over-budget job runs to completion, then `GATE <job> OVERBUDGET (<n>s > <b>s)` and VERDICT FAIL naming it. Decimals allowed; `0` disables. |
+| `GATE_BUDGET_MINUTES` | `10` | Whole-gate budget, counted once a slot is held: `GATE total OVERBUDGET (...)` and FAIL. |
+| `GATE_BUDGET_ENFORCE` | `1` | `0` keeps the OVERBUDGET lines (plus one `GATE note`) but the verdict PASSes: for a queue adopting budgets before its suites fit. |
+| `~/.config/devkit/gate.env` | absent | Per-machine defaults for every `GATE_*` row above (`KEY=value` lines, honours `XDG_CONFIG_HOME`); an explicit environment variable wins; any other line is exit 2. The queues and linux-box do not create this file. |
+
+## Remote gate
+
+`make gate` runs where the machine says, not where the repo says. With `GATE_REMOTE_HOST` set
+(environment, or `~/.config/devkit/gate.env`; the environment wins), `gate.sh` hands the PR to
+`remote_gate.sh`. It sshes to the host, keeps one checkout per repo under `GATE_REMOTE_ROOT`,
+forces it to `origin/main` (the plan is read from that checkout), and runs
+`devkit/bin/local_gate.sh <pr>` there. The `GATE`/`VERDICT` lines stream back unchanged, the
+exit code passes through, and the host posts the `local-gate` status. Interrupting this side
+stops the host's gate through its own cleanup (status `error`). Contract: the script headers.
+
+| Variable | Default | What |
+|---|---|---|
+| `GATE_REMOTE_HOST` | unset (local) | `[user@]host` of the gate host. |
+| `GATE_REMOTE_ROOT` | `~/gates` | Checkouts live at `<root>/<repo>`; state and logs at `<root>/.state/<GATE_STATE_NAME>/`, apart from the host queue's checkout. `~` expands on the host. |
+| `GATE_REMOTE_SSH_OPTS` | none | Extra ssh options, word-split, before the defaults (`BatchMode=yes`, keepalives). |
+| `GATE_REMOTE` | unset | `0` keeps this run (env) or machine (gate.env) local; `1` without a host is exit 2. |
+
+A repo whose gate can only run here puts a literal `GATE_REMOTE=0` line in its plan (the
+swift-app template does: on Linux its Xcode jobs skip and the verdict would pass untested
+Swift). Nothing else in a repo changes; the host's own `gate.env` sets its `GATE_SLOTS`.
+
+**Switching finplat, Orbit and locus to linux-box.** Each repo's `gate` target becomes the
+one line above (after its `make devkit-sync`), then on the Mac:
+
+```sh
+mkdir -p ~/.config/devkit
+echo 'GATE_REMOTE_HOST=aakash@192.168.8.174' >> ~/.config/devkit/gate.env
+```
+
+Real-run checklist (owner, once):
+
+1. Authorize this Mac's key on linux-box: `ssh-copy-id aakash@192.168.8.174`, then
+   `ssh -o BatchMode=yes aakash@192.168.8.174 true` must succeed without a prompt.
+2. On linux-box, `gh auth status` shows a token with `repo` scope (clones and statuses use it),
+   and `command -v git gh flock make docker` finds all five.
+3. First gate per repo prints `no checkout of <slug> at ~/gates/<repo> …; cloning`. A second run
+   must not clone again.
+4. Logs land on the host in `~/gates/.state/<GATE_STATE_NAME>/logs/<pr>/`. The host queue's
+   gates keep `~/.local/state`; both share `/tmp/linux-box-local-gate.lock`, so one gate runs at
+   a time across both.
+5. `make gate PR=<n> GATE_ARGS=--no-post` from the Mac shows `GATE note: remote aakash-ser8 …`
+   and the same `VERDICT` line a run on linux-box prints.
 
 ## Metrics ratchet (ci-metrics)
 

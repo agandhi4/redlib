@@ -1,0 +1,19 @@
+# What devkit-sync.sh vendors into a consumer's devkit/: only what consumers run or read.
+# One path per line, relative to this repo's root; a directory takes everything under it.
+# Read by bin/_vendor_paths.sh for both devkit-sync.sh (what to vendor) and devkit-check.sh
+# (a vendored tree holding anything else was vendored by an older sync).
+# Left out on purpose: templates/new/ (stack scaffolds whose .ts/.py/.rs sources broke closet's
+# typecheck, #382; `devkit new` reads them from a full checkout), tests/, .github/, github/
+# (fleet ops) and templates/launchd/ (the monthly audit runs from a full checkout).
+VENDOR_PATHS
+AGENTS.md
+CLAUDE.md
+README.md
+bin
+docs/decisions.md
+docs/metrics-keys.md
+lint
+renovate
+templates/githooks
+templates/metrics
+templates/workflows

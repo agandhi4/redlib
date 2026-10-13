@@ -21,6 +21,15 @@
 # pre-push. When .gitattributes uses LFS, every pre-push outcome that lets the push through
 # (pass, skip, nothing to check) runs `git lfs pre-push` with the same args and stdin, or LFS
 # objects would never upload. LFS without git-lfs installed blocks the push.
+#
+# Toolchains: before the first step, toolchain_path (bin/toolchain_path.sh, the gate's own code)
+# puts the checkout's pinned Node (.nvmrc) and Rust (rust-toolchain.toml) first on PATH, so
+# `make ci-*` here runs what the gate runs. A machine with no cargo (redlib's Mac) or another node
+# would otherwise fail the hook or test a different version. A pin that cannot be provided blocks
+# the hook, as it fails the gate. Nothing is provisioned when no step will run.
+
+# shellcheck source=/dev/null  # bin/toolchain_path.sh: toolchain_path, shared with local_gate.sh
+. "$(dirname "${BASH_SOURCE[0]}")/toolchain_path.sh"
 
 run_hook_steps() {
   local hook=$1
@@ -80,6 +89,11 @@ run_hook_steps() {
       set +a
       ;;
   esac
+
+  if [ "${#steps[@]}" -gt 0 ] && ! toolchain_path "$root"; then
+    echo "$hook: $TOOLCHAIN_ERROR"
+    return 1
+  fi
 
   for step in ${steps[@]+"${steps[@]}"}; do
     case "$step" in *=?*) ;; *) echo "$hook: bad step '$step' in hooks.conf (want label=make-target)"; return 1 ;; esac
