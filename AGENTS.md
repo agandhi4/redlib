@@ -1,6 +1,6 @@
 # redlib (agandhi4 fork)
 
-Personal fork of [redlib](https://github.com/redlib-org/redlib), heavily customized. Runs one instance at `reddit.box` (NAS, single user). `docs/fork.md` is the fork's record: what diverged from upstream and why, plus operational notes. Read it before changing anything upstream also owns, and add to it when the fork diverges further. Dated decisions go in `docs/decisions.md`.
+Personal **hard fork** of [redlib](https://github.com/redlib-org/redlib) (forked at upstream `a4d36e9`; upstream fixes are cherry-picked, never merged wholesale; cadence in `docs/fork.md`), heavily customized. Runs one instance at `reddit.box` (NAS, single user). `docs/fork.md` is the fork's record: what diverged from upstream and why, plus operational notes. Read it before changing anything upstream also owns, and add to it when the fork diverges further. Dated decisions go in `docs/decisions.md`.
 
 ## Stack
 
@@ -34,11 +34,13 @@ Rust + hyper + Askama (server-rendered HTML), vanilla CSS/JS. No frontend framew
 
 ## CI and the PR gate
 
-- `Makefile` is the check API: `ci-quick` (devkit-check, toolchain-check, workflows-check, docs-check, `cargo fmt --check`, clippy `-D warnings`), `ci-unit` (`cargo test`, offline), `ci-image` (`Dockerfile.alpine`, linux/amd64). Change a check there, never in a workflow or the gate plan.
+- `Makefile` is the check API: `ci-quick` (devkit-check, toolchain-check, workflows-check, docs-check, release-check, `cargo fmt --check`, clippy `-D warnings`), `ci-unit` (`cargo test`, offline), `ci-image` (`Dockerfile`, linux/amd64, then asserts the image's `APP_VERSION` ENV and OCI version label equal `CI_BUILD_VERSION`). Change a check there, never in a workflow or the gate plan.
 - **A test that calls live Reddit gets `#[ignore = "hits live reddit"]`** (Reddit blocks runner IPs, so it would make every gate flaky). `make test-live` runs those serially; it gates nothing.
 - Actions: `quick-check.yml` is the one PR job (`make ci-quick ci-unit` on non-draft PRs and on push to `main`). `ghcr.yml` publishes `sha-<7>` + `latest` and prunes old versions; both jobs carry `if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'` and run uncancellable. Every `uses:` is SHA-pinned (`make workflows-check`).
 - The merge gate is `make gate PR=<n>` on this Mac (`devkit/bin/local_gate.sh`). It gates the PR merged into `origin/main`, picks jobs by changed path in `scripts/ci/gate_plan.sh`, and posts the `local-gate` status.
 - No smoke job: the listener opens only after OAuth bootstrap against Reddit (see Startup order), so no health path answers without live Reddit.
+- **Release identity: one version string, `sha-<7>`.** `ghcr.yml` passes it as the `APP_VERSION` build arg (Dockerfile final stage: ARG, ENV, OCI version label), tags the image `sha-<7>` + `latest`, then creates the git tag `ship-<YYYY-MM-DD>-<sha7>` (`devkit/bin/ship_tag.sh`). CI moves `latest` and is therefore the deployer. The footer, /info and the startup log read `instance_info::app_version()` (`v<semver>` outside an image). No compose file may set `APP_VERSION` (`make release-check`). The Cargo semver remains only the asset cache-buster.
+- Upstream: `git remote add upstream https://github.com/redlib-org/redlib.git` once per clone; monthly `git fetch upstream && git log main..upstream/main`, cherry-pick security/API fixes (`docs/fork.md`).
 - `devkit/` is a vendored subtree. Never edit it here (`devkit-check` fails); change agandhi4/devkit, then `make devkit-sync`.
 
 ## Commands
@@ -50,7 +52,7 @@ Rust + hyper + Askama (server-rendered HTML), vanilla CSS/JS. No frontend framew
 ## Workflow
 
 <!-- ORCHESTRATION-OVERRIDE: claudebot agents skip this section. -->
-- Ship loop: version bump → PR → `make gate PR=<n>` passes → squash-merge to `main` → GitHub Actions builds `ghcr.io/agandhi4/redlib:latest` → NAS pull → verify version in the footer at `reddit.box/settings`. The pull is either the hourly `deploy.sh update` timer (the redlib stack is marked `# autoupdate` in the homelab repo) or, to ship now: `ssh nas 'cd /volume1/docker/homelab && PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/syno/sbin:/usr/syno/bin ./deploy.sh update synology'` (plain ssh shell, that PATH puts the docker sudo shim first).
+- Ship loop: version bump → PR → `make gate PR=<n>` passes → squash-merge to `main` → GitHub Actions builds `ghcr.io/agandhi4/redlib:latest` and ship-tags the commit → NAS pull → verify the footer at `reddit.box/settings` shows `sha-<7>` of the merge commit. The pull is either the hourly `deploy.sh update` timer (the redlib stack is marked `# autoupdate` in the homelab repo) or, to ship now: `ssh nas 'cd /volume1/docker/homelab && PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/syno/sbin:/usr/syno/bin ./deploy.sh update synology'` (plain ssh shell, that PATH puts the docker sudo shim first).
 - The container's compose file lives in the homelab repo (`stacks/redlib/docker-compose.yml`), not here. It carries the `autoheal: "true"` label: homeinfra's autoheal restarts the container if its healthcheck goes red while the process is still alive, which Docker's own restart policy never does.
 - Measure, don't guess: cold vs warm TTFB via `curl -w "%{time_starttransfer}"` against `reddit.box`, 40s apart for cache-miss samples; the idle prefetcher is verified by loading a listing in headless Chromium and timing a picked vs an unpicked post.
 - Visual changes get screenshot verification before shipping (headless Chromium at 1280px and 390px, dark and light).

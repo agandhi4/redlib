@@ -139,3 +139,12 @@ deliberate speed choice) and may adopt later; closet uses scratch databases, not
 **Why**: `git subtree pull --squash` finds its base through `git-subtree-split` trailers, and squash-merged PRs drop them; every repo's second sync conflicted on byte-identical files, and rollcall's failed with "never added". Local edits are already forbidden by devkit-check.
 **Decision**: `devkit-sync.sh` fetches the upstream ref and does `git rm -r devkit && git read-tree --prefix=devkit/ -u <tree>`, then writes `.devkit-rev` and commits. First vendoring is the same command.
 **Consequence**: syncs are conflict-free and idempotent ("already current" is a no-op); `.devkit-rev` + `devkit-check` remain the only contract. Repos still carrying the old vendored script run `~/projects/solo/devkit/bin/devkit-sync.sh` once from their root.
+
+## 2026-10-13 — devkit-check compares the index tree, not HEAD
+**Why**: a consumer's pre-commit runs `ci-quick`, so `devkit-check` ran on the sync's own commit with
+the new `.devkit-rev` staged and HEAD still holding the old tree: every first sync was refused
+by its own hook (locus `own-commit`, 2026-10-13). Comparing HEAD also let a staged edit through.
+**Decision**: `devkit-check.sh` hashes `devkit/` from the index (`git write-tree --prefix=devkit/`).
+In CI the index equals HEAD; in the hook it is exactly what will be committed.
+**Consequence**: syncs commit through the hook; consumers still on the old script need the
+sync to land once (the hook runs the new vendored copy from the working tree).

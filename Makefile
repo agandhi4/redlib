@@ -8,14 +8,17 @@
 CARGO ?= cargo
 DOCKER ?= docker
 CI_IMAGE ?= redlib:ci
+# The image's APP_VERSION, and what ci-image then asserts its ENV and OCI label carry: the gate
+# passes gate-<pr> (scripts/ci/gate_plan.sh); ghcr.yml's own build passes sha-<7>.
+CI_BUILD_VERSION ?= ci-$(shell git rev-parse --short=7 HEAD)
 
 .DEFAULT_GOAL := help
-.PHONY: help ci-quick ci-unit test-live ci-image gate devkit-sync devkit-check toolchain-check workflows-check docs-check
+.PHONY: help ci-quick ci-unit test-live ci-image gate devkit-sync devkit-check toolchain-check workflows-check docs-check release-check
 
 help: ## list targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
 
-ci-quick: devkit-check toolchain-check workflows-check docs-check ## format, lint and repo guards (Actions + gate)
+ci-quick: devkit-check toolchain-check workflows-check docs-check release-check ## format, lint and repo guards (Actions + gate)
 	$(CARGO) fmt --all -- --check
 	$(CARGO) clippy --locked --all-targets -- -D warnings
 
@@ -32,8 +35,19 @@ test-live: ## the #[ignore]d tests that call live Reddit (needs outbound network
 
 # linux/amd64 like ghcr.yml: the builder cross-compiles to x86_64 musl, so an arm64 host's
 # default platform would wrap that binary in an arm64 Alpine that cannot run it.
-ci-image: ## build Dockerfile.alpine as $(CI_IMAGE)
-	$(DOCKER) build --platform linux/amd64 -f Dockerfile.alpine -t $(CI_IMAGE) .
+#
+# No boot: the listener opens only after OAuth bootstrap against live Reddit (AGENTS.md "Startup
+# order"), so devkit's boot_image.sh BOOT_EXPECT_VERSION cannot run here. The build arg is checked
+# where it lands instead: the image's ENV (what the app reads) and its OCI version label.
+ci-image: ## build Dockerfile as $(CI_IMAGE) with APP_VERSION=$(CI_BUILD_VERSION), then assert ENV + label carry it
+	$(DOCKER) build --platform linux/amd64 --build-arg APP_VERSION="$(CI_BUILD_VERSION)" -t $(CI_IMAGE) .
+	@env=$$($(DOCKER) image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $(CI_IMAGE) | sed -n 's/^APP_VERSION=//p'); \
+	label=$$($(DOCKER) image inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' $(CI_IMAGE)); \
+	if [ "$$env" = "$(CI_BUILD_VERSION)" ] && [ "$$label" = "$(CI_BUILD_VERSION)" ]; then \
+	  echo "ci-image: APP_VERSION and image.version label are $(CI_BUILD_VERSION)"; \
+	else \
+	  echo "ci-image: expected $(CI_BUILD_VERSION), image has APP_VERSION='$$env' label='$$label'" >&2; exit 1; \
+	fi
 
 gate: ## make gate PR=<n> [GATE_ARGS=--no-post]
 	@test -n "$(PR)" || { echo "usage: make gate PR=<number> [GATE_ARGS=--no-post]" >&2; exit 2; }
@@ -53,3 +67,6 @@ workflows-check: ## part of ci-quick: SHA pins, draft skip, one PR job, uncancel
 
 docs-check: ## part of ci-quick: AGENTS.md real, CLAUDE.md symlink, decisions.md
 	devkit/bin/docs_check.sh
+
+release-check: ## part of ci-quick: APP_VERSION baked into the image (ARG/ENV/LABEL), never set by compose
+	devkit/bin/release_check.sh

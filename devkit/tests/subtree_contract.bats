@@ -114,6 +114,28 @@ run_check() { cd "$CONSUMER" && run "$CHECK"; }
   [[ "$output" == *"make devkit-sync"* ]]
 }
 
+@test "pre-commit: a staged sync passes devkit-check before it is committed" {
+  run_sync; [ "$status" -eq 0 ]
+  advance_upstream 'echo v5'
+  # What the sync stages, checked the way the consumer's pre-commit hook sees it (HEAD still old).
+  git -C "$CONSUMER" fetch -q "$UPSTREAM" main
+  git -C "$CONSUMER" rm -rq devkit
+  git -C "$CONSUMER" read-tree --prefix=devkit/ -u "$(upstream_tree)"
+  echo "$(upstream_sha) $(upstream_tree)" >"$CONSUMER/.devkit-rev"
+  git -C "$CONSUMER" add .devkit-rev
+  run_check
+  [ "$status" -eq 0 ]
+}
+
+@test "drift: a staged (uncommitted) local edit under devkit/ fails devkit-check" {
+  run_sync; [ "$status" -eq 0 ]
+  echo 'echo hacked' >"$CONSUMER/devkit/bin/tool.sh"
+  git -C "$CONSUMER" add devkit/bin/tool.sh
+  run_check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"differs from the vendored"* ]]
+}
+
 @test "drift is repaired by the next sync (upstream wins)" {
   run_sync; [ "$status" -eq 0 ]
   echo 'echo hacked' >"$CONSUMER/devkit/bin/tool.sh"

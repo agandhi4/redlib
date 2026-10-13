@@ -1,13 +1,18 @@
 name: Build and push to GHCR
 
 # Main-only publish. PR verification is quick-check.yml (Actions) plus the local gate
-# (`make gate PR=<n>`), which builds this same Dockerfile.alpine against the PR merged into main.
+# (`make gate PR=<n>`), which builds this same Dockerfile against the PR merged into main.
 # No `needs:` on a check job: a job can only need jobs in its own workflow, and the squash-merged
 # tree built here is the tree the gate tested.
 #
 # Both jobs carry an explicit ref guard: workflow_dispatch can be started from any branch, and the
 # trigger filter alone would let that branch's build become `latest` and prune real versions.
 # Tags: `sha-<7>` (which commit is running) and `latest` (what the homelab stack pulls).
+#
+# Release identity (owner rule 2026-10-13): this job IS the deploy. homelab's `deploy.sh update`
+# timer pulls `latest` hourly, so after the push the job marks the commit shipped with the git tag
+# ship-<YYYY-MM-DD>-<sha7> (devkit/bin/ship_tag.sh). The same sha-<7> is the image's APP_VERSION
+# (ENV, read by the footer and /info) and its OCI version label: one string everywhere.
 
 on:
   push:
@@ -31,13 +36,19 @@ jobs:
   build-and-push:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    # contents: write only for the ship tag (ship_tag.sh creates it through `gh api`).
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The one version string: image tag, build arg and OCI label.
+      - name: Release version
+        id: version
+        run: echo "version=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -49,37 +60,45 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The version label is explicit: metadata-action would otherwise derive it from a tag
+      # (`latest`), and it must equal the APP_VERSION build arg below.
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=sha,prefix=sha-,format=short
+            type=raw,value=${{ steps.version.outputs.version }}
             type=raw,value=latest
+          labels: |
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
 
       - name: Build and push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: Dockerfile.alpine
+          file: Dockerfile
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.version }}
 
-  # Keeps the 10 newest package versions. Gotcha: tagged versions count too, so an old `sha-`
-  # tag is pruned like any other; `latest` is always on the newest push and survives.
-  cleanup:
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    needs: build-and-push
-    permissions:
-      packages: write
-    steps:
-      - uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
+      # After the push, never before: the tag says "latest moved to this commit". Idempotent, so
+      # a re-run of this job succeeds; it refuses a sha that is not on main.
+      - name: Ship tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: devkit/bin/ship_tag.sh "${{ github.repository }}" "${{ github.sha }}"
+
+      # Keeps the 10 newest package versions. Gotcha: tagged versions count too, so an old `sha-`
+      # image is pruned like any other (a ship tag can outlive its image); `latest` is always on
+      # the newest push and survives. A step, not a second job: every job bills a whole minute.
+      - name: Prune old image versions
+        uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
         with:
           package-name: redlib
           package-type: container

@@ -424,7 +424,7 @@ async fn main() {
 	// Default service in case no routes match
 	app.at("/*").get(|req| error(req, "Nothing here").boxed());
 
-	println!("Running Redlib v{} on {listener}!", env!("CARGO_PKG_VERSION"));
+	println!("Running Redlib {} on {listener}!", instance_info::app_version());
 
 	let server = app.listen(&listener);
 
