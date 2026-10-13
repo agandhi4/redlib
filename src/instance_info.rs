@@ -15,6 +15,18 @@ use time::OffsetDateTime;
 /// retrieved from the info endpoint.
 pub static INSTANCE_INFO: LazyLock<InstanceInfo> = LazyLock::new(InstanceInfo::new);
 
+/// The build's one version string: the image's `APP_VERSION` (`sha-<7>` from ghcr.yml, the same
+/// string as the image tag, its OCI version label and the `ship-<date>-<sha7>` git tag), or
+/// `v<crate semver>` outside an image (`cargo run`, tests). Read once; the env is fixed per process.
+/// Used by: the footer (templates/base.html), /info, the startup log line (main.rs).
+pub fn app_version() -> &'static str {
+	static APP_VERSION: LazyLock<String> = LazyLock::new(|| match std::env::var("APP_VERSION") {
+		Ok(version) if !version.is_empty() => version,
+		_ => concat!("v", env!("CARGO_PKG_VERSION")).to_string(),
+	});
+	&APP_VERSION
+}
+
 /// Handles instance info endpoint
 pub async fn instance_info(req: Request<Body>) -> Result<Response<Body>, String> {
 	// This will retrieve the extension given, or create a new string - which will
@@ -85,6 +97,7 @@ fn info_html(req: &Request<Body>) -> Result<Response<Body>, Error> {
 pub struct InstanceInfo {
 	package_name: String,
 	crate_version: String,
+	app_version: String,
 	pub git_commit: String,
 	deploy_date: String,
 	compile_mode: String,
@@ -97,6 +110,7 @@ impl InstanceInfo {
 		Self {
 			package_name: env!("CARGO_PKG_NAME").to_string(),
 			crate_version: env!("CARGO_PKG_VERSION").to_string(),
+			app_version: app_version().to_string(),
 			git_commit: env!("GIT_HASH").to_string(),
 			deploy_date: OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc()).to_string(),
 			#[cfg(debug_assertions)]
@@ -120,6 +134,7 @@ impl InstanceInfo {
 			Table::from([
 				["Package name", &self.package_name],
 				["Crate version", &self.crate_version],
+				["App version", &self.app_version],
 				["Git commit", &self.git_commit],
 				["Deploy date", &self.deploy_date],
 				["Deploy timestamp", &self.deploy_unix_ts.to_string()],
@@ -163,6 +178,7 @@ impl InstanceInfo {
 				format!(
 					"Package name: {}\n
 				Crate version: {}\n
+				App version: {}\n
                 Git commit: {}\n
                 Deploy date: {}\n
                 Deploy timestamp: {}\n
@@ -192,15 +208,16 @@ impl InstanceInfo {
                     Default feeds: {:?}\n",
 					self.package_name,
 					self.crate_version,
+					self.app_version,
 					self.git_commit,
 					self.deploy_date,
 					self.deploy_unix_ts,
 					self.compile_mode,
 					self.config.sfw_only,
+					self.config.pushshift,
 					self.config.enable_rss,
 					self.config.full_url,
 					self.config.default_remove_default_feeds,
-					self.config.pushshift,
 					self.config.banner,
 					self.config.default_hide_awards,
 					self.config.default_hide_score,
@@ -235,4 +252,31 @@ struct MessageTemplate {
 	body: String,
 	prefs: Preferences,
 	url: String,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use sealed_test::prelude::*;
+
+	#[test]
+	#[sealed_test(env = [("APP_VERSION", "sha-abc1234")])]
+	fn app_version_is_the_image_build_arg() {
+		assert_eq!(app_version(), "sha-abc1234");
+		assert_eq!(InstanceInfo::new().app_version, "sha-abc1234");
+	}
+
+	#[test]
+	#[sealed_test(env = [("APP_VERSION", "")])]
+	fn app_version_falls_back_to_crate_semver() {
+		assert_eq!(app_version(), concat!("v", env!("CARGO_PKG_VERSION")));
+	}
+
+	#[test]
+	#[sealed_test(env = [("APP_VERSION", "sha-abc1234"), ("REDLIB_PUSHSHIFT_FRONTEND", "pushshift.example")])]
+	fn raw_info_labels_line_up_with_values() {
+		let raw = InstanceInfo::new().to_string(&StringType::Raw);
+		assert!(raw.contains("App version: sha-abc1234"), "{raw}");
+		assert!(raw.contains("Pushshift frontend: Some(\"pushshift.example\")"), "{raw}");
+	}
 }

@@ -4,19 +4,20 @@
 #   *.md, docs/**                      -> docs (docs-check) only
 #   src/**, Cargo.*, build.rs, rust-toolchain.toml
 #                                      -> quick + unit
-#   Dockerfile.alpine, .dockerignore   -> image
+#   Dockerfile, .dockerignore          -> image
 #   anything else (static/, templates/, Makefile, scripts/, .github/, devkit/, ...)
 #                                      -> everything. static/ and templates/ are compiled into
 #                                         the binary (include_str!, Askama), so they are code.
 #   image-affecting paths              -> image (see IMAGE_PATHS)
 # There is no smoke job: the listener opens only after OAuth bootstrap against Reddit
-# (AGENTS.md "Startup order"), so no health path answers without live Reddit.
+# (AGENTS.md "Startup order"), so no health path answers without live Reddit. ci-image asserts
+# the image ENV and OCI label carry gate-<pr> instead (release identity).
 GATE_SLUG=agandhi4/redlib
 GATE_STATE_NAME=redlib-gate
 
 # Paths that change what the image's builder resolves before compiling: the dependency layer
 # (Cargo.lock, Cargo.toml), the pinned toolchain, or the build recipe itself.
-IMAGE_PATHS='^(Dockerfile\.alpine|\.dockerignore|Cargo\.lock|Cargo\.toml|rust-toolchain\.toml)$'
+IMAGE_PATHS='^(Dockerfile|\.dockerignore|Cargo\.lock|Cargo\.toml|rust-toolchain\.toml)$'
 
 IMAGE="redlib:gate-$PR"
 
@@ -31,7 +32,7 @@ gate_plan() {
     case "$path" in
       *.md|docs/*) docs=1 ;;
       src/*|Cargo.toml|Cargo.lock|build.rs|rust-toolchain.toml) rust=1 ;;
-      Dockerfile.alpine|.dockerignore) image=1 ;;
+      Dockerfile|.dockerignore) image=1 ;;
       *) all=1 ;;
     esac
   done <<< "$CHANGED"
@@ -51,7 +52,7 @@ gate_plan() {
   fi
 
   if [ "$image" = 1 ]; then
-    job image ci-image CI_IMAGE="$IMAGE"
+    job image ci-image CI_IMAGE="$IMAGE" CI_BUILD_VERSION="gate-$PR"
   else
     skip image "no image-affecting paths changed"
   fi

@@ -1,7 +1,7 @@
 # The one Rust version string for this repo (AGENTS.md "Toolchain"). rustup, the devkit gate
 # (devkit/bin/rust_toolchain.sh), Actions (setup-rust-toolchain reads this file) and the image
 # builder all resolve it; toolchain-check fails when anything else names a different version.
-# The musl target is what Dockerfile.alpine builds; listing it here makes rustup install it with
+# The musl target is what the Dockerfile builds; listing it here makes rustup install it with
 # the pinned toolchain inside the builder, which would otherwise lack it for this channel.
 [toolchain]
 channel = "1.99.0"
