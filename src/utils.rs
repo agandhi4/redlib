@@ -7,7 +7,7 @@ use askama::Template;
 use cookie::Cookie;
 use hyper::{Body, Request, Response};
 use libflate::deflate::{Decoder, Encoder};
-use log::error;
+use log::{error, warn};
 use regex::Regex;
 use revision::revisioned;
 use rust_embed::RustEmbed;
@@ -988,17 +988,28 @@ pub fn setting(req: &Request<Body>, name: &str) -> String {
 /// directly, so they work identically on every browser regardless of subscription
 /// cookies, and stay out of the Preferences restore/bincode surface.
 /// Used by: subreddit::feed, sub_list macro (utils.html), aside panel (subreddit.html).
-pub static FEEDS: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
-	get_setting("REDLIB_DEFAULT_FEEDS")
-		.unwrap_or_default()
-		.split('|')
-		.filter_map(|entry| {
-			let (name, subs) = entry.split_once(':')?;
-			let (name, subs) = (name.trim(), subs.trim());
-			(!name.is_empty() && !subs.is_empty()).then(|| (name.to_owned(), subs.to_owned()))
-		})
-		.collect()
-});
+pub static FEEDS: LazyLock<Vec<(String, String)>> = LazyLock::new(|| parse_feeds(&get_setting("REDLIB_DEFAULT_FEEDS").unwrap_or_default()));
+
+/// Parse `REDLIB_DEFAULT_FEEDS`. Malformed entries (no `:`, empty name or sub list) are skipped
+/// with a warning. A name repeated case-insensitively keeps its first definition: `/f/:name`
+/// matches case-insensitively, so a later duplicate could never be reached.
+fn parse_feeds(raw: &str) -> Vec<(String, String)> {
+	let mut feeds: Vec<(String, String)> = Vec::new();
+	for entry in raw.split('|').map(str::trim).filter(|entry| !entry.is_empty()) {
+		let Some((name, subs)) = entry.split_once(':').map(|(name, subs)| (name.trim(), subs.trim())) else {
+			warn!("REDLIB_DEFAULT_FEEDS: skipping \"{entry}\" (expected Name:sub1+sub2)");
+			continue;
+		};
+		if name.is_empty() || subs.is_empty() {
+			warn!("REDLIB_DEFAULT_FEEDS: skipping \"{entry}\" (empty name or sub list)");
+		} else if feeds.iter().any(|(existing, _)| existing.eq_ignore_ascii_case(name)) {
+			warn!("REDLIB_DEFAULT_FEEDS: skipping duplicate feed \"{name}\" (first definition wins)");
+		} else {
+			feeds.push((name.to_owned(), subs.to_owned()));
+		}
+	}
+	feeds
+}
 
 /// Template helper: the instance's named feeds (askama can't reference statics directly).
 pub fn feeds() -> &'static Vec<(String, String)> {
@@ -1489,7 +1500,37 @@ pub fn to_absolute_url(relative_path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-	use super::{deflate_compress, deflate_decompress, format_num, format_url, render_bullet_lists, rewrite_emotes, rewrite_urls, url_path_basename, Post, Preferences};
+	use super::{
+		deflate_compress, deflate_decompress, format_num, format_url, parse_feeds, render_bullet_lists, rewrite_emotes, rewrite_urls, url_path_basename, Post, Preferences,
+	};
+
+	fn feeds(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+		pairs.iter().map(|(name, subs)| ((*name).to_owned(), (*subs).to_owned())).collect()
+	}
+
+	#[test]
+	fn parse_feeds_valid_keeps_declaration_order_and_trims() {
+		assert_eq!(
+			parse_feeds("Tech:rust+golang| News : worldnews+news "),
+			feeds(&[("Tech", "rust+golang"), ("News", "worldnews+news")])
+		);
+	}
+
+	#[test]
+	fn parse_feeds_empty_is_no_feeds() {
+		assert_eq!(parse_feeds(""), feeds(&[]));
+		assert_eq!(parse_feeds(" | |"), feeds(&[]));
+	}
+
+	#[test]
+	fn parse_feeds_skips_malformed_entries() {
+		assert_eq!(parse_feeds("NoColon|:rust|Empty:|Ok:rust|  :  "), feeds(&[("Ok", "rust")]));
+	}
+
+	#[test]
+	fn parse_feeds_first_duplicate_name_wins_case_insensitively() {
+		assert_eq!(parse_feeds("Tech:rust|tech:golang|TECH:zig|Other:news"), feeds(&[("Tech", "rust"), ("Other", "news")]));
+	}
 
 	#[test]
 	fn format_num_works() {
