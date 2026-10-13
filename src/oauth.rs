@@ -347,6 +347,7 @@ mod tests {
 	use crate::client::init_oauth_client;
 
 	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "hits live reddit"]
 	async fn test_mobile_spoof_backend() {
 		// Test MobileSpoofAuth backend specifically
 		let mut backend = MobileSpoofAuth::new();
@@ -360,6 +361,7 @@ mod tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "hits live reddit"]
 	async fn test_oauth_client() {
 		// Integration test - tests the overall Oauth client
 		init_oauth_client().await;
@@ -367,12 +369,14 @@ mod tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "hits live reddit"]
 	async fn test_oauth_client_refresh() {
 		init_oauth_client().await;
 		force_refresh_token().await;
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "hits live reddit"]
 	async fn test_oauth_token_exists() {
 		init_oauth_client().await;
 		let client = oauth_client().load_full();
@@ -381,6 +385,7 @@ mod tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "hits live reddit"]
 	async fn test_oauth_headers_len() {
 		init_oauth_client().await;
 		assert!(oauth_client().load_full().headers_map.len() >= 3);
