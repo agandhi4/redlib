@@ -3,10 +3,10 @@ ARG ALPINE_VERSION=3.23
 ########################
 ## builder image
 ########################
-# $BUILDPLATFORM: the builder is a cross toolchain (any host -> x86_64 musl), so it runs natively
-# on the build host; only the release stage is linux/amd64. On an arm64 Mac this avoids
-# emulating the whole Rust build. On ubuntu-latest (amd64) it changes nothing.
-FROM --platform=$BUILDPLATFORM ghcr.io/rust-cross/rust-musl-cross:x86_64-musl AS builder
+# Runs as linux/amd64 even on an arm64 host (emulated, slow). Not --platform=$BUILDPLATFORM:
+# the image's arm64 variant cross-compiles, and boring-sys2's bindgen then looks for x86_64 glibc
+# headers the arm64 image lacks ('bits/libc-header-start.h' not found).
+FROM ghcr.io/rust-cross/rust-musl-cross:x86_64-musl AS builder
 
 RUN apt-get update \
     && apt-get -y install git cmake perl pkg-config libclang-dev \
