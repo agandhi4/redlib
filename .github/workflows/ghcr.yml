@@ -73,6 +73,8 @@ jobs:
           labels: |
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
 
+      # amd64 only: the NAS is amd64. The Dockerfile is multi-arch (builder-${TARGETARCH}), but an
+      # arm64 build here would run under QEMU on this amd64 runner (~10x slower; issue #7).
       - name: Build and push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
