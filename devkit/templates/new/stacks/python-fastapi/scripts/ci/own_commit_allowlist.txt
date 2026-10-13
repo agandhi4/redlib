@@ -1,3 +1,0 @@
-# Functions allowed to call commit_now(..., reason=...) on a borrowed session, one per line:
-# <path relative to server/>::<qualname> [<count>] [<REASON>]  (devkit/bin/own_commit_check.py)
-# Shrink-only: an unlisted call fails, and so does a listed function that no longer calls it.

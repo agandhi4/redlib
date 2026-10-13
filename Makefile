@@ -53,7 +53,7 @@ ci-image: ## build Dockerfile as $(CI_IMAGE) with APP_VERSION=$(CI_BUILD_VERSION
 
 gate: ## make gate PR=<n> [GATE_ARGS=--no-post]
 	@test -n "$(PR)" || { echo "usage: make gate PR=<number> [GATE_ARGS=--no-post]" >&2; exit 2; }
-	devkit/bin/local_gate.sh "$(PR)" $(GATE_ARGS)
+	devkit/bin/gate.sh "$(PR)" $(GATE_ARGS)
 
 # --fix rewrites core.hooksPath, so a tool that repointed it is undone by the next install.
 install: devkit-check ## one-time per checkout/worktree: install the git hooks (.githooks, steps in scripts/ci/hooks.conf)

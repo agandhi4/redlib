@@ -11,6 +11,9 @@
 #   - Workflow steps that push an image pass it: docker/build-push-action with `push:` not false
 #     needs `APP_VERSION=` under `build-args:`; a `run:` step that builds and pushes
 #     (`--push` or `docker push`) needs `--build-arg APP_VERSION=`.
+#   - No workflow line sets APP_VERSION, a `version=` output or the OCI version label to a
+#     `sha-`-prefixed value: the version is the bare <sha7>, only image tags carry `sha-`
+#     (observability.md; the 2026-10-13 fleet-wide fix in docs/decisions.md).
 # Only the root Dockerfile is the app image; none means nothing to check.
 # Usage: devkit/bin/release_check.sh [repo-root]      (part of ci-quick)
 set -uo pipefail
@@ -98,9 +101,21 @@ check_workflows() {
   done < <(workflow_files)
 }
 
+# The version is the bare sha7; `sha-<7>` is only an image tag. Catches a version step that
+# echoes `version=sha-…`, a literal build arg and a label alike; `value=sha-…` tags pass.
+check_version_format() {
+  local wf hit
+  while IFS= read -r wf; do
+    while IFS= read -r hit; do
+      fail "$wf:${hit%%:*}: version value starts with 'sha-'; APP_VERSION is the bare sha7, only image tags carry 'sha-'"
+    done < <(grep -nE "(^|[^A-Za-z0-9_])(APP_VERSION|version)=[\"']?sha-" "$wf")
+  done < <(workflow_files)
+}
+
 check_dockerfile
 check_compose
 check_workflows
+check_version_format
 
 [ $rc = 0 ] && echo "release-check: ok"
 exit $rc

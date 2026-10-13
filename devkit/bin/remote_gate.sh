@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# Run this repo's PR gate on the gate host over ssh, with local_gate.sh's output contract
+# unchanged: the host's GATE/VERDICT lines stream to this stdout, its stderr to this stderr, and
+# its exit code is this exit code. The host posts the `local-gate` status itself (it has gh).
+# Normally reached through gate.sh (`make gate PR=<n>`), which decides remote vs local.
+#
+# Usage: devkit/bin/remote_gate.sh <pr> [--no-post]
+#
+# Settings (environment, else ${XDG_CONFIG_HOME:-$HOME/.config}/devkit/gate.env; env wins):
+#   GATE_REMOTE_HOST      [user@]host to ssh to (required here)
+#   GATE_REMOTE_ROOT      where the host keeps one gate checkout per repo; default ~/gates, so
+#                         finplat's is ~/gates/finplat. `~` is expanded ON THE HOST.
+#   GATE_REMOTE_SSH_OPTS  extra ssh options, word-split (e.g. `-p 2222 -o ConnectTimeout=10`);
+#                         they come first, so they override the defaults below.
+# Nothing else crosses ssh: the host's own environment and gate.env set GATE_SLOTS etc., so a
+# laptop's GATE_SLOTS=4 never loosens the host's one-gate-at-a-time lock.
+#
+# On the host (remote_main below), under a per-checkout flock:
+#   1. clone GATE_SLUG (read from this checkout's plan) with `gh repo clone` if absent; refuse a
+#      checkout whose origin is another repo;
+#   2. fetch origin main, force the checkout onto it and remove untracked files: local_gate.sh
+#      reads the plan from the checkout it runs from, so a stale or dirty one would gate with
+#      the wrong policy;
+#   3. run devkit/bin/local_gate.sh <pr> [--no-post] there, which fetches the PR ref itself
+#      (with its fork guard and missing-pull-ref fallback).
+# Remote gates keep their state in $GATE_REMOTE_ROOT/.state (logs: .state/<GATE_STATE_NAME>/
+# logs/<pr>/), not the host's default: the host's merge queue gates the same repo from its own
+# checkout with the same worktree names, and a worktree left by a killed run in one checkout
+# would make `worktree add` fail in the other. The machine-wide lock is still shared.
+#
+# Interrupts: ssh's stdin is a pipe this script holds open and never writes. When this side
+# goes away (Ctrl-C, a killed agent, a closed connection) the host sees EOF and sends TERM to
+# local_gate.sh, whose EXIT trap stops the job, posts `error` and removes the worktree. Without
+# it a gate whose client vanished kept running and held the host's lock to the end.
+#
+# Exit: the remote gate's (0 pass, 1 fail, 2 usage or environment, 130 interrupted); 2 when ssh
+# itself fails (255), with no VERDICT line, like local_gate.sh's environment errors.
+set -uo pipefail
+
+usage() { echo "usage: $0 <pr-number> [--no-post]"; }
+
+PR=""
+FORWARD=()
+for arg in "$@"; do
+  case "$arg" in
+    --no-post) FORWARD+=(--no-post) ;;
+    -h|--help) usage; exit 0 ;;
+    ''|*[!0-9]*) usage >&2; exit 2 ;;
+    *) PR=$arg ;;
+  esac
+done
+[ -n "$PR" ] || { usage >&2; exit 2; }
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
+# shellcheck source=bin/_gate_env.sh
+. "$HERE/_gate_env.sh"
+gate_env_load remote_gate "$GATE_REMOTE_KEYS" "$GATE_LOCAL_KEYS"
+gate_remote_settings_check
+HOST=${GATE_REMOTE_HOST:-}
+[ -n "$HOST" ] || { echo "remote_gate: GATE_REMOTE_HOST is not set (environment or gate.env)" >&2; exit 2; }
+REMOTE_ROOT=${GATE_REMOTE_ROOT:-"~/gates"}
+command -v ssh >/dev/null || { echo "remote_gate: ssh not found" >&2; exit 2; }
+
+ROOT=$(git -C "$HERE" rev-parse --show-toplevel) || exit 2
+PLAN=$ROOT/scripts/ci/gate_plan.sh
+[ -f "$PLAN" ] || { echo "remote_gate: no plan at $PLAN" >&2; exit 2; }
+SLUG=$(gate_plan_literal "$PLAN" GATE_SLUG)
+[[ "$SLUG" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] \
+  || { echo "remote_gate: $PLAN needs a literal GATE_SLUG=owner/repo line (read here, not sourced)" >&2; exit 2; }
+
+# Runs on the host as `bash -c <this function> remote_gate <pr> <slug> <root> [--no-post]`.
+# It travels inside single quotes, so it must contain none (checked below); `declare -f` ships
+# exactly the code shellcheck linted here.
+# shellcheck disable=SC2329  # invoked on the host, shipped via `declare -f`
+remote_main() {
+  local pr=$1 slug=$2 root=$3 dir repo url gate gate_pid watch_pid rc
+  shift 3
+  case "$root" in
+    \~) root=$HOME ;;
+    \~/*) root=$HOME/${root#\~/} ;;
+  esac
+  repo=${slug#*/}
+  dir=$root/$repo
+  for tool in git gh flock make; do
+    command -v "$tool" >/dev/null || { echo "remote_gate: $tool not found on $(hostname)" >&2; exit 2; }
+  done
+  mkdir -p "$root" || exit 2
+
+  # Two Macs (or two agents) gating the same repo must not fetch and reset one checkout at once.
+  exec 8>"$root/.$repo.lock"
+  flock 8
+  if [ ! -e "$dir/.git" ]; then
+    echo "remote_gate: no checkout of $slug at $dir on $(hostname); cloning" >&2
+    gh repo clone "$slug" "$dir" -- -q \
+      || { echo "remote_gate: gh repo clone $slug failed on $(hostname) (gh auth status?)" >&2; exit 2; }
+  fi
+  url=$(git -C "$dir" remote get-url origin) || exit 2
+  case "$url" in
+    */"$slug" | */"$slug".git | *:"$slug" | *:"$slug".git) ;;
+    *) echo "remote_gate: $dir on $(hostname) has origin $url, not $slug" >&2; exit 2 ;;
+  esac
+  git -C "$dir" fetch -q origin main \
+    || { echo "remote_gate: git fetch origin main failed in $dir on $(hostname)" >&2; exit 2; }
+  if ! git -C "$dir" checkout -q -f -B main origin/main || ! git -C "$dir" clean -q -ffd; then
+    echo "remote_gate: could not reset $dir to origin/main on $(hostname)" >&2
+    exit 2
+  fi
+  exec 8>&-
+
+  gate=$dir/devkit/bin/local_gate.sh
+  [ -x "$gate" ] || { echo "remote_gate: $gate missing on $(hostname); is devkit vendored on main?" >&2; exit 2; }
+  echo "GATE note: remote $(hostname) $dir main $(git -C "$dir" rev-parse --short HEAD)"
+
+  export XDG_STATE_HOME=$root/.state
+  # Background jobs of a non-interactive shell read /dev/null, so keep ssh's stdin on fd 3 for
+  # the watcher. The watcher's own output goes nowhere: sshd waits for every holder of the
+  # session's stdout/stderr before it reports the exit status.
+  exec 3<&0
+  "$gate" "$pr" "$@" </dev/null 3<&- &
+  gate_pid=$!
+  ( cat <&3 >/dev/null; kill -TERM "$gate_pid" ) >/dev/null 2>&1 &
+  watch_pid=$!
+  exec 3<&-
+  wait "$gate_pid"
+  rc=$?
+  kill "$watch_pid" 2>/dev/null
+  exit "$rc"
+}
+
+REMOTE_SCRIPT="$(declare -f remote_main); remote_main \"\$@\""
+case "$REMOTE_SCRIPT$REMOTE_ROOT" in
+  *"'"*) echo "remote_gate: the remote command must not contain a single quote" >&2; exit 2 ;;
+esac
+REMOTE_CMD="bash -c '$REMOTE_SCRIPT' remote_gate $PR $SLUG '$REMOTE_ROOT' ${FORWARD[*]+"${FORWARD[*]}"}"
+
+read -r -a USER_SSH_OPTS <<<"${GATE_REMOTE_SSH_OPTS:-}"
+# BatchMode: an unattended gate must fail on a missing key, never prompt. ServerAlive: a dead
+# link ends this side within ~2 min instead of hanging an agent.
+SSH_OPTS=(${USER_SSH_OPTS[@]+"${USER_SSH_OPTS[@]}"} -T -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=4)
+
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/remote_gate.XXXXXX") || exit 2
+mkfifo "$TMP/stdin" || exit 2
+KEEPER=""
+SSH_PID=""
+# shellcheck disable=SC2329  # invoked by the EXIT trap
+cleanup() {
+  [ -n "$KEEPER" ] && kill "$KEEPER" 2>/dev/null
+  [ -n "$SSH_PID" ] && kill "$SSH_PID" 2>/dev/null
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
+# First INT/TERM: close the host's stdin (it stops the gate cleanly) and wait for its cleanup
+# output. A second one leaves without waiting.
+# shellcheck disable=SC2329  # invoked by the trap below
+interrupted() {
+  trap 'exit 130' INT TERM
+  echo "remote_gate: interrupted; stopping the gate on $HOST (again to leave without waiting)" >&2
+  [ -n "$KEEPER" ] && kill "$KEEPER" 2>/dev/null
+  KEEPER=""
+  [ -n "$SSH_PID" ] && wait "$SSH_PID"
+  SSH_PID=""
+  exit 130
+}
+trap interrupted INT TERM
+
+# The keeper holds the fifo's write end open and never writes: ssh's stdin stays open (no EOF)
+# exactly as long as this script lives, whatever stdin `make gate` itself was given.
+sleep 2147483647 >"$TMP/stdin" &
+KEEPER=$!
+echo "remote_gate: gating $SLUG#$PR on $HOST" >&2
+# Backgrounded so a signal reaches the trap now, not after ssh returns.
+# shellcheck disable=SC2029  # REMOTE_CMD is built here on purpose; the host sees it verbatim
+ssh "${SSH_OPTS[@]}" "$HOST" "$REMOTE_CMD" <"$TMP/stdin" &
+SSH_PID=$!
+wait "$SSH_PID"
+rc=$?
+SSH_PID=""
+if [ "$rc" = 255 ]; then
+  echo "remote_gate: ssh to $HOST failed (exit 255); is this machine's key authorized there?" >&2
+  exit 2
+fi
+exit "$rc"
