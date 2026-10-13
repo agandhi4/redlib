@@ -1,19 +1,25 @@
-# supported versions here: https://hub.docker.com/_/rust
-ARG RUST_BUILDER_VERSION=slim-bookworm
 ARG ALPINE_VERSION=3.23
 
 ########################
 ## builder image
 ########################
+# Runs as linux/amd64 even on an arm64 host (emulated, slow). Not --platform=$BUILDPLATFORM:
+# the image's arm64 variant cross-compiles, and boring-sys2's bindgen then looks for x86_64 glibc
+# headers the arm64 image lacks ('bits/libc-header-start.h' not found).
 FROM ghcr.io/rust-cross/rust-musl-cross:x86_64-musl AS builder
 
 RUN apt-get update \
     && apt-get -y install git cmake perl pkg-config libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN rustup target add x86_64-unknown-linux-musl
-
 WORKDIR /redlib
+
+# The builder image only supplies the musl C cross toolchain; its own rustc floats with the tag.
+# rustup (in the image) installs the exact Rust that rust-toolchain.toml pins, with the musl
+# target that file lists, here in the cached layer before any cargo build. Copying the file
+# later would compile dependencies with the image's rustc and then recompile them all.
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install && rustc --version
 
 # download (most) dependencies in their own layer
 COPY Cargo.lock Cargo.toml ./
