@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Monthly fleet audit (bin/monthly_audit.sh) on the 1st at 09:00 local time. launchd runs a
+  missed calendar job when the Mac next wakes. Template only: launchd expands neither ~ nor
+  variables, so replace __DEVKIT__ (absolute path of the devkit checkout) and __HOME__ first.
+  Install by hand (owner step), see README "bin/monthly_audit.sh":
+    sed -e "s|__DEVKIT__|$HOME/projects/solo/devkit|g" -e "s|__HOME__|$HOME|g" \
+      templates/launchd/com.agandhi4.devkit.monthly-audit.plist \
+      > ~/Library/LaunchAgents/com.agandhi4.devkit.monthly-audit.plist
+    mkdir -p ~/Library/Logs/devkit
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agandhi4.devkit.monthly-audit.plist
+  Remove: launchctl bootout gui/$(id -u)/com.agandhi4.devkit.monthly-audit
+  Pause without removing: touch ~/.config/devkit/audit.off
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agandhi4.devkit.monthly-audit</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__DEVKIT__/bin/monthly_audit.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__DEVKIT__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- gh, jq, claude and python3 come from Homebrew and ~/.local/bin; launchd's PATH has neither. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:__HOME__/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Day</key>
+    <integer>1</integer>
+    <key>Hour</key>
+    <integer>9</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/devkit/monthly-audit.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/devkit/monthly-audit.err.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

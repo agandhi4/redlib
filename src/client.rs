@@ -601,6 +601,7 @@ mod tests {
 	const POPULAR_URL: &str = "/r/popular/hot.json?&raw_json=1&geo_filter=GLOBAL";
 
 	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "hits live reddit"]
 	async fn test_rate_limit_check() {
 		init_oauth_client().await;
 		// The check asserts a fresh token's budget (99); other tests in this process share the
@@ -610,6 +611,7 @@ mod tests {
 	}
 
 	#[test]
+	#[ignore = "hits live reddit"]
 	#[sealed_test(env = [("REDLIB_DEFAULT_SUBSCRIPTIONS", "rust")])]
 	fn test_default_subscriptions() {
 		tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(async {
@@ -624,6 +626,7 @@ mod tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "hits live reddit"]
 	async fn test_localization_popular() {
 		init_oauth_client().await;
 		let val = json(POPULAR_URL.to_string(), false).await.unwrap();
@@ -631,6 +634,7 @@ mod tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "hits live reddit"]
 	async fn test_obfuscated_share_link() {
 		init_oauth_client().await;
 		let share_link = "/r/rust/s/kPgq8WNHRK".into();
@@ -640,6 +644,7 @@ mod tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "hits live reddit"]
 	async fn test_private_sub() {
 		init_oauth_client().await;
 		let link = json("/r/suicide/about.json?raw_json=1".into(), true).await;
@@ -648,6 +653,7 @@ mod tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "hits live reddit"]
 	async fn test_banned_sub() {
 		init_oauth_client().await;
 		let link = json("/r/aaa/about.json?raw_json=1".into(), true).await;
@@ -656,6 +662,7 @@ mod tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "hits live reddit"]
 	async fn test_gated_sub() {
 		init_oauth_client().await;
 		// quarantine to false to specifically catch when we _don't_ catch it

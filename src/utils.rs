@@ -1595,6 +1595,7 @@ mod tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "hits live reddit"]
 	async fn test_fetching_subreddit_quarantined() {
 		crate::client::init_oauth_client().await;
 		let subreddit = Post::fetch("/r/drugs", true).await;
@@ -1603,6 +1604,7 @@ mod tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "hits live reddit"]
 	async fn test_fetching_nsfw_subreddit() {
 		crate::client::init_oauth_client().await;
 		// Gonwild is a place for closed, Euclidean Geometric shapes to exchange their nth terms for karma; showing off their edges in a comfortable environment without pressure.
@@ -1614,6 +1616,7 @@ mod tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
+	#[ignore = "hits live reddit"]
 	async fn test_fetching_ws() {
 		crate::client::init_oauth_client().await;
 		let subreddit = Post::fetch("/r/popular", false).await;
