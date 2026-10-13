@@ -13,7 +13,7 @@ CI_IMAGE ?= redlib:ci
 CI_BUILD_VERSION ?= ci-$(shell git rev-parse --short=7 HEAD)
 
 .DEFAULT_GOAL := help
-.PHONY: help ci-quick ci-unit test-live ci-image gate devkit-sync devkit-check toolchain-check workflows-check docs-check release-check
+.PHONY: help ci-quick ci-unit test-live ci-image gate devkit-sync devkit-check toolchain-check workflows-check docs-check release-check install hooks-check
 
 help: ## list targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
@@ -70,3 +70,13 @@ docs-check: ## part of ci-quick: AGENTS.md real, CLAUDE.md symlink, decisions.md
 
 release-check: ## part of ci-quick: APP_VERSION baked into the image (ARG/ENV/LABEL), never set by compose
 	devkit/bin/release_check.sh
+
+# Hooks: .githooks/ (devkit templates) run the steps in scripts/ci/hooks.conf: pre-commit
+# ci-quick, pre-push ci-unit. Reports only; `make install` heals. Not in the gate: it reads the
+# invoking checkout's git config.
+hooks-check: ## core.hooksPath must be .githooks
+	devkit/bin/hooks_check.sh
+
+# --fix rewrites core.hooksPath, so a tool that repointed it is undone by the next install.
+install: devkit-check ## one-time per checkout/worktree: install the git hooks
+	devkit/bin/hooks_check.sh --fix

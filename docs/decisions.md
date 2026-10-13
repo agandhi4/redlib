@@ -17,3 +17,8 @@ Consequence: CI never touches Reddit, so no test covers the OAuth or fetch paths
 Why: the footer showed the Cargo semver, the image only a timestamp-era tag, and nothing on git said what shipped. `release_check.sh` only inspects a root `Dockerfile`, so `Dockerfile.alpine` was invisible to it. Upstream deploy recipes (compose, Quadlet, systemd, launchd, Replit/Heroku, nix, devcontainer) described deployments this fork never runs.
 Decision: `Dockerfile.alpine` is renamed `Dockerfile`; its final stage bakes `APP_VERSION` (ARG, ENV, OCI version label). `ghcr.yml` passes `sha-<7>` as the build arg, label and tag, then runs `ship_tag.sh` (CI is the deployer: homelab pulls `latest`). The footer, /info and the startup log read `instance_info::app_version()`, falling back to `v<semver>` outside an image. `docs/fork.md` declares a hard fork at upstream a4d36e9 with a monthly sync check.
 Consequence: no boot smoke exists (OAuth before listen), so `ci-image` asserts the image ENV and label equal `CI_BUILD_VERSION` instead of `BOOT_EXPECT_VERSION`. Asset `?v=` cache-busting still uses the semver, so the version-bump rule stands. Verify a ship by the footer's `sha-<7>`.
+
+## 2026-10-13 — Git hooks via devkit
+Why: redlib had no hooks, so a fmt or clippy failure surfaced only in quick-check or the gate.
+Decision: devkit's hook templates in `.githooks/`; `scripts/ci/hooks.conf` runs `ci-quick` pre-commit and `ci-unit` pre-push, after prepending `devkit/bin/rust_toolchain.sh`'s bin dir to PATH (no system Rust on the Mac). `make install` sets `core.hooksPath`.
+Consequence: a commit costs an incremental clippy (seconds once `target/` is warm; the first one in a fresh worktree compiles the dependencies). `ci-image` and live-Reddit tests stay out of hooks.
