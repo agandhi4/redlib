@@ -1,0 +1,18 @@
+{
+  "extraKnownMarketplaces": {
+    "claude-kit": {
+      "source": { "source": "github", "repo": "agandhi4/claude-kit" }
+    }
+  },
+  "enabledPlugins": {
+    "core@claude-kit": true,
+    "review@claude-kit": true,
+    "build@claude-kit": true,
+    "work-loop@claude-kit": true,
+    "graph@claude-kit": false
+  },
+  "permissions": {
+    "allow": ["Bash(make *)", "Bash(git diff *)", "Bash(git log *)"],
+    "deny": ["Read(.env*)"]
+  }
+}

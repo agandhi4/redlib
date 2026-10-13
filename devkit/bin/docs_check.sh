@@ -15,7 +15,10 @@
 #   4. No AGENTS.md names a retired tool (case-insensitive whole word). The default list is the
 #      tools the 2026 standardization scan retired; DOCS_CHECK_BANNED (space-separated) replaces
 #      it. Only AGENTS.md is scanned: history docs may name dead tools, live instructions may not.
-#   5. Optional scripts/ci/docs_rules.sh is sourced after the standard checks for repo extras. It
+#   5. The root AGENTS.md has a `## Convention deltas` heading: every convention file says a
+#      project deviates only by a line there, so the heading must exist before anyone can comply.
+#      WARN-ONLY until 2026-11-01 (devkit decisions.md, 2026-10-13); then it becomes docs_fail.
+#   6. Optional scripts/ci/docs_rules.sh is sourced after the standard checks for repo extras. It
 #      may read $ROOT and call `docs_fail <msg>` (fails the run) or `docs_warn <msg>` (prints only).
 # Output: one `docs-check: <msg>` line per problem on stderr, then `docs-check: ok (<n> AGENTS.md
 # files)` on stdout or `docs-check: FAIL` on stderr. Exit 0 ok, 1 fail, 2 usage.
@@ -144,7 +147,12 @@ for f in ${agents_files[@]+"${agents_files[@]}"}; do
   done
 done
 
-# ---- 5. repo extras --------------------------------------------------------------------------
+# ---- 5. convention deltas heading -----------------------------------------------------------
+if [ -f AGENTS.md ] && ! grep -qE '^## Convention deltas[[:space:]]*$' AGENTS.md; then
+  docs_warn "AGENTS.md: no '## Convention deltas' heading; add it (list deviations from ~/.claude/conventions, or 'None.'). Fails from 2026-11-01"
+fi
+
+# ---- 6. repo extras --------------------------------------------------------------------------
 if [ -f "$EXTRAS" ]; then
   # shellcheck source=/dev/null
   . "./$EXTRAS"

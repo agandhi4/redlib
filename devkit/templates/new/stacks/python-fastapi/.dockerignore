@@ -1,0 +1,11 @@
+.git/
+.github/
+.venv/
+.claude/
+devkit/
+docs/
+tests/
+scripts/
+**/__pycache__/
+*.pyc
+.env

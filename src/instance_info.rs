@@ -15,8 +15,8 @@ use time::OffsetDateTime;
 /// retrieved from the info endpoint.
 pub static INSTANCE_INFO: LazyLock<InstanceInfo> = LazyLock::new(InstanceInfo::new);
 
-/// The build's one version string: the image's `APP_VERSION` (`sha-<7>` from ghcr.yml, the same
-/// string as the image tag, its OCI version label and the `ship-<date>-<sha7>` git tag), or
+/// The build's one version string: the image's `APP_VERSION` (the bare 7-char sha from ghcr.yml,
+/// the same string as its OCI version label, the `sha-<7>` image tag and the `ship-<date>-<sha7>` git tag), or
 /// `v<crate semver>` outside an image (`cargo run`, tests). Read once; the env is fixed per process.
 /// Used by: the footer (templates/base.html), /info, the startup log line (main.rs).
 pub fn app_version() -> &'static str {
@@ -260,10 +260,10 @@ mod tests {
 	use sealed_test::prelude::*;
 
 	#[test]
-	#[sealed_test(env = [("APP_VERSION", "sha-abc1234")])]
+	#[sealed_test(env = [("APP_VERSION", "abc1234")])]
 	fn app_version_is_the_image_build_arg() {
-		assert_eq!(app_version(), "sha-abc1234");
-		assert_eq!(InstanceInfo::new().app_version, "sha-abc1234");
+		assert_eq!(app_version(), "abc1234");
+		assert_eq!(InstanceInfo::new().app_version, "abc1234");
 	}
 
 	#[test]
@@ -273,10 +273,10 @@ mod tests {
 	}
 
 	#[test]
-	#[sealed_test(env = [("APP_VERSION", "sha-abc1234"), ("REDLIB_PUSHSHIFT_FRONTEND", "pushshift.example")])]
+	#[sealed_test(env = [("APP_VERSION", "abc1234"), ("REDLIB_PUSHSHIFT_FRONTEND", "pushshift.example")])]
 	fn raw_info_labels_line_up_with_values() {
 		let raw = InstanceInfo::new().to_string(&StringType::Raw);
-		assert!(raw.contains("App version: sha-abc1234"), "{raw}");
+		assert!(raw.contains("App version: abc1234"), "{raw}");
 		assert!(raw.contains("Pushshift frontend: Some(\"pushshift.example\")"), "{raw}");
 	}
 }

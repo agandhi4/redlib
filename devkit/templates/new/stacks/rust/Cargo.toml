@@ -1,0 +1,18 @@
+[package]
+name = "__NAME__"
+version = "0.1.0"
+edition = "2024"
+# MSRV; toolchain-check fails it above rust-toolchain.toml's channel.
+rust-version = "1.99"
+publish = false
+
+# Kept small on purpose: every quick-check compiles these from scratch for clippy.
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+# test-util: start_paused, so the check-timeout test runs without waiting 3 s.
+tokio = { version = "1", features = ["test-util"] }

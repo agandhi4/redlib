@@ -1,7 +1,13 @@
 name: ci
 on:
   pull_request:
-    paths-ignore: ['**.md', 'docs/**']
+    # ready_for_review: drafts are skipped (job `if:`), so marking one ready gets its first run.
+    # Without it a PR opened as a draft had no CI until its next push.
+    types: [opened, synchronize, reopened, ready_for_review]
+    # Docs-only PRs skip CI, except for the files devkit's own docs_check judges. devkit has no
+    # local gate, so this run is the only check before every consumer vendors a missing
+    # CLAUDE.md symlink (2026-10-13). GitHub applies `paths` in order; a later match wins.
+    paths: ['**', '!**.md', '!docs/**', '**/AGENTS.md', '**/CLAUDE.md', 'docs/decisions.md']
   push:
     branches: [main]
 concurrency:
@@ -26,12 +32,15 @@ jobs:
       - name: python unit tests
         run: for t in tests/*_test.py; do python3 -I "$t"; done
       # devkit obeys its own guards: it shipped without the CLAUDE.md symlink its docs_check
-      # requires and broke every consumer's docs-check (2026-10-13).
+      # requires and broke every consumer's docs-check (2026-10-13). Each guard runs even when
+      # an earlier one fails, so one run reports every finding.
       - name: self-check
         run: |
-          bin/docs_check.sh .
-          bin/toolchain_check.sh .
-          bin/workflows_check.sh .
+          rc=0
+          bin/docs_check.sh . || rc=1
+          bin/toolchain_check.sh . || rc=1
+          bin/workflows_check.sh . || rc=1
+          exit "$rc"
       - name: bats
         run: |
           git clone -q --depth 1 --branch v1.14.0 https://github.com/bats-core/bats-core.git /tmp/bats

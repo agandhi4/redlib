@@ -67,11 +67,37 @@ unpinned_uses() { # <file>...
   [ -z "$output" ] || { echo "unpinned: $output"; false; }
 }
 
+@test "reusable quick-check sets up Node only when the repo pins it" {
+  # homelab has no .nvmrc; an unconditional setup-node fails at "file does not exist".
+  grep -B1 -F 'uses: actions/setup-node@' "$QUICK_CHECK" | grep -qF "if: hashFiles(inputs.node-version-file) != ''"
+}
+
 @test "caller template pins its actions and calls the devkit reusable workflow" {
   run unpinned_uses "$CALLER"
   [ "$output" = "    uses: agandhi4/devkit/.github/workflows/quick-check.yml@main" ]
   grep -qF "if: github.event.pull_request.draft == false" "$CALLER"
   grep -qE '^concurrency:' "$CALLER"
+}
+
+@test "devkit CI runs its own guards, even on a PR that only touches the docs they judge" {
+  local ci="$ROOT/.github/workflows/ci.yml" paths
+  # The pull_request `paths` line: markdown is excluded, then the files docs_check judges are
+  # re-included after it (GitHub applies the list in order). Ignoring them let devkit ship
+  # without its CLAUDE.md symlink and break every consumer's docs-check (2026-10-13).
+  paths=$(grep -E "^[[:space:]]*paths:.*'!\*\*\.md'" "$ci")
+  [[ "$paths" == *"'!**.md', "*"'**/AGENTS.md'"* ]]
+  [[ "$paths" == *"'!**.md', "*"'**/CLAUDE.md'"* ]]
+  [[ "$paths" == *"'!docs/**', "*"'docs/decisions.md'"* ]]
+  grep -qE '^[[:space:]]*bin/docs_check\.sh \. ' "$ci"
+  grep -qE '^[[:space:]]*bin/workflows_check\.sh \. ' "$ci"
+}
+
+@test "devkit CI runs when a draft PR is marked ready, not only on its next push" {
+  local ci="$ROOT/.github/workflows/ci.yml"
+  # The job skips drafts, and pull_request's default types omit ready_for_review, so without it
+  # a PR opened as a draft got no CI run until another push (2026-10-13).
+  grep -qxF '    types: [opened, synchronize, reopened, ready_for_review]' "$ci"
+  grep -qF "github.event.pull_request.draft == false" "$ci"
 }
 
 @test "ruff base is valid TOML with the shared keys and no project-specific ones" {
