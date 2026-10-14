@@ -5,8 +5,8 @@
 #   run_hook_steps <pre-commit|pre-push> "$@"     # the hook's own args; returns the hook's code
 #
 # The per-repo part is scripts/ci/hooks.conf, a sourced file:
-#   PRE_COMMIT_STEPS=("backend: static=ci-backend-static" "frontend: static=ci-frontend-static")
-#   PRE_PUSH_STEPS=("backend: unit=ci-backend-unit")
+#   PRE_COMMIT_STEPS=("backend: static=ci-static-backend" "frontend: static=ci-static-frontend")
+#   PRE_PUSH_STEPS=("backend: unit=ci-unit-backend")
 #   ENV_REQUIRED_HOOKS="pre-push"   # hooks to skip when the worktree has no .env (optional)
 # Each step is "<label>=<make target>[:<override>]". Steps call the gate's own ci-* targets,
 # never raw tools, so a hook cannot drift from the gate. They run in order and stop at the
@@ -18,7 +18,8 @@
 # frontend, native (ios/, OrbitAgent/, *.xcodeproj/: macOS-only, never run by hooks, as the gate
 # plans say) or other (Makefile, scripts/, Dockerfile, devkit/, .github/, src/, ...).
 # Each step's area comes from its make target's words (split on - and _), in either order
-# (finplat ci-backend-unit, Orbit ci-unit-backend): backend|server, frontend|web, or docs.
+# (ci-unit-backend, the standard ci_targets_check.sh holds, or a not-yet-renamed
+# ci-backend-unit): backend|server, frontend|web, or docs.
 #   backend target    skipped when every path is docs, frontend or native
 #   frontend target   skipped when every path is docs, backend or native
 #   docs target       runs only when some path is docs

@@ -15,7 +15,8 @@ is README.md "Architecture".
   silently: a Mac run is a smoke test, CI (bash 5, mawk) is the verdict.
 - Output contracts are APIs. `bin/local_gate.sh` prints `GATE <job> PASS|FAIL|SKIPPED|WATCHDOG|OVERBUDGET …` and
   `VERDICT PASS|FAIL head=<sha> main=<sha>`; `finplat_merge_queue.sh`, `mac_merge_queue.sh`
-  and `worker.py` parse them. `.devkit-rev` is `<upstream commit> <tree sha>`,
+  and `worker.py` parse them. `bin/tier_guard.sh` prints `TIER <tier>: …|FAIL|FLOOR|OVERBUDGET …`
+  and exits with the command's code, 1 for its own verdict, 2 for a bad call. `.devkit-rev` is `<upstream commit> <tree sha>`,
   the tree filtered to `VENDOR_PATHS`. A new file consumers run must sit under a listed path.
 - The skeleton owns mechanics; the repo's `scripts/ci/gate_plan.sh` owns policy (which jobs
   for which paths). A new mechanic belongs here; a new check belongs in the repo's Makefile.

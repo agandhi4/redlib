@@ -5,3 +5,6 @@ redlib.toml
 # Idea Files
 .idea/
 
+
+# devkit tier guard metrics (devkit/bin/tier_guard.sh)
+/build
