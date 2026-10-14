@@ -179,7 +179,7 @@ The listener opens only after the OAuth bootstrap against Reddit succeeds, so a 
 | Command | Does |
 |---|---|
 | `make ci-quick` | devkit, toolchain, workflow, docs and release guards, `cargo fmt --check`, clippy `-D warnings` |
-| `make ci-unit` | `cargo test`, offline |
+| `make ci-unit` | `cargo test`, offline, under a time budget and a test-count floor |
 | `make ci-image` | builds the Dockerfile for this host's platform and checks its `APP_VERSION` |
 | `make test-live` | the `#[ignore]`d tests that call live Reddit, serially; gates nothing |
 | `make gate PR=<n>` | the merge gate: the PR merged into `origin/main`, posting the `local-gate` status |

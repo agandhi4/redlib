@@ -15,7 +15,7 @@ snapshot and refuses a key that two collectors both emit.
   key breaks every reader. Lists, strings, booleans and nulls are skipped as non-metrics.
 - **Deterministic collectors only** feed the bounds: the same commit must give the same
   number. Timings and Lighthouse stay in the report (delivery.md, Coverage and Metrics); the
-  one exception is the gate's own `gate.*` seconds, below.
+  exceptions are the gate's own `gate.*` seconds and `tier_guard.sh`'s `tier.*` seconds, below.
 - **Statements** are `statements.<METHOD>:<route template>`, exact counts written by the
   test suite's statement fixture to `build/metrics/statements.json`, held at tolerance 0
   (decision H, 2026-10-13). Example: `statements.GET:/api/v1/accounts/{account_id}`.
@@ -31,6 +31,8 @@ snapshot and refuses a key that two collectors both emit.
 | `statements` | lower | `statements.POST:/api/items` |
 | `allowlist` | lower | `allowlist.backend.own_commit` (shrink-only allow-lists) |
 | `gate` | lower | `gate.backend-unit.seconds`, `gate.total.seconds` (wall-clock seconds) |
+| `tier` | lower | `tier.unit.seconds`, `tier.db.seconds` (wall-clock seconds of the guarded command) |
+| `tests` | higher | `tests.unit.pytest`, `tests.e2e.playwright` (tests that ran, per tier and runner) |
 
 **Gate seconds** come from `local_gate.sh`, not a repo collector: after every job it rewrites
 `build/metrics/gate.json` in the merged worktree with `gate.<job>.seconds` for the jobs run so
@@ -42,6 +44,14 @@ or the total. They are the one timing domain allowed into a snapshot (owner dire
 ratchet has no tolerance, so a repo that tracks a `gate.*` key sets its bound with headroom by
 hand rather than with `tighten`. The worktree's `build/` must be git-ignored, as it already is
 for every other collector.
+
+**Tier seconds and test counts** come from `tier_guard.sh` (README), one file per tier:
+`build/metrics/tier-<tier>.json` at the git top level (whatever directory the tier ran from) holds `tier.<tier>.seconds` and `tests.<tier>.<runner>` for each
+floored runner, written after a command that passed (an over-budget or under-floor run still
+writes them). Two domains because the directions differ: a tier only gets faster, and the count
+of tests that ran only goes down in the PR that removes tests, which is what a `higher` bound
+plus the rebaseline label already enforce. The seconds are as noisy as `gate.*`, so a tracked
+bound gets headroom by hand; the counts are deterministic and can use `tighten`.
 
 A repo-specific collector (finplat's reinvention registry, closet's `audit-pages`) uses its
 own domain name and states the direction in `ratchet.json`.

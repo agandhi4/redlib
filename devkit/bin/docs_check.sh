@@ -33,7 +33,11 @@
 #   10. Every relative Markdown link in README.md, the root AGENTS.md and docs/*.md resolves to
 #      a tracked file or directory (the index, as above). URLs, `#anchors`, root-absolute and
 #      links leaving the repo are skipped; links in code are not links.
-#   Rules 5-10 report through docs_rule: a warning before their FAILS_FROM date below, a failure
+#   12. The root .gitattributes gives docs/decisions.md the union merge driver
+#      (`docs/decisions.md merge=union`), so two PRs that each append an entry rebase cleanly.
+#      `devkit/bin/hooks_check.sh --fix` (`make install`) adds it; why and the caveat live in
+#      bin/_gitattributes_lib.sh. Tracked file only: an untracked one helps nobody else.
+#   Rules 5-10 and 12 report through docs_rule: a warning before their FAILS_FROM date below, a failure
 #   on and after it, so no consumer's ci-quick breaks on the sync that introduces a rule and the
 #   flip needs no second PR. DOCS_CHECK_TODAY=YYYY-MM-DD overrides today (tests).
 #   11. Optional scripts/ci/docs_rules.sh is sourced after the standard checks for repo extras. It
@@ -42,6 +46,11 @@
 # files)` on stdout or `docs-check: FAIL` on stderr. Exit 0 ok, 1 fail, 2 usage.
 # Usage: devkit/bin/docs_check.sh [repo-root]      (part of ci-quick)
 set -uo pipefail
+# Before the cd: the script's own path may be relative.
+# shellcheck source=bin/_makefile_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_makefile_lib.sh"
+# shellcheck source=bin/_gitattributes_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_gitattributes_lib.sh"
 
 usage() { echo "usage: docs_check.sh [repo-root]" >&2; exit 2; }
 [ $# -le 1 ] || usage
@@ -261,23 +270,7 @@ fi
 
 # ---- 9. make targets named in docs ---------------------------------------------------------
 if [ -f Makefile ]; then
-  # Rule targets of the root Makefile and of the files it includes by literal path.
-  makefiles=Makefile
-  while IFS= read -r inc; do
-    case "$inc" in *'$'*) continue ;; esac
-    [ -f "$inc" ] && makefiles="$makefiles $inc"
-  done < <(awk '/^-?include[[:space:]]/ { for (i = 2; i <= NF; i++) print $i }' Makefile)
-  # shellcheck disable=SC2086  # word-split on purpose: a list of plain file names
-  targets=" $(awk '
-    /^\t/ || /^[[:space:]]*#/ { next }
-    {
-      i = index($0, ":"); if (i < 2) next
-      if (substr($0, i + 1, 1) == "=") next             # := assignment
-      head = substr($0, 1, i - 1)
-      if (head ~ /[=?+!]/ || head ~ /^(export|override|define|ifeq|ifneq|ifdef|ifndef) /) next
-      n = split(head, t, /[[:space:]]+/)
-      for (k = 1; k <= n; k++) if (t[k] != "" && t[k] !~ /^\./) printf "%s ", t[k]
-    }' $makefiles)"
+  targets=$(makefile_targets)
   for doc in README.md AGENTS.md; do
     if [ ! -f "$doc" ] || ! is_tracked "$doc"; then continue; fi
     while IFS=' ' read -r lineno target; do
@@ -364,6 +357,11 @@ if [ ${#link_docs[@]} -gt 0 ]; then
         line = substr(line, RSTART + RLENGTH)
       }
     }' - "${link_docs[@]}")
+fi
+
+# ---- 12. decisions log merges by union -------------------------------------------------------
+if ! is_tracked .gitattributes || ! has_decisions_union .gitattributes; then
+  docs_rule "$DOCS_SET_FAILS_FROM" ".gitattributes: no '$DECISIONS_UNION_LINE', so two PRs that each append a decisions entry conflict on rebase (fix: devkit/bin/hooks_check.sh --fix, then commit .gitattributes)"
 fi
 
 # ---- 11. repo extras -------------------------------------------------------------------------

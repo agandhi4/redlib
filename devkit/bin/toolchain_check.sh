@@ -28,21 +28,30 @@
 #     repo's Linux tier (Actions) builds nothing with it.
 # A missing declaration file skips that toolchain (Node-only repos have no .python-version).
 # Dockerfiles are scanned at the root and one level down (orbit/frontend/Dockerfile).
+# Also runs ci_targets_check.sh (per-area ci-* targets named ci-<tier>-<area>) first: it is a
+# Makefile-contract guard too, and riding this script puts it in every repo's ci-quick without a
+# Makefile edit per repo. Its findings keep their own `ci-targets-check:` prefix; its failure
+# fails this run.
 # Usage: devkit/bin/toolchain_check.sh [repo-root]      (part of ci-quick)
 set -uo pipefail
+# shellcheck source=bin/_dockerfile_lib.sh  # dockerfiles
+. "$(dirname "${BASH_SOURCE[0]}")/_dockerfile_lib.sh"
+CI_TARGETS_CHECK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ci_targets_check.sh"
 ROOT=${1:-$(git rev-parse --show-toplevel)}
 cd "$ROOT" || exit 2
 rc=0
+# Before the no-pins exit below: a repo without toolchain pins still has Makefile targets.
+# Only its stderr (warnings, failures) is shown; its ok line would be noise in this summary.
+"$CI_TARGETS_CHECK" . >/dev/null || rc=1
 checked=()
 fail() { echo "toolchain-check: $*" >&2; rc=1; }
 warn() { echo "toolchain-check: warning: $*" >&2; }
 
 has_rust() { [ -f rust-toolchain.toml ] || [ -f rust-toolchain ]; }
 if [ ! -f .nvmrc ] && [ ! -f .python-version ] && ! has_rust && [ ! -f .swift-version ]; then
-  echo "toolchain-check: no .nvmrc, .python-version, rust-toolchain.toml or .swift-version; nothing to check"; exit 0
+  echo "toolchain-check: no .nvmrc, .python-version, rust-toolchain.toml or .swift-version; nothing to check"; exit $rc
 fi
 
-dockerfiles() { for f in Dockerfile Dockerfile.* */Dockerfile */Dockerfile.*; do [ -f "$f" ] && echo "$f"; done; }
 workflows() { for f in .github/workflows/*.yml .github/workflows/*.yaml; do [ -f "$f" ] && echo "$f"; done; }
 
 # A setup-<lang> step that pins `<key>:` inline inside its `with:` block is a second copy of the

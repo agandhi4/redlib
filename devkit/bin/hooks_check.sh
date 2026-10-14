@@ -16,9 +16,15 @@
 # parser, so a bad path filter (unknown key, empty glob list) fails install and the gate
 # preflight, naming the step, instead of blocking the next commit.
 #
+# --fix also adds `docs/decisions.md merge=union` to the root .gitattributes when it is missing,
+# leaving the edit for the developer to commit: this is the one devkit path that installs
+# repo-side setup (`make install`), and docs_check rule 12 reports the line missing in ci-quick,
+# where this check never runs. Why union: bin/_gitattributes_lib.sh.
+#
 # Usage: devkit/bin/hooks_check.sh [--fix] [repo-root]
 #   repo-root defaults to the current checkout. --fix sets core.hooksPath to .githooks (the
-#   relative form, so each worktree runs its own checkout's hooks) before checking.
+#   relative form, so each worktree runs its own checkout's hooks) and adds the .gitattributes
+#   line before checking.
 #   Prints "hooks-check: ok" (exit 0) or "hooks-check: <reason>" (exit 1). Exit 2 on usage.
 #   Under CI/GITHUB_ACTIONS it prints "hooks-check: skipped (CI)" and exits 0: runners never
 #   install hooks, and the workflows run the checks themselves.
@@ -42,6 +48,8 @@ fail() { echo "hooks-check: $*"; exit 1; }
 
 # shellcheck source=/dev/null  # bin/hook_steps.sh: _hook_parse_step, the one parser for hooks.conf steps
 . "$(dirname "${BASH_SOURCE[0]}")/hook_steps.sh"
+# shellcheck source=bin/_gitattributes_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_gitattributes_lib.sh"
 
 ROOT=$(git -C "${ROOT:-.}" rev-parse --show-toplevel 2>/dev/null) || fail "${ROOT:-.} is not a git checkout"
 ROOT=$(cd "$ROOT" && pwd -P)
@@ -51,6 +59,13 @@ if [ "$FIX" = 1 ]; then
   if [ "$was" != .githooks ]; then
     git -C "$ROOT" config core.hooksPath .githooks
     echo "hooks-check: set core.hooksPath=.githooks (was '${was:-unset}')"
+  fi
+  attrs=$ROOT/.gitattributes
+  if ! has_decisions_union "$attrs"; then
+    # Start a new line when the file's last one has no newline.
+    if [ -s "$attrs" ] && [ -n "$(tail -c 1 "$attrs")" ]; then echo >>"$attrs"; fi
+    echo "$DECISIONS_UNION_LINE" >>"$attrs"
+    echo "hooks-check: added '$DECISIONS_UNION_LINE' to .gitattributes; commit it"
   fi
 fi
 
