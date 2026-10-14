@@ -25,8 +25,16 @@ ci-quick: devkit-check toolchain-check workflows-check docs-check release-check 
 
 # Offline and deterministic: every test that calls live Reddit is #[ignore = "hits live reddit"]
 # (Reddit rate-limits and blocks runner IPs, so they cannot gate a PR). Run those with test-live.
-ci-unit: ## cargo test, offline (live-Reddit tests are #[ignore]d)
-	$(CARGO) test --locked
+#
+# Under devkit's tier guard (docs/decisions.md 2026-10-13, devkit 4f5f282). The budget is the
+# whole command's wall time, compile included, so a cold target/ (the gate's fresh worktree)
+# counts. The floor is the tests that RAN (ignored ones excluded) and moves only in the PR that
+# removes tests, saying why in docs/decisions.md. Both feed build/metrics/tier-unit.json.
+UNIT_BUDGET_SECONDS ?= 60
+UNIT_MIN_TESTS ?= 78
+ci-unit: ## cargo test, offline (live-Reddit tests are #[ignore]d), under the tier guard
+	devkit/bin/tier_guard.sh unit --budget $(UNIT_BUDGET_SECONDS) --floor cargo=$(UNIT_MIN_TESTS) \
+	  -- $(CARGO) test --locked
 
 # Not part of any gate. Serial on purpose: client::CLIENT is one process-wide pooled HTTP client,
 # and every #[tokio::test] owns its own runtime. In parallel, a test's runtime shuts down while
