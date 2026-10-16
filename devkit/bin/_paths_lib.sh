@@ -36,7 +36,7 @@ DEVKIT_TOOLING_BIN="local_gate.sh gate.sh remote_gate.sh _gate_env.sh _paths_lib
   devkit-check.sh _vendor_paths.sh docs_check.sh toolchain_check.sh ci_targets_check.sh
   _makefile_lib.sh workflows_check.sh _workflows_lib.sh release_check.sh _dockerfile_lib.sh
   _gitattributes_lib.sh own_commit_check.py
-  devkit-sync.sh devkit-new.sh monthly_audit.sh dead_alert_audit.py ship_tag.sh"
+  devkit-sync.sh devkit-new.sh monthly_audit.sh dead_alert_audit.py ship_tag.sh scorecard.py agent_cost.py secrets_check.sh migration_check.py"
 # What the image group exercises (ci-smoke/ci-image boot through them): tooling, but a change
 # to one runs the image group even when nothing else would.
 DEVKIT_IMAGE_BIN="boot_image.sh contract_probe.sh"
@@ -195,7 +195,7 @@ devkit_default_gate_plan() {
   [ "$GATE_AREAS" != native ] \
     || nothing_to_run "Only native paths changed (ios/, OrbitAgent/, *.xcodeproj/); build and test them on the Mac"
   DEVKIT_GATE_RAN=' '
-  _devkit_group QUICK "backend frontend tooling other"
+  _devkit_group QUICK "backend frontend tooling other" "$(_devkit_quick_jobs)"
   if devkit_group_ran quick; then
     _devkit_skip_jobs "$GATE_JOBS_DOCS" "covered by the quick group; ci-quick runs docs-check"
   else
@@ -207,6 +207,19 @@ devkit_default_gate_plan() {
   _devkit_group E2E "backend frontend other"
   if declare -F gate_plan_extra >/dev/null; then gate_plan_extra; fi
   _devkit_metrics_group
+}
+
+# The QUICK jobs, with MIGRATION_EDIT_OK=1 appended under the `migration-contract` label
+# (pr_has_label, fail-closed; read only when the group will run), which bin/migration_check.py
+# reads as "shipped-migration edits are deliberate in this PR" (data.md 12). Same shape as the
+# metrics-rebaseline label below.
+_devkit_quick_jobs() {
+  local jobs=${GATE_JOBS_QUICK:-}
+  if [ -n "$jobs" ] && _devkit_group_runs QUICK "backend frontend tooling other" \
+      && declare -F pr_has_label >/dev/null && pr_has_label migration-contract; then
+    jobs=$(sed -e 's/|/ MIGRATION_EDIT_OK=1|/g' -e 's/$/ MIGRATION_EDIT_OK=1/' <<<"$jobs")
+  fi
+  printf '%s' "$jobs"
 }
 
 # The METRICS group (header table). The label is read only when the group will run: a

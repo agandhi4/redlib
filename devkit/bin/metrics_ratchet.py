@@ -101,11 +101,13 @@ DOMAIN_DIRECTIONS = {
     "coupling": "lower",
     "bundle": "lower",
     "statements": "lower",
+    "size": "lower",
+    "vuln": "lower",
     "allowlist": "lower",
 }
 # Never tracked (docs/metrics-keys.md): area-scoped jobs leave them absent on narrow PRs and
 # the seconds are noisy. rebaseline leaves them untracked.
-NEVER_TRACKED_DOMAINS = frozenset({"gate", "tier", "tests"})
+NEVER_TRACKED_DOMAINS = frozenset({"gate", "tier", "tests", "vuln"})
 DEFAULT_BASE_REF = "origin/main"
 
 

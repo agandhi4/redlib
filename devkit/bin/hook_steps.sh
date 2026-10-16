@@ -34,6 +34,12 @@
 #   :unless=<globs>  skip the step when EVERY changed path matches one of the globs
 #   :only=<globs>    run the step only when SOME changed path matches one of the globs
 #   :always          run the step on every change
+#
+# Timings: every step that ran appends `<date>\t<hook>\t<label>\t<seconds>\t<ok|fail>` and the
+# hook appends `<date>\t<hook>\ttotal\t<seconds>\t<ok|fail>` to
+# ${XDG_STATE_HOME:-~/.local/state}/devkit/hooks/<repo>.tsv (never printed, never fails the
+# hook). The scorecard (T8 gate.precommit) reads it against the owner's budgets, pre-commit
+# <= 30 s and pre-push <= 60 s (2026-10-13), so a hook that quietly grew shows up as a letter.
 # <globs> are comma-separated, no spaces, one override per step. A glob is a bash `case`
 # pattern over the whole repo-relative path, as in scripts/ci/gate_plan.sh: `*` also matches
 # `/`, so `*.md` matches at any depth and `docs/*` everything under docs/; `**` means `*`.
@@ -175,7 +181,8 @@ run_hook_steps() {
     echo "– native-only change (ios/, OrbitAgent/, *.xcodeproj/): hooks run nothing for it; build and test it on the Mac"
   fi
 
-  local i=0
+  local i=0 hook_start step_start
+  hook_start=$(date +%s)
   for step in ${steps[@]+"${steps[@]}"}; do
     reason=${plan[$i]}
     i=$((i + 1))
@@ -188,15 +195,29 @@ run_hook_steps() {
       continue
     fi
     rc=0
+    step_start=$(date +%s)
     run_step "$HOOK_STEP_LABEL" make -C "$root" --no-print-directory "$HOOK_STEP_TARGET" || rc=$?
+    _hook_record "$root" "$hook" "$HOOK_STEP_LABEL" "$step_start" "$rc"
     if [ "$rc" -ne 0 ]; then
+      _hook_record "$root" "$hook" total "$hook_start" "$rc"
       echo "$hook: blocked by '$HOOK_STEP_LABEL'; fix it and try again"
       return "$rc"
     fi
   done
+  _hook_record "$root" "$hook" total "$hook_start" 0
 
   echo "✓ $hook passed"
   _hook_allow_push "$uses_lfs" "$push_input" "$@"
+}
+
+# <root> <hook> <label> <start epoch> <rc>: one timing line in the per-machine hooks ledger
+# (header comment above). Best effort: an unwritable state dir never fails a hook.
+_hook_record() {
+  local root=$1 hook=$2 label=$3 start=$4 rc=$5 dir
+  dir=${XDG_STATE_HOME:-$HOME/.local/state}/devkit/hooks
+  mkdir -p "$dir" 2>/dev/null || return 0
+  printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$hook" "$label" "$(( $(date +%s) - start ))" \
+    "$([ "$rc" -eq 0 ] && echo ok || echo fail)" >>"$dir/$(basename "$root").tsv" 2>/dev/null || true
 }
 
 # <uses_lfs> <push stdin> <hook args...>: the last word on a push that may go through.

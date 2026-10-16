@@ -70,14 +70,16 @@
 #   - a docs/**/*.md outside the set that is report-shaped (under archive/, plans/, blueprints/,
 #     audits/, reviews/, history/, or named like a date, expert panel, audit, findings, plan,
 #     design, review, retro, postmortem, triage, proposal, rfc, blueprint, step<n>), or sits
-#     directly under docs/ with no link from any other Markdown file, is `git mv`ed to
-#     docs/reports/<date>-<slug>.md (the date in its
+#     directly under docs/, is `git mv`ed to docs/reports/<date>-<slug>.md unless a live doc
+#     (README, an AGENTS.md, architecture/operations, a README-linked doc) links it or a source
+#     file names it in plain text (the date in its
 #     name, else its first commit's author date; the slug is its path under docs/ minus
 #     archive/reports dirs) and every link to it in another .md is rewritten, except from an
 #     AGENTS.md (rule 15), which is printed as a judgment item instead;
-#   - any other doc outside the set (linked from somewhere, or unlinked inside a named
+#   - any other doc outside the set (referenced from somewhere, or unreferenced inside a named
 #     subdirectory such as docs/architecture/, or a README.md) is linked from README's
-#     Documentation section: structure someone chose is kept, and the reader decides;
+#     Documentation section (a table row when the section ends in a table, else a bullet):
+#     structure someone chose is kept, and the reader decides;
 #   - docs/runbook.md or docs/deployment.md becomes docs/operations.md when that is free;
 #   - the "Contributors and agents" line is added to README's Documentation section.
 #   It never deletes (CONTRIBUTING.md, oversize AGENTS.md sections) or edits an AGENTS.md: those
@@ -576,6 +578,19 @@ fix_links_to() {
   [ ${#files[@]} -gt 0 ] || return 0
   md_links "${files[@]}" | awk -F'\t' -v p="$1" '$4 == p && $1 != p'
 }
+# fix_referrers <path>: the files that keep a doc alive, one per line. Two kinds count: a
+# Markdown LINK from a live doc (README.md, any AGENTS.md, docs/architecture.md,
+# docs/operations.md, a doc linked from README's Documentation section), and the doc's basename
+# in plain text in a source file (not .md: a comment citing the design of record, rollcall
+# canary 2026-10-16). A plain-text mention in Markdown does not count: decisions.md, index
+# tables and archived docs name history all the time (every locus blueprint sat in one table).
+fix_referrers() {
+  local keepers
+  keepers=$(printf '%s\n' README.md docs/architecture.md docs/operations.md ${agents_files[@]+"${agents_files[@]}"}; readme_doc_links)
+  { fix_links_to "$1" | cut -f1 | grep -xF -f <(printf '%s\n' "$keepers") || true
+    git grep -l -F -- "${1##*/}" -- . ':!*.md' 2>/dev/null || true
+  } | grep -vxF -- "$1" | sort -u
+}
 # fix_relink <old-path> <new-path>: rewrite every link to the old path in the tracked .md files,
 # except from an AGENTS.md when the new home is docs/reports/ (rule 15): a judgment item.
 fix_relink() {
@@ -613,13 +628,22 @@ fix_report_name() {
     print out }' | tr '[:upper:]' '[:lower:]' | sed -E 's/^[0-9]{4}-[0-1][0-9]-[0-3][0-9][-_ ]*//; s/[^a-z0-9.]+/-/g; s/^-+//; s/-+$//')
   echo "docs/reports/$(fix_date_of "$1")-${slug:-report}.md"
 }
-# fix_readme_append <line>: add a line at the end of README's Documentation section.
+# fix_readme_append <text> [<link-path>]: add an entry at the end of README's Documentation
+# section. When the section ends in a Markdown table (finplat, rollcall), the entry is a row
+# with the link in the first cell and the other cells empty; otherwise a `- ` bullet line.
 fix_readme_append() {
-  local first last end
+  local first last end tail cols row
   read -r first last <<<"$(section_bounds README.md "$DOCS_SECTION")"
   [ -n "$first" ] || { fix_judgment "README.md has no Documentation section to hold '$1'"; return 1; }
   end=$(awk -v a="$first" -v b="$last" 'NR >= a && NR <= b && NF { e = NR } END { print e }' README.md)
-  awk -v n="$end" -v add="$1" '{ print } NR == n { print add }' README.md >README.md.docsfix && mv README.md.docsfix README.md
+  tail=$(sed -n "${end}p" README.md)
+  case "$tail" in
+    '|'*)
+      cols=$(awk -F'|' '{ print NF - 2 }' <<<"$tail")
+      row="| $1 |"; while [ "$cols" -gt 1 ]; do row="$row  |"; cols=$((cols - 1)); done ;;
+    *) row="- $1" ;;
+  esac
+  awk -v n="$end" -v add="$row" '{ print } NR == n { print add }' README.md >README.md.docsfix && mv README.md.docsfix README.md
   git add README.md
 }
 fix_docs() {
@@ -637,12 +661,13 @@ fix_docs() {
     TRACKED=$(git ls-files)
   done
   for f in ${fix_outside[@]+"${fix_outside[@]}"}; do
-    inbound=$(fix_links_to "$f" | cut -f1 | sort -u)
-    # Report-shaped by directory or name, or an unlinked one-off directly under docs/. An
-    # unlinked file inside a named subdirectory (docs/architecture/x.md) is structure someone
-    # chose, so it is linked, not archived; the reader decides what to do with the folder.
-    if [[ "${f%/*}" =~ $REPORT_SHAPED_DIR ]] || [[ "${f##*/}" =~ $REPORT_SHAPED_NAME ]] \
-        || { [ -z "$inbound" ] && [ "${f%/*}" = docs ]; }; then
+    inbound=$(fix_referrers "$f")
+    # Report-shaped by directory or name with no reference from outside docs/reports/, or an
+    # unreferenced one-off directly under docs/. A referenced doc (a link, or a plain-text
+    # mention in a source comment or another doc) is in use, so it is linked, never archived.
+    # An unreferenced file inside a named subdirectory (docs/architecture/x.md) is structure
+    # someone chose, so it is linked too; the reader decides what to do with the folder.
+    if [ -z "$inbound" ] && { [[ "${f%/*}" =~ $REPORT_SHAPED_DIR ]] || [[ "${f##*/}" =~ $REPORT_SHAPED_NAME ]] || [ "${f%/*}" = docs ]; }; then
       new=$(fix_report_name "$f")
       if is_tracked "$new" || [ -e "$new" ]; then
         fix_judgment "$f: its report name $new is taken; move it by hand"
@@ -650,18 +675,21 @@ fix_docs() {
       fi
       mkdir -p docs/reports
       git mv -- "$f" "$new" || { fix_judgment "$f: git mv to $new failed"; continue; }
-      fix_did "moved $f -> $new${inbound:+ (links rewritten in: $(tr '\n' ' ' <<<"$inbound"| sed 's/ $//'))}"
+      fix_did "moved $f -> $new"
       fix_relink "$f" "$new"
     else
-      fix_readme_append "- [$f]($f)" && fix_did "linked $f from README's Documentation section"
+      fix_readme_append "[$f]($f)" && fix_did "linked $f from README's Documentation section"
     fi
   done
   if [ "$fix_contrib_line_missing" = 1 ]; then
-    fix_readme_append "- Contributors and agents: see [AGENTS.md](AGENTS.md)." && fix_did "added the contributors line to README's Documentation section"
+    fix_readme_append "Contributors and agents: see [AGENTS.md](AGENTS.md)." && fix_did "added the contributors line to README's Documentation section"
   fi
   for f in CONTRIBUTING.md .github/CONTRIBUTING.md docs/CONTRIBUTING.md; do
     is_tracked "$f" && fix_judgment "$f: fold what AGENTS.md lacks into AGENTS.md, then git rm it"
   done
+  while IFS=: read -r n _; do
+    fix_judgment "README.md:$n names CONTRIBUTING.md; point that line at AGENTS.md or drop it"
+  done < <(grep -n 'CONTRIBUTING\.md' README.md 2>/dev/null || true)
   for f in ${fix_agents_report_links[@]+"${fix_agents_report_links[@]}"}; do
     fix_judgment "$f links into docs/reports/; drop it or link from README"
   done

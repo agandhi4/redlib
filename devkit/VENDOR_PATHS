@@ -18,3 +18,4 @@ renovate
 templates/githooks
 templates/metrics
 templates/workflows
+scorecard.conf

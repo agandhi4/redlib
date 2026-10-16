@@ -13,6 +13,8 @@
 #               which the gate plan sets from the metrics-rebaseline label, adds --rebaseline-ok)
 #   tighten     snapshot, then lock in the BETTER numbers (commit the bounds in the same PR)
 #   rebaseline  snapshot, then overwrite every bound (first adoption, or after a tool change)
+#   Every mode also runs the scorecard ratchet (bin/scorecard.py --mode <same>) when
+#   docs/metrics/scorecard.json exists (SCORECARD_BOUNDS overrides the path).
 #
 # scripts/ci/metrics.conf, one collector per line (`#` comments and blank lines ignored):
 #   <name> <area> <command...>
@@ -211,4 +213,14 @@ python3 -I "$RATCHET" merge --out "$OUT" ${MERGE_ARGS[@]+"${MERGE_ARGS[@]}"} \
 
 RATCHET_ARGS=("$SUB" --snapshot "$OUT" --bounds "$BOUNDS")
 if [ "$SUB" = check ] && [ "${METRICS_REBASELINE:-0}" = 1 ]; then RATCHET_ARGS+=(--rebaseline-ok); fi
-python3 -I "$RATCHET" "${RATCHET_ARGS[@]}"
+python3 -I "$RATCHET" "${RATCHET_ARGS[@]}" || exit $?
+
+# The scorecard ratchet (bin/scorecard.py --mode): opt-in by committing docs/metrics/scorecard.json
+# (`scorecard.py . --mode rebaseline` once). Same subcommand, same label semantics, after the
+# metric bounds so its evidence lines read the snapshot this job just merged.
+SCORECARD_BOUNDS=${SCORECARD_BOUNDS:-docs/metrics/scorecard.json}
+if [ -f "$SCORECARD_BOUNDS" ]; then
+  SC_ARGS=(. --mode "$SUB" --bounds-file "$SCORECARD_BOUNDS")
+  if [ "$SUB" = check ] && [ "${METRICS_REBASELINE:-0}" = 1 ]; then SC_ARGS+=(--rebaseline-ok); fi
+  python3 -I "$HERE/scorecard.py" "${SC_ARGS[@]}" | grep -E '^(scorecard-ratchet|grade) ' || exit "${PIPESTATUS[0]}"
+fi

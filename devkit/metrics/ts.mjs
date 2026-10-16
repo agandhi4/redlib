@@ -38,6 +38,7 @@
 //                                                     knip's --config (lists union, the repo's
 //                                                     scalars win; lint/README.md)
 //   --cycles     coupling.<scope>.cycles              dependency-cruiser's graph of --src
+//   --fan        coupling.<scope>.fan_in_max, .fan_out_max   the same graph: most importers of one module, most imports from one
 //                                                     (`--no-config`; tests excluded; `import type`
 //                                                     is not an edge), strongly connected
 //                                                     components of more than one module
@@ -104,6 +105,7 @@ function parse(argv) {
       knip: { type: "boolean", default: false },
       "knip-base": { type: "boolean", default: false },
       cycles: { type: "boolean", default: false },
+      fan: { type: "boolean", default: false },
       bundle: { type: "boolean", default: false },
       "bundle-entry": { type: "string", default: "index.html" },
     },
@@ -117,8 +119,8 @@ function parse(argv) {
   if (!values.scope || !SCOPE.test(values.scope)) {
     throw new CollectorError("--scope is required and must match [A-Za-z0-9_-]+");
   }
-  if (!(values.cyclomatic || values.cognitive || values.knip || values.cycles || values.bundle)) {
-    throw new CollectorError("nothing to collect: pass --cyclomatic, --cognitive, --knip, --cycles or --bundle");
+  if (!(values.cyclomatic || values.cognitive || values.knip || values.cycles || values.fan || values.bundle)) {
+    throw new CollectorError("nothing to collect: pass --cyclomatic, --cognitive, --knip, --cycles, --fan or --bundle");
   }
   if (values["knip-base"] && !values.knip) throw new CollectorError("--knip-base needs --knip");
   if (values.tsconfig === undefined) {
@@ -225,7 +227,9 @@ function collectKnip(opts) {
   };
 }
 
-function collectCycles(opts) {
+// importGraph: production module -> the production modules it imports at runtime, from
+// dependency-cruiser; shared by --cycles and --fan so both see one graph.
+function importGraph(opts) {
   const depcruise = requireBin(opts.root, "depcruise", "dependency-cruiser");
   const args = [
     opts.src, "--no-config", "--include-only", `^${escapeForRegExp(opts.src)}`,
@@ -251,7 +255,22 @@ function collectCycles(opts) {
   for (const [module, imports] of graph) {
     graph.set(module, new Set([...imports].filter((t) => graph.has(t) && t !== module)));
   }
+  return graph;
+}
+
+function collectCycles(opts, graph) {
   return { [`coupling.${opts.scope}.cycles`]: stronglyConnected(graph).length };
+}
+
+// fan-in: the most importers one module has; fan-out: the most modules one module imports (a
+// god module, scorecard T4). Same definition as metrics/python.py.
+function collectFan(opts, graph) {
+  const fanIn = new Map([...graph.keys()].map((m) => [m, 0]));
+  for (const imports of graph.values()) for (const t of imports) fanIn.set(t, (fanIn.get(t) ?? 0) + 1);
+  return {
+    [`coupling.${opts.scope}.fan_in_max`]: Math.max(0, ...fanIn.values()),
+    [`coupling.${opts.scope}.fan_out_max`]: Math.max(0, ...[...graph.values()].map((s) => s.size)),
+  };
 }
 
 function escapeForRegExp(text) {
@@ -323,7 +342,9 @@ function collect(opts) {
   if (opts.cyclomatic) Object.assign(out, collectCyclomatic(opts, files));
   if (opts.cognitive) Object.assign(out, collectCognitive(opts, files));
   if (opts.knip) Object.assign(out, collectKnip(opts));
-  if (opts.cycles) Object.assign(out, collectCycles(opts));
+  const graph = opts.cycles || opts.fan ? importGraph(opts) : null;
+  if (opts.cycles) Object.assign(out, collectCycles(opts, graph));
+  if (opts.fan) Object.assign(out, collectFan(opts, graph));
   if (opts.bundle) Object.assign(out, collectBundle(opts));
   return out;
 }

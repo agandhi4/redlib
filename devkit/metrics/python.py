@@ -622,6 +622,23 @@ def collect_cycles(root: Path, src: list[str], scope: str) -> dict[str, int]:
     return {f"coupling.{scope}.cycles": len(strongly_connected(import_graph(root, src)))}
 
 
+def fan(graph: Graph) -> tuple[int, int]:
+    """(fan_in_max, fan_out_max): the most importers any one module has, and the most modules
+    any one module imports. A module importing twenty others is a god module (scorecard T4);
+    a module imported by many is a hub, reported so a refactor can see what it would move."""
+    fan_in: dict[str, int] = {m: 0 for m in graph}
+    for imports in graph.values():
+        for target in imports:
+            if target in fan_in:
+                fan_in[target] += 1
+    return (max(fan_in.values(), default=0), max((len(v) for v in graph.values()), default=0))
+
+
+def collect_fan(root: Path, src: list[str], scope: str) -> dict[str, int]:
+    fan_in_max, fan_out_max = fan(import_graph(root, src))
+    return {f"coupling.{scope}.fan_in_max": fan_in_max, f"coupling.{scope}.fan_out_max": fan_out_max}
+
+
 # --------------------------------------------------------------------------------- cli
 
 
@@ -658,6 +675,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="merge devkit/lint/vulture.toml and these decorator sets under [tool.vulture]",
     )
     parser.add_argument("--cycles", action="store_true", help="AST import cycles")
+    parser.add_argument("--fan", action="store_true", help="fan-in and fan-out maxima over the runtime import graph")
     return parser
 
 
@@ -673,9 +691,9 @@ def collect(args: argparse.Namespace) -> dict[str, int]:
         raise CollectorError(f"--scope {args.scope!r} must match [A-Za-z0-9_-]+")
     if args.vulture_base is not None and not args.vulture:
         raise CollectorError("--vulture-base needs --vulture")
-    if not (args.mccabe or args.cognitive or args.vulture or args.cycles):
+    if not (args.mccabe or args.cognitive or args.vulture or args.cycles or args.fan):
         raise CollectorError(
-            "nothing to collect: pass --mccabe, --cognitive, --vulture or --cycles"
+            "nothing to collect: pass --mccabe, --cognitive, --vulture, --cycles or --fan"
         )
     out: dict[str, int] = {}
     if args.mccabe:
@@ -692,6 +710,8 @@ def collect(args: argparse.Namespace) -> dict[str, int]:
         )  # fmt: skip
     if args.cycles:
         out.update(collect_cycles(root, args.src, args.scope))
+    if args.fan:
+        out.update(collect_fan(root, args.src, args.scope))
     return out
 
 
