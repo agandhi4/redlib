@@ -20,7 +20,15 @@
 #     GATE_ALLOW_FORKS=0|1                   optional; default 0: a fork PR is refused before fetch
 #     gate_plan()                            required; called with the merged worktree ready
 #     gate_cleanup()                         optional; runs in the EXIT trap (containers, images)
-#   Available to the plan: $PR $WT $ROOT $CHANGED $HEAD_SHA $MAIN_SHA $LOGDIR and the helpers
+#   Available to the plan: $PR $WT $ROOT $CHANGED $HEAD_SHA $MAIN_SHA $LOGDIR, the areas the
+#   changed paths fall in (bin/_paths_lib.sh, the table the hooks use too; printed as
+#   `GATE areas: <areas>|none` just before gate_plan runs):
+#     GATE_AREAS="docs tooling"              space-separated, from docs backend frontend native tooling other
+#     GATE_HAS_DOCS|BACKEND|FRONTEND|NATIVE|TOOLING|OTHER=0|1
+#     GATE_ONLY_TOOLING_OR_DOCS=1            docs/tooling paths and no backend, frontend or other
+#     devkit_default_gate_plan               the default plan body: the plan declares
+#                                            GATE_JOBS_<GROUP> and calls it (_paths_lib.sh)
+#   and the helpers
 #     job <name> <make target> [VAR=val...]    run `make -C $WT <target>`; GATE <name> PASS|FAIL
 #     skip <name> <reason>                     GATE <name> SKIPPED (<reason>)
 #     note <text>                              GATE note: <text>
@@ -70,7 +78,8 @@
 #   GATE_SLOTS did not stick (eight lanes queued >1 h serially, 2026-10-13); a file does. The
 #   merge queues and linux-box never create it, so they keep the defaults.
 #
-# Output contract, parsed by the merge queues and worker.py — keep it:
+# Output contract, parsed by the merge queues and worker.py — keep it (the informational
+# `GATE slot|areas|note|scope|waiting ...` lines are never job lines):
 #   GATE <job> PASS|FAIL|SKIPPED [(...)]            one line per job
 #   GATE <job> WATCHDOG (silent for <n> min; log: <path>)   then the run stops
 #   GATE <job>|total OVERBUDGET (<n>s > <budget>s)  after the job's PASS|FAIL line / before VERDICT
@@ -140,6 +149,10 @@ PLAN=${GATE_PLAN:-$ROOT/scripts/ci/gate_plan.sh}
 [ -f "$PLAN" ] || { echo "local_gate: no plan at $PLAN" >&2; exit 2; }
 GATE_WORKTREE_PREFIX=wt-
 GATE_ALLOW_FORKS=0   # set here, not read from the environment: only the plan may opt in
+# Before the plan, which may call devkit_default_gate_plan. The invoking checkout's copy, as
+# for the skeleton: a PR cannot change how its own paths are classified.
+# shellcheck source=bin/_paths_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_paths_lib.sh"
 # shellcheck source=/dev/null  # the repo's plan; its contract is in the header
 . "$PLAN"
 for required in GATE_SLUG GATE_STATE_NAME; do
@@ -385,6 +398,8 @@ fi
 [ -n "$TOOLCHAIN_NOTES" ] && note "$TOOLCHAIN_NOTES"
 
 CHANGED=$(git -C "$WT" diff --name-only "$MAIN_SHA" HEAD)
+devkit_gate_areas "$CHANGED"
+echo "GATE areas: ${GATE_AREAS:-none}"
 
 # ---- the repo decides what runs --------------------------------------------------------------
 gate_plan

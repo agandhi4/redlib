@@ -175,7 +175,10 @@ for f in ${FLOORS[@]+"${FLOORS[@]}"}; do
   fi
 done
 
-root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$PWD
+# Inside a git hook GIT_DIR (and sometimes GIT_WORK_TREE) is exported, which makes rev-parse
+# report the current directory as the top level: a tier run after `cd backend` would then write
+# backend/build/metrics/ (Orbit #59). Drop both so the lookup answers for the real checkout.
+root=$(env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --show-toplevel 2>/dev/null) || root=$PWD
 out=$root/build/metrics/tier-$TIER.json
 if ! { mkdir -p "${out%/*}" && printf '{\n%s\n}\n' "$metrics" >"$out"; }; then
   die "could not write $out"
