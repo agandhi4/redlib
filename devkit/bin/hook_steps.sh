@@ -38,7 +38,9 @@
 # Timings: every step that ran appends `<date>\t<hook>\t<label>\t<seconds>\t<ok|fail>` and the
 # hook appends `<date>\t<hook>\ttotal\t<seconds>\t<ok|fail>` to
 # ${XDG_STATE_HOME:-~/.local/state}/devkit/hooks/<repo>.tsv (never printed, never fails the
-# hook). The scorecard (T8 gate.precommit) reads it against the owner's budgets, pre-commit
+# hook). <repo> is the MAIN checkout's directory name (the parent of the common git dir), so a
+# commit in a worktree (.claude/worktrees/<branch>) lands in the repo's file, not <branch>.tsv;
+# scorecard.py derives the same name. The scorecard (T8 gate.precommit) reads it against the owner's budgets, pre-commit
 # <= 30 s and pre-push <= 60 s (2026-10-13), so a hook that quietly grew shows up as a letter.
 # <globs> are comma-separated, no spaces, one override per step. A glob is a bash `case`
 # pattern over the whole repo-relative path, as in scripts/ci/gate_plan.sh: `*` also matches
@@ -217,7 +219,16 @@ _hook_record() {
   dir=${XDG_STATE_HOME:-$HOME/.local/state}/devkit/hooks
   mkdir -p "$dir" 2>/dev/null || return 0
   printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$hook" "$label" "$(( $(date +%s) - start ))" \
-    "$([ "$rc" -eq 0 ] && echo ok || echo fail)" >>"$dir/$(basename "$root").tsv" 2>/dev/null || true
+    "$([ "$rc" -eq 0 ] && echo ok || echo fail)" >>"$dir/$(_hook_ledger_name "$root").tsv" 2>/dev/null || true
+}
+
+# <root>: the ledger file's stem: the main checkout's directory name. `--git-common-dir` is
+# <main>/.git for the main checkout and every worktree of it (relative in the main checkout,
+# so it is resolved from <root>). Mirrored by repo_name() in scorecard.py; keep the two agreeing.
+_hook_ledger_name() {
+  local common
+  common=$(cd "$1" && cd "$(git rev-parse --git-common-dir)" && pwd -P) || { basename "$1"; return; }
+  basename "$(dirname "$common")"
 }
 
 # <uses_lfs> <push stdin> <hook args...>: the last word on a push that may go through.
