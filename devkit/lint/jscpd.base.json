@@ -1,0 +1,13 @@
+{
+  "ignore": [
+    "**/tests/**",
+    "**/test/**",
+    "**/__tests__/**",
+    "**/test-helpers/**",
+    "**/*.test.*",
+    "**/*.spec.*",
+    "**/test-setup.*",
+    "**/conftest.py",
+    "**/*.d.ts"
+  ]
+}

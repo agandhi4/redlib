@@ -3,8 +3,8 @@
 Shared scripts vendored into every app repo by `bin/devkit-sync.sh` (only the paths in `VENDOR_PATHS`). Read `README.md` first.
 
 ## Architecture
-Scripts in `bin/`, vendored by consumers (the paths in `VENDOR_PATHS`); fleet operations in
-`github/`; `devkit new` scaffolds in `templates/new/`; contract tests in `tests/`. The path map
+Scripts in `bin/` and the shared metrics collectors in `metrics/`, vendored by consumers (the
+paths in `VENDOR_PATHS`); fleet operations in `github/`; `devkit new` scaffolds in `templates/new/`; contract tests in `tests/`. The path map
 is README.md "Architecture".
 
 ## Invariants
@@ -32,6 +32,9 @@ is README.md "Architecture".
   per machine (`GATE_REMOTE_HOST` in `~/.config/devkit/gate.env`), never per repo, except a plan's
   literal `GATE_REMOTE=0` for a gate only a Mac can run.
 - Fail loudly on a missing tool (`flock`, `gh`) with the install hint; never degrade silently.
+- `ci-metrics` is `bin/metrics_collect.sh` over the repo's `scripts/ci/metrics.conf`, run as
+  the gate's last job and nowhere else (not a hook, not Actions). Bounds never track `gate.*`,
+  `tier.*` or `tests.*`; a collector that cannot run is exit 2, never a silent skip.
 
 ## Workflow
 - Branch, PR, squash-merge with a descriptive sentence title. Consumers pick it up with

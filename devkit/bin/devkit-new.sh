@@ -31,7 +31,9 @@
 #      Linux names its target in STACK_QUICK_CHECK_TARGET, passed as the caller's make-target)
 #   5. the stack's lock command (uv lock, npm install --package-lock-only), so the frozen
 #      install in ci-quick has a lockfile to be frozen to; none for a stack without one
-#   6. core.hooksPath=.githooks, then ONE commit with everything. pre-commit runs
+#   6. metrics_collect.sh rebaseline: the collectors scripts/ci/metrics.conf declares fill
+#      docs/metrics/ratchet.json, so `make ci-metrics` holds from the first commit
+#   7. core.hooksPath=.githooks, then ONE commit with everything. pre-commit runs
 #      `make ci-quick` on the scaffold: devkit-check (index tree), toolchain-check, docs-check,
 #      release-check, workflows-check, the stack's own guards and linters. A scaffold the hooks
 #      refuse is a devkit bug, not a repo to fix by hand.
@@ -205,6 +207,15 @@ if [ -n "$STACK_LOCK_CMD" ]; then
     $STACK_LOCK_CMD
   )
 fi
+
+# The bounds for the first commit: metrics.conf's collectors (whatever the stack declares) run
+# once and fill docs/metrics/ratchet.json, so `make ci-metrics` holds on this tree. On the
+# pins, as the lock step: a collector may need the stack's node.
+echo "devkit-new: devkit/bin/metrics_collect.sh rebaseline"
+(
+  toolchain_path "$PWD" || die "$TOOLCHAIN_ERROR"
+  devkit/bin/metrics_collect.sh rebaseline
+) || die "metrics_collect.sh rebaseline failed; the stack's metrics.conf names a collector its scaffold cannot run"
 
 # Set directly rather than through hooks_check.sh --fix: that script is a no-op under CI, and
 # the first commit must run the hooks there too (the bats contract test runs in Actions).
