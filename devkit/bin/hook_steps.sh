@@ -13,10 +13,11 @@
 # first failure. A conf lists steps only: devkit decides which of them a change needs.
 #
 # Path scoping, by default: most repos need no conf change and no override. Each changed path
-# gets one area from the fleet layout table in _hook_classify (one `case`, first match wins,
-# derived from the five gate plans, each entry naming the repo that needs it): docs, backend,
-# frontend, native (ios/, OrbitAgent/, *.xcodeproj/: macOS-only, never run by hooks, as the gate
-# plans say) or other (Makefile, scripts/, Dockerfile, devkit/, .github/, src/, ...).
+# gets one area from the fleet layout table, devkit_classify_path in _paths_lib.sh (the gate
+# classifies with the same table): docs, backend, frontend, native (ios/, OrbitAgent/,
+# *.xcodeproj/: macOS-only, never run by hooks, as the gate plans say), tooling (devkit/,
+# .devkit-rev, hooks.conf, .githooks/: treated like other here) or other (Makefile, scripts/,
+# Dockerfile, .github/, src/, ...).
 # Each step's area comes from its make target's words (split on - and _), in either order
 # (ci-unit-backend, the standard ci_targets_check.sh holds, or a not-yet-renamed
 # ci-backend-unit): backend|server, frontend|web, or docs.
@@ -24,9 +25,9 @@
 #   frontend target   skipped when every path is docs, backend or native
 #   docs target       runs only when some path is docs
 #   any other target  (ci-quick, ci-unit, ci-drift, ...) skipped when every path is docs or native
-# So an "other" path runs everything, as in the gate plans. A change of only docs (and native)
-# paths still runs docs-check: when no listed step is a docs target, the hook runs `make
-# docs-check` itself (if the Makefile declares it), the one check an AGENTS.md change must not
+# So an "other" or "tooling" path runs every step (the gate runs less for tooling: hooks are
+# cheap). A change of only docs (and native) paths still runs docs-check: when no listed step
+# is a docs target, the hook runs `make docs-check` itself (if the Makefile declares it), the one check an AGENTS.md change must not
 # skip. A native-only change runs nothing and prints one line saying so.
 #
 # Overrides, for a repo whose layout or target naming the defaults misjudge (most need none):
@@ -69,6 +70,8 @@
 
 # shellcheck source=/dev/null  # bin/toolchain_path.sh: toolchain_path, shared with local_gate.sh
 . "$(dirname "${BASH_SOURCE[0]}")/toolchain_path.sh"
+# shellcheck source=bin/_paths_lib.sh  # the path classification, shared with local_gate.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_paths_lib.sh"
 
 run_hook_steps() {
   local hook=$1
@@ -296,43 +299,12 @@ _hook_areas_within() {
 }
 
 # <changed paths, one per line>: set HOOK_AREAS to the areas present, " a b " ("" for none).
-# THE fleet layout table: one `case`, first match wins, so a specific entry sits above the
-# general one it carves out of. Each entry names the repo(s) whose gate plan it mirrors. A
-# layout the table misjudges gets a per-step override in that repo's hooks.conf; an entry here
-# only when it is the fleet's convention, since every repo is classified by every entry.
+# The table is devkit_classify_path's (_paths_lib.sh), shared with the gate. tooling is in no
+# skippable set below, so for hooks it runs every step, like other: hooks are cheap, and a
+# hooks.conf or .githooks/ change is exactly what the hooks should exercise.
 _hook_classify() {
-  local path docs=0 backend=0 frontend=0 native=0 other=0
-  while IFS= read -r path; do
-    case "$path" in
-      '') ;;
-      # Read by docs-check alone (finplat, Orbit, locus, rollcall).
-      scripts/ci/docs_oversize.txt) docs=1 ;;
-      # Fixtures under docs/ that tests read (locus): rule-fixtures by pytest and vitest,
-      # sync-wire-fixtures by pytest. Above docs/* so they are not mistaken for prose.
-      docs/rule-fixtures/*.md|docs/sync-wire-fixtures/*.md) docs=1 ;;
-      docs/rule-fixtures/*) other=1 ;;
-      docs/sync-wire-fixtures/*) backend=1 ;;
-      # Prose at any depth (every repo; frontend/AGENTS.md is docs), and Orbit's specs/.
-      docs/*|*.md|specs/*) docs=1 ;;
-      # macOS-only: locus ios/, Orbit OrbitAgent/, instalite's project file. The gate plans
-      # run nothing for them; instalite's Swift sources (InstaLite/) stay other.
-      ios/*|OrbitAgent/*|*.xcodeproj/*) native=1 ;;
-      # finplat, Orbit backend/; locus server/ plus its root-level Python project (tests/,
-      # alembic, pyproject.toml, uv.lock). rollcall's tests/ lands here too, harmlessly: its
-      # steps are generic targets, which run for any non-docs area.
-      backend/*|server/*|tests/*|alembic/*|alembic.ini|pyproject.toml|uv.lock) backend=1 ;;
-      # finplat, Orbit frontend/; locus, instalite web/; Orbit's Playwright e2e/.
-      frontend/*|web/*|e2e/*) frontend=1 ;;
-      *) other=1 ;;
-    esac
-  done <<<"$1"
-  HOOK_AREAS=
-  [ "$docs" = 0 ] || HOOK_AREAS+=" docs"
-  [ "$backend" = 0 ] || HOOK_AREAS+=" backend"
-  [ "$frontend" = 0 ] || HOOK_AREAS+=" frontend"
-  [ "$native" = 0 ] || HOOK_AREAS+=" native"
-  [ "$other" = 0 ] || HOOK_AREAS+=" other"
-  [ -z "$HOOK_AREAS" ] || HOOK_AREAS+=" "
+  devkit_areas "$1"
+  HOOK_AREAS=$DEVKIT_AREAS
 }
 
 # <make target>: backend, frontend, docs or generic, from its words split on - and _. A target

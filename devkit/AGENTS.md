@@ -18,8 +18,10 @@ is README.md "Architecture".
   and `worker.py` parse them. `bin/tier_guard.sh` prints `TIER <tier>: …|FAIL|FLOOR|OVERBUDGET …`
   and exits with the command's code, 1 for its own verdict, 2 for a bad call. `.devkit-rev` is `<upstream commit> <tree sha>`,
   the tree filtered to `VENDOR_PATHS`. A new file consumers run must sit under a listed path.
-- The skeleton owns mechanics; the repo's `scripts/ci/gate_plan.sh` owns policy (which jobs
-  for which paths). A new mechanic belongs here; a new check belongs in the repo's Makefile.
+- The skeleton owns mechanics; the repo's `scripts/ci/gate_plan.sh` declares its jobs. Which
+  paths run which group is devkit's (`bin/_paths_lib.sh`: one table for hooks and gate,
+  `devkit_default_gate_plan`); a repo adds only its own rules in `gate_plan_extra`. A new
+  mechanic belongs here; a new check belongs in the repo's Makefile.
 - Every gate job is a Makefile target the repo's workflows also call. Parity is structural.
 - One version string per toolchain per repo: `.nvmrc`, `.python-version`, `rust-toolchain.toml`,
   all exact. CI reads them (`*-version-file`). The gate (from the MERGED tree) and the hooks

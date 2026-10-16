@@ -18,7 +18,8 @@ What each path is; [AGENTS.md](AGENTS.md) holds the invariants that tie them tog
 
 | Path | What |
 |---|---|
-| `bin/local_gate.sh` | The PR gate skeleton: gates `<pr>` merged into `origin/main`, posts the `local-gate` status, emits the `GATE`/`VERDICT` lines the merge queues parse, holds jobs to their time budgets and writes their seconds to `build/metrics/gate.json` (`docs/metrics-keys.md`). The repo supplies `scripts/ci/gate_plan.sh` (contract in the script header). |
+| `bin/local_gate.sh` | The PR gate skeleton: gates `<pr>` merged into `origin/main`, posts the `local-gate` status, emits the `GATE`/`VERDICT` lines the merge queues parse, holds jobs to their time budgets and writes their seconds to `build/metrics/gate.json` (`docs/metrics-keys.md`). The repo supplies `scripts/ci/gate_plan.sh` (contract in the script header), usually declarations plus `devkit_default_gate_plan`. |
+| `bin/_paths_lib.sh` | Sourced: the one path classification (`devkit_classify_path`: docs, backend, frontend, native, tooling, other) shared by the hooks and the gate, which prints `GATE areas: …` and exports `GATE_AREAS`/`GATE_HAS_<AREA>` before the plan; and `devkit_default_gate_plan`, the plan body a repo calls after declaring `GATE_JOBS_<GROUP>`. A devkit-only change (tooling) gates as quick, plus the image when a boot script changed. |
 | `bin/gate.sh` | What `make gate` calls: `remote_gate.sh` when this machine names a gate host, else `local_gate.sh`. See "Remote gate". |
 | `bin/remote_gate.sh` | Runs the repo's gate on the gate host over ssh (clone if absent, reset to `origin/main`, `local_gate.sh` there); same output, exit code and `local-gate` status. |
 | `bin/devkit-sync.sh` | Fetch upstream, replace `devkit/` with its tree filtered to `VENDOR_PATHS`, record `<commit> <filtered tree>` in `.devkit-rev`, commit. Conflict-free by construction. `--stage` leaves it in the index for the caller's own commit. |
@@ -38,7 +39,7 @@ What each path is; [AGENTS.md](AGENTS.md) holds the invariants that tie them tog
 | `bin/workflows_check.sh`, `bin/_workflows_lib.sh` | Guard for `ci-quick`: Actions follows the minutes and supply-chain rules. Every `uses:` is a commit SHA with a `# vX.Y.Z` comment (devkit reusable workflows may float on `@main`). A `pull_request` workflow runs one job, skips drafts, cancels superseded runs and ignores `**.md`; more jobs need a top-level `# workflows-check: multi-job ok: <reason>`. A job pushing an image on main runs with `cancel-in-progress: false`. The lib's push-step detection is shared with `release_check.sh`. |
 | `bin/playwright_browsers.sh` | Installs the Playwright browsers the lockfile pins (default `chromium`) with the lockfile's runner and the `.nvmrc` Node; idempotent via Playwright's cache. `--with-deps` is honoured on Linux, ignored on macOS. |
 | `bin/docs_check.sh` | Guard for `ci-quick`: every `AGENTS.md` is the real file with `CLAUDE.md` symlinked to it, size caps (30 KB root, 16 KB nested, shrink-only allowlist in `scripts/ci/docs_oversize.txt`), `docs/decisions.md` exists, no retired-tool words, and the standard docs set ("Standard docs" below: required files and README sections, dated decisions entries, `make` targets and relative links that resolve, `docs/decisions.md merge=union` in `.gitattributes`; warnings until their date, then failures); repo extras in `scripts/ci/docs_rules.sh`. |
-| `bin/quiet_run.sh`, `bin/hook_steps.sh`, `bin/push_ranges.sh`, `bin/hooks_check.sh`, `templates/githooks/` | Git hooks: one line per step, 40-line tail on failure; per-repo steps in `scripts/ci/hooks.conf`, scoped by changed paths by default from one fleet layout table (docs, backend, frontend, native, other: `_hook_classify` in `hook_steps.sh`) and each step's target name, so a docs-only change runs docs-check alone, a frontend-only one skips backend steps and a native-only one (ios/, OrbitAgent/) runs nothing, with `:unless=<globs>`, `:only=<globs>` or `:always` per step only where a repo's layout deviates; `hooks_check` asserts `core.hooksPath=.githooks` (a tool install silently repointed finplat's for two months) and `--fix` self-heals it and adds the decisions-log union line to `.gitattributes`; it rejects a malformed step override; LFS chained when the repo uses it. Before the first step the pinned Node and Rust go first on PATH, as in the gate (`toolchain_path.sh`), so `hooks.conf` lists steps only. A passing cargo step's summary sums every `test result:` line (the last one is the doctests). |
+| `bin/quiet_run.sh`, `bin/hook_steps.sh`, `bin/push_ranges.sh`, `bin/hooks_check.sh`, `templates/githooks/` | Git hooks: one line per step, 40-line tail on failure; per-repo steps in `scripts/ci/hooks.conf`, scoped by changed paths by default from one fleet layout table (docs, backend, frontend, native, tooling, other: `devkit_classify_path` in `_paths_lib.sh`, which the gate uses too; tooling runs every hook step, like other) and each step's target name, so a docs-only change runs docs-check alone, a frontend-only one skips backend steps and a native-only one (ios/, OrbitAgent/) runs nothing, with `:unless=<globs>`, `:only=<globs>` or `:always` per step only where a repo's layout deviates; `hooks_check` asserts `core.hooksPath=.githooks` (a tool install silently repointed finplat's for two months) and `--fix` self-heals it and adds the decisions-log union line to `.gitattributes`; it rejects a malformed step override; LFS chained when the repo uses it. Before the first step the pinned Node and Rust go first on PATH, as in the gate (`toolchain_path.sh`), so `hooks.conf` lists steps only. A passing cargo step's summary sums every `test result:` line (the last one is the doctests). |
 | `bin/tier_guard.sh` | `<tier> --budget <s> [--floor <runner>=<min>]... -- <cmd...>`: one test tier under a wall-clock budget (the whole command's wall time; it fails over budget even when every test passed, `TIER_BUDGET_ENFORCE=0` only reports) and per-runner floors on the tests that RAN (skipped ones do not count), read from the runner's own summary line: `pytest`, `vitest`, `playwright`, `cargo`. Streams the command's output, exits with its code, prints `TIER <tier>: …` / `FAIL` / `FLOOR` / `OVERBUDGET` lines and writes `build/metrics/tier-<tier>.json` at the git top level (`tier.<tier>.seconds`, `tests.<tier>.<runner>`). Every `devkit new` stack's test tiers run through it. |
 | `bin/metrics_ratchet.py` | The "never worse than main" gate. `check` holds a snapshot to `docs/metrics/ratchet.json` and that file to main's copy (`git show origin/main:…`), so a PR cannot loosen its own bounds; `tighten` locks in BETTER numbers in the improving PR; `merge` joins `build/metrics/*.json` into one flat snapshot. Loosening needs the fail-closed `metrics-rebaseline` PR label. Wiring below. |
 | `templates/metrics/ratchet.json`, `docs/metrics-keys.md` | Starter bounds (all `null` until `rebaseline` fills them, so `check` refuses a raw copy) and the flat `<domain>.<scope>.<stat>` key shape every collector emits. |
@@ -132,9 +133,29 @@ Declare Node once in `.nvmrc` (exact version, e.g. `22.23.3`). Workflows use
 `node-version-file: .nvmrc`; the Dockerfile's `FROM node:<major>` must match; a bot bump to
 either fails `toolchain-check` until `.nvmrc` moves with it, which is the point.
 
-and write `scripts/ci/gate_plan.sh`. The three existing plans (finplat, Orbit, locus) are
-the reference: scalar config at the top, a `gate_plan()` that maps changed paths to `job`
-calls, an optional `gate_cleanup()`.
+and write `scripts/ci/gate_plan.sh`: scalar config at the top, an optional `gate_cleanup()`,
+and a `gate_plan()` that declares jobs per group and calls `devkit_default_gate_plan`
+(`bin/_paths_lib.sh`), so which jobs run for which paths is devkit's, not the repo's:
+
+```bash
+GATE_JOBS_QUICK="quick ci-quick"                       # required; ci-quick runs docs-check
+GATE_JOBS_DOCS="docs docs-check"                       # required
+GATE_JOBS_BACKEND="unit ci-unit-backend|db ci-db TEST_DB_PORT=$DB_PORT"
+GATE_JOBS_FRONTEND="unit-fe ci-unit-frontend"
+GATE_JOBS_IMAGE="image ci-image CI_IMAGE=$IMAGE|smoke ci-smoke CI_IMAGE=$IMAGE"
+GATE_JOBS_E2E="e2e ci-e2e"
+GATE_IMAGE_PATHS='^(Dockerfile|uv\.lock)$'             # paths that also run the image group
+gate_plan() { devkit_default_gate_plan; }
+gate_plan_extra() { ...; }                             # optional: the repo's own rules
+```
+
+Each changed path gets one area from the table the hooks use (docs, backend, frontend,
+native, tooling, other). Docs-only runs docs; tooling (`devkit/`, `.devkit-rev`, hooks.conf,
+`.githooks/`; a devkit sync) runs quick, plus the image group when `boot_image.sh` or
+`contract_probe.sh` changed; native-only runs nothing; backend and frontend run their groups
+plus quick and e2e; other runs everything. `GATE_AREAS_<GROUP>="..."` overrides a group's
+areas. The table and defaults: the `_paths_lib.sh` header. A plan may still be hand-written
+against the skeleton's helpers, reading `GATE_AREAS` and `GATE_HAS_<AREA>`.
 
 Gate environment (full contract in the script header):
 
