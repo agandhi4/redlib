@@ -12,11 +12,13 @@
 #   - age secret keys               AGE-SECRET-KEY-1[0-9A-Z]{58}
 #   - assignments of a long literal to a secret-named variable, where the name ENDS with the
 #     secret word (TOKEN, api_key, passwords; not TOKEN_INPUT_ID or secretName) and the literal
-#     is not a path or URL (no leading `/`, no `://`). Test paths include Swift/Kotlin/Go
+#     is not a path (no leading `/`; a URL cannot match, its `:` is outside the literal's
+#     alphabet). Test paths include Swift/Kotlin/Go
 #     conventions (`*Tests/`, `*Tests.swift`, `*_test.go`): a fixture UUID under "token" is not a leak.
 #     (api[_-]?key|secret|token|password|passwd)s?["']?\s*[:=]\s*['"][A-Za-z0-9+_=.-][A-Za-z0-9+/_=.-]{19,}['"]
-#     unless the literal is a placeholder (contains example|placeholder|changeme|dummy|test|
-#     xxx|<|>|\$\{), or the file is a test or fixture (tests/, test/, e2e/, *.test.*, *.spec.*,
+#     unless the MATCHED assignment is a placeholder (contains example|placeholder|changeme|dummy|
+#     test|xxx|<|>|\$\{; judged on the match, never the whole line, so a comment or a URL
+#     elsewhere on the line excuses nothing), or the file is a test or fixture (tests/, test/, e2e/, *.test.*, *.spec.*,
 #     test_*): a 20-character literal handed to `password` in a test is a fixture. The
 #     key-shaped rules above still apply to tests: a real AWS key in a fixture is still a leak.
 # Skipped: binary files (grep -I), lock files, minified bundles (*.min.*), the allow file itself (its
@@ -104,8 +106,10 @@ if [ "$nfiles" -gt 0 ]; then
       f=${hit%%:*}; rest=${hit#*:}; line=${rest%%:*}; text=${rest#*:}
       if [ "$rule" = secret-assignment ]; then
         is_test_path "$f" && continue
-        LC_ALL=C grep -qiE "$PLACEHOLDER" <<<"$text" && continue
-        LC_ALL=C grep -qE '://' <<<"$text" && continue
+        # Placeholder words are judged on the matched assignment only (closet #402 review: the
+        # whole line let `url = "https://…"; TOKEN = "<real>"` and a trailing `# example` through).
+        match=$(LC_ALL=C grep -oiE "$re" <<<"$text" | head -1)
+        LC_ALL=C grep -qiE "$PLACEHOLDER" <<<"$match" && continue
       fi
       fail "$f:$line: $rule"
     done < <(LC_ALL=C xargs -0 grep -In"$ci"HE -e "$re" -- <"$LIST" 2>/dev/null)

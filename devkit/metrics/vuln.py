@@ -18,6 +18,9 @@ installed; `npm audit` needs a registry login shape OSV does not).
 Sources (repeatable, mixed):
   --uv <project dir>        `uv export --frozen --no-dev --no-hashes` (production set of the lock)
   --npm-lock <file>         package-lock.json v2/v3 `packages`, entries without `dev: true`
+  --pnpm-lock <file>        pnpm-lock.yaml v9: the closure of every importer's `dependencies`
+                            (never `devDependencies`) through `snapshots`, parsed by indentation
+                            (no YAML library in the stdlib); a package reached both ways is production
   --cargo-lock <file>       Cargo.lock `[[package]]` entries (no dev split in the lock format)
 
 Keys (docs/metrics-keys.md, domain `vuln`, direction lower; REPORT-ONLY, never a tracked
@@ -81,7 +84,9 @@ def npm_packages(lock: Path) -> list[tuple[str, str, str]]:
     except (OSError, ValueError) as e:
         raise CollectorError(f"{lock}: {e}") from e
     packages = doc.get("packages")
-    if not isinstance(packages, dict):
+    if not isinstance(packages, dict) or not packages:
+        # Empty is a truncated or hand-made lock, never "no dependencies": npm writes the root
+        # package entry ("") even for a dependency-free project.
         raise CollectorError(f"{lock}: no `packages` map (lockfileVersion 2 or 3 expected)")
     out = []
     for path, entry in packages.items():
@@ -92,13 +97,85 @@ def npm_packages(lock: Path) -> list[tuple[str, str, str]]:
     return out
 
 
+_PNPM_KEY = re.compile(r"^(@?[^@\s']+)@([^\s'(]+)")  # name@version, before any (peer) suffix
+
+
+def pnpm_packages(lock: Path) -> list[tuple[str, str, str]]:
+    """pnpm-lock.yaml v9 production set. The lock has no per-package dev flag: production is the
+    closure of each importer's `dependencies` (not `devDependencies`/`optionalDependencies` of the
+    importer itself) through the `snapshots` graph. Two-space indentation is the structure, so
+    the sections are walked by indent; versions carry peer suffixes `1.2.3(react@19.0.0)`, which
+    both the snapshot keys and the importer `version:` lines use, so edges are matched on the
+    full string and the version reported is the part before `(`."""
+    try:
+        lines = lock.read_text().splitlines()
+    except OSError as e:
+        raise CollectorError(f"{lock}: {e}") from e
+    roots: set[str] = set()      # "name@version(peers)" the importers' dependencies name
+    edges: dict[str, set[str]] = {}  # snapshot key -> its dependencies' "name@version(peers)"
+    section = ""
+    imp_block = ""   # dependencies | devDependencies | ... within an importer
+    snap_key = ""
+    snap_block = ""
+    pending = ""     # importer dependency name awaiting its version: line
+    for raw in lines:
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        line = raw.strip()
+        if indent == 0:
+            section = line.rstrip(":")
+            continue
+        if section == "importers":
+            if indent == 4:
+                imp_block = line.rstrip(":")
+                pending = ""
+            elif indent == 6 and imp_block == "dependencies":
+                pending = line.rstrip(":").strip("'\"")
+            elif indent == 8 and pending and line.startswith("version:"):
+                roots.add(f"{pending}@{line.split(':', 1)[1].strip().strip(chr(39))}")
+                pending = ""
+        elif section == "snapshots":
+            if indent == 2:
+                snap_key = line.rstrip(":").strip("'\"")
+                if line.endswith("{}"):
+                    snap_key = snap_key.rstrip(": {}")
+                edges.setdefault(snap_key, set())
+                snap_block = ""
+            elif indent == 4:
+                snap_block = line.rstrip(":")
+            elif indent == 6 and snap_block in ("dependencies", "optionalDependencies"):
+                name, _, version = line.partition(":")
+                edges[snap_key].add(f"{name.strip().strip(chr(39))}@{version.strip().strip(chr(39))}")
+    if not edges:
+        raise CollectorError(f"{lock}: no `snapshots` section (pnpm lockfileVersion 9 expected)")
+    seen: set[str] = set()
+    todo = list(roots)
+    while todo:
+        key = todo.pop()
+        if key in seen:
+            continue
+        seen.add(key)
+        todo.extend(edges.get(key, ()))
+    out = []
+    for key in seen:
+        m = _PNPM_KEY.match(key)
+        if m:
+            out.append(("npm", m.group(1), m.group(2)))
+    return out
+
+
 def cargo_packages(lock: Path) -> list[tuple[str, str, str]]:
     try:
         text = lock.read_text()
     except OSError as e:
         raise CollectorError(f"{lock}: {e}") from e
+    blocks = text.split("[[package]]")[1:]
+    if not blocks:
+        # A Cargo.lock always lists the workspace's own package: none means truncated or empty.
+        raise CollectorError(f"{lock}: no [[package]] blocks")
     out = []
-    for block in text.split("[[package]]")[1:]:
+    for block in blocks:
         name = re.search(r'^name = "([^"]+)"', block, re.M)
         version = re.search(r'^version = "([^"]+)"', block, re.M)
         if name and version:
@@ -137,17 +214,20 @@ def main() -> int:
     ap.add_argument("--scope", required=True)
     ap.add_argument("--uv", action="append", default=[], help="a uv project directory (uv.lock)")
     ap.add_argument("--npm-lock", action="append", default=[], help="a package-lock.json")
+    ap.add_argument("--pnpm-lock", action="append", default=[], help="a pnpm-lock.yaml (v9)")
     ap.add_argument("--cargo-lock", action="append", default=[], help="a Cargo.lock")
     ap.add_argument("--out", help="write the JSON here (default: stdout)")
     args = ap.parse_args()
-    if not (args.uv or args.npm_lock or args.cargo_lock):
-        ap.error("at least one of --uv, --npm-lock, --cargo-lock")
+    if not (args.uv or args.npm_lock or args.pnpm_lock or args.cargo_lock):
+        ap.error("at least one of --uv, --npm-lock, --pnpm-lock, --cargo-lock")
     try:
         packages: list[tuple[str, str, str]] = []
         for p in args.uv:
             packages.extend(uv_packages(Path(p)))
         for f in args.npm_lock:
             packages.extend(npm_packages(Path(f)))
+        for f in args.pnpm_lock:
+            packages.extend(pnpm_packages(Path(f)))
         for f in args.cargo_lock:
             packages.extend(cargo_packages(Path(f)))
         packages = sorted(set(packages))
