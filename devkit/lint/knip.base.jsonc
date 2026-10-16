@@ -1,0 +1,13 @@
+// Shared knip base: what is true of every consumer, merged under the repo's own knip config by
+// devkit/metrics/ts.mjs --knip-base (lint/README.md). knip itself has no `extends`.
+// Per-repo on purpose, never here: entries, `paths`, and stack choices such as shadcn/ui's
+// `src/components/ui/**` or openapi-typescript's `schema.d.ts` (an ignore in a repo without
+// them would hide that repo's own dead code under the same name).
+{
+  "$schema": "https://unpkg.com/knip@6/schema-jsonc.json",
+  // Run from node_modules/.bin by devkit's collectors (metrics/ts.mjs: dependency-cruiser and
+  // eslint-plugin-sonarjs; metrics/jscpd.mjs: jscpd), so nothing in a repo imports them.
+  "ignoreDependencies": ["dependency-cruiser", "eslint-plugin-sonarjs", "jscpd"],
+  // The vendored devkit tree (byte-for-byte, devkit-check) when knip is rooted at the repo root.
+  "ignore": ["devkit/**"]
+}

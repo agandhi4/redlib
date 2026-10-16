@@ -41,9 +41,12 @@ What each path is; [AGENTS.md](AGENTS.md) holds the invariants that tie them tog
 | `bin/docs_check.sh` | Guard for `ci-quick`: every `AGENTS.md` is the real file with `CLAUDE.md` symlinked to it, size caps (30 KB root, 16 KB nested, shrink-only allowlist in `scripts/ci/docs_oversize.txt`), `docs/decisions.md` exists, no retired-tool words, and the standard docs set ("Standard docs" below: required files and README sections, dated decisions entries, `make` targets and relative links that resolve, `docs/decisions.md merge=union` in `.gitattributes`; warnings until their date, then failures); repo extras in `scripts/ci/docs_rules.sh`. |
 | `bin/quiet_run.sh`, `bin/hook_steps.sh`, `bin/push_ranges.sh`, `bin/hooks_check.sh`, `templates/githooks/` | Git hooks: one line per step, 40-line tail on failure; per-repo steps in `scripts/ci/hooks.conf`, scoped by changed paths by default from one fleet layout table (docs, backend, frontend, native, tooling, other: `devkit_classify_path` in `_paths_lib.sh`, which the gate uses too; tooling runs every hook step, like other) and each step's target name, so a docs-only change runs docs-check alone, a frontend-only one skips backend steps and a native-only one (ios/, OrbitAgent/) runs nothing, with `:unless=<globs>`, `:only=<globs>` or `:always` per step only where a repo's layout deviates; `hooks_check` asserts `core.hooksPath=.githooks` (a tool install silently repointed finplat's for two months) and `--fix` self-heals it and adds the decisions-log union line to `.gitattributes`; it rejects a malformed step override; LFS chained when the repo uses it. Before the first step the pinned Node and Rust go first on PATH, as in the gate (`toolchain_path.sh`), so `hooks.conf` lists steps only. A passing cargo step's summary sums every `test result:` line (the last one is the doctests). |
 | `bin/tier_guard.sh` | `<tier> --budget <s> [--floor <runner>=<min>]... -- <cmd...>`: one test tier under a wall-clock budget (the whole command's wall time; it fails over budget even when every test passed, `TIER_BUDGET_ENFORCE=0` only reports) and per-runner floors on the tests that RAN (skipped ones do not count), read from the runner's own summary line: `pytest`, `vitest`, `playwright`, `cargo`. Streams the command's output, exits with its code, prints `TIER <tier>: …` / `FAIL` / `FLOOR` / `OVERBUDGET` lines and writes `build/metrics/tier-<tier>.json` at the git top level (`tier.<tier>.seconds`, `tests.<tier>.<runner>`). Every `devkit new` stack's test tiers run through it. |
-| `bin/metrics_ratchet.py` | The "never worse than main" gate. `check` holds a snapshot to `docs/metrics/ratchet.json` and that file to main's copy (`git show origin/main:…`), so a PR cannot loosen its own bounds; `tighten` locks in BETTER numbers in the improving PR; `merge` joins `build/metrics/*.json` into one flat snapshot. Loosening needs the fail-closed `metrics-rebaseline` PR label. Wiring below. |
-| `templates/metrics/ratchet.json`, `docs/metrics-keys.md` | Starter bounds (all `null` until `rebaseline` fills them, so `check` refuses a raw copy) and the flat `<domain>.<scope>.<stat>` key shape every collector emits. |
+| `bin/metrics_collect.sh` | `<snapshot\|check\|tighten\|rebaseline>`: the `ci-metrics` mechanism. Reads `scripts/ci/metrics.conf` (`<name> <area> <command...>`), runs each collector from the repo root into `build/metrics/<name>.json`, skips those whose area no changed path touched (in the gate; `tooling`/`other` and `repo` collectors run regardless), merges with the gate's and tiers' files, then runs the ratchet. A repo's Makefile holds three one-line targets and nothing else. "Metrics ratchet" below. |
+| `metrics/` | The shared collectors a `metrics.conf` line calls, one per stack, each `--scope <name> [--out FILE]`, deterministic, exit 2 naming a missing dev dependency: `python.py --root <dir> --src <subdir|module.py>... [--python <interp>] [--mccabe] [--cognitive] [--vulture [--vulture-ignore-declarative] [--vulture-base <set,...>]] [--cycles]` (ruff C901, complexipy, vulture, AST import cycles; run under the repo's interpreter, `uv run --frozen --project backend python devkit/metrics/python.py …`, so the tools resolve); `ts.mjs --root <dir> --src <subdir> [--tsconfig F] [--test-glob G]... [--cyclomatic] [--cognitive] [--knip [--knip-base]] [--cycles] [--bundle [--bundle-entry index.html]]` (eslint `complexity`, sonarjs cognitive, knip, dependency-cruiser cycles, vite bundle KiB; tools from `<root>/node_modules/.bin`); `jscpd.mjs --scope repo [--min-tokens 50] [--min-lines 5] [--bin <jscpd>] [--base] <paths...>`; `coverage.py --scope <s> (--coverage-json F \| --istanbul-summary F)` (the tier writes the report; "run make ci-unit-<s> first" when it is missing). Keys per collector: `docs/metrics-keys.md`. The `--*base` flags merge `lint/`'s knip, jscpd and vulture bases under the repo's own config (`lint/README.md`). |
+| `bin/metrics_ratchet.py` | The "never worse than main" gate. `check` holds a snapshot to `docs/metrics/ratchet.json` and that file to main's copy (`git show origin/main:…`), so a PR cannot loosen its own bounds; `tighten` locks in BETTER numbers in the improving PR; `merge` joins `build/metrics/*.json` into one snapshot that records each key's collector and the collectors skipped, so a key whose collector did not run is SKIPPED, not a failure. Loosening needs the fail-closed `metrics-rebaseline` PR label. |
+| `templates/metrics/ratchet.json`, `docs/metrics-keys.md` | Starter bounds (all `null` until `rebaseline` fills them, so `check` refuses a raw copy; `{}` is the other valid start) and the flat `<domain>.<scope>.<stat>` key shape every collector emits. |
 | `bin/own_commit_check.py` | Transaction-boundary guard: AST scan fails a raw `.commit()` on a session the function did not open itself (`with … as db` / `db = Session()`), and pins every `commit_now(…, reason=…)` call to a shrink-only `path::qualname` allow-list. Prints `own_commit_allowlist_entries=<n>` for `metrics_ratchet.py` (direction lower). Opener regex and excludes are per repo. |
+| `bin/layer_check.py` | Dependency-direction guard for `ci-quick` (`make layer-check`): the repo's `scripts/ci/layers.conf` declares, per source tree (`[section]`, the ratchet scope), its layers bottom-first by path glob, plus `peer` (same rank, neither imports the other), `entry` (composition root), `leaf` (imports nothing of ours), sanctioned `allow` edges, `deny` for a skipped layer and the shrink-only `known` violations. An import from a lower rank to a higher one fails, as does a file in no layer or a `known` line that is no longer refused. Python reads `metrics/python.py`'s runtime import graph (the one `coupling.<scope>.cycles` counts); TypeScript reads import statements (aliases from the conf, type-only imports erased). Prints `layer_violations=<n>`; `--metrics-out` writes `coupling.<section>.layer_violations` (direction lower), so a scaffold's `metrics.conf` runs it as the `layers` collector. Stdlib only. |
 | `bin/dead_alert_audit.py` | Monthly review of vmalert rules (not a gate, exit 0): statically flags missing `severity`/`runbook`, `outcome` values outside `success|failure`, names duplicated across files; with `--vm-url` asks VictoriaMetrics which alerts never fired and which selectors matched no series in `--since` (default 30d). One `dead-alert <high|medium|low> <alert> <reason>` line per finding. |
 | `bin/monthly_audit.sh` | Monthly fleet audit, run from this checkout (not vendored). Per active vendoring repo, in a fresh shallow clone: the guards `ci-quick` does not already reach, `.devkit-rev` skew, the ratchet, and a re-invention diff (`reinvent <repo> <path> <kind> <devkit equivalent>`; naming the file under AGENTS.md "Convention deltas" silences it). Fleet: labels/settings dry-runs, `dead_alert_audit.py`, gate-ledger digest. Writes `report.md`, `summary.tsv`, `findings.json`; one read-only `claude -p` proposes ≤ 3 structural findings, which the script files as `fleet-audit` issues (none while 3 are open; off for the first two runs) and PRs the report to homelab `docs/audits/`. Kill switch `~/.config/devkit/audit.off`. Schedule (owner step, install by hand): fill `__DEVKIT__`/`__HOME__` in `templates/launchd/com.agandhi4.devkit.monthly-audit.plist`, `mkdir -p ~/Library/Logs/devkit`, `cp` it to `~/Library/LaunchAgents/`, then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agandhi4.devkit.monthly-audit.plist`. |
 | `github/` | Fleet operations run from this checkout, not vendored: `labels.json` + `labels_sync.sh` (idempotent; `--prune` to delete), `repos.json` + `repo_settings.sh` (squash-only, PR_TITLE/PR_BODY, delete-branch; auto-merge only on public repos). |
@@ -75,7 +78,7 @@ Commands, Workflow) with `CLAUDE.md` symlinked; `docs/decisions.md` with its fir
 toolchain pin; the stack's lockfile; the smallest app that serves `/health/live` and
 `/health/ready` (swift-app: shows its build identity), with a test per tier. The first commit runs through pre-commit, so
 `make ci-quick` (devkit-check, toolchain-check, docs-check, release-check, workflows-check,
-own-commit-check for Python, then lint/format/typecheck) has passed on it before you see it.
+layer-check outside rust and swift-app, own-commit-check for Python, then lint/format/typecheck) has passed on it before you see it.
 `tests/new_contract.bats` holds every stack to this.
 
 Then, by hand, in this order:
@@ -144,6 +147,7 @@ GATE_JOBS_BACKEND="unit ci-unit-backend|db ci-db TEST_DB_PORT=$DB_PORT"
 GATE_JOBS_FRONTEND="unit-fe ci-unit-frontend"
 GATE_JOBS_IMAGE="image ci-image CI_IMAGE=$IMAGE|smoke ci-smoke CI_IMAGE=$IMAGE"
 GATE_JOBS_E2E="e2e ci-e2e"
+GATE_JOBS_METRICS="metrics ci-metrics"                 # optional; always the last job
 GATE_IMAGE_PATHS='^(Dockerfile|uv\.lock)$'             # paths that also run the image group
 gate_plan() { devkit_default_gate_plan; }
 gate_plan_extra() { ...; }                             # optional: the repo's own rules
@@ -153,9 +157,14 @@ Each changed path gets one area from the table the hooks use (docs, backend, fro
 native, tooling, other). Docs-only runs docs; tooling (`devkit/`, `.devkit-rev`, hooks.conf,
 `.githooks/`; a devkit sync) runs quick, plus the image group when `boot_image.sh` or
 `contract_probe.sh` changed; native-only runs nothing; backend and frontend run their groups
-plus quick and e2e; other runs everything. `GATE_AREAS_<GROUP>="..."` overrides a group's
-areas. The table and defaults: the `_paths_lib.sh` header. A plan may still be hand-written
-against the skeleton's helpers, reading `GATE_AREAS` and `GATE_HAS_<AREA>`.
+plus quick and e2e; other runs everything (`docs/metrics/ratchet.json` and
+`scripts/ci/metrics.conf` are other, so a bounds-only PR meets the ratchet and its label).
+The metrics group runs for backend, frontend and other, after `gate_plan_extra`, so
+`ci-metrics` sees every earlier job's seconds; when the PR
+carries the `metrics-rebaseline` label (read through `gh`, fail-closed) its jobs get
+`METRICS_REBASELINE=1`. `GATE_AREAS_<GROUP>="..."` overrides a group's areas. The table and
+defaults: the `_paths_lib.sh` header. A plan may still be hand-written against the
+skeleton's helpers, reading `GATE_AREAS` and `GATE_HAS_<AREA>`.
 
 Gate environment (full contract in the script header):
 
@@ -166,6 +175,8 @@ Gate environment (full contract in the script header):
 | `GATE_JOB_BUDGET_MINUTES` | `5` | Per-job budget (owner directive 2026-10-13). An over-budget job runs to completion, then `GATE <job> OVERBUDGET (<n>s > <b>s)` and VERDICT FAIL naming it. Decimals allowed; `0` disables. |
 | `GATE_BUDGET_MINUTES` | `10` | Whole-gate budget, counted once a slot is held: `GATE total OVERBUDGET (...)` and FAIL. |
 | `GATE_BUDGET_ENFORCE` | `1` | `0` keeps the OVERBUDGET lines (plus one `GATE note`) but the verdict PASSes: for a queue adopting budgets before its suites fit. |
+| `GATE_LOAD_MAX` | unset (no check) | Before taking a slot, wait while the 1- **or** 5-minute load average exceeds this, one `GATE waiting: load 1m=<x> 5m=<y> > <max>` line per minute. Lanes use `12`. Never fails a gate. |
+| `GATE_LOAD_WAIT_MINUTES` | `30` | After this long over `GATE_LOAD_MAX`, the gate proceeds anyway with a `GATE note`. |
 | `~/.config/devkit/gate.env` | absent | Per-machine defaults for every `GATE_*` row above (`KEY=value` lines, honours `XDG_CONFIG_HOME`); an explicit environment variable wins; any other line is exit 2. The queues and linux-box do not create this file. |
 
 ## Remote gate
@@ -187,7 +198,9 @@ stops the host's gate through its own cleanup (status `error`). Contract: the sc
 
 A repo whose gate can only run here puts a literal `GATE_REMOTE=0` line in its plan (the
 swift-app template does: on Linux its Xcode jobs skip and the verdict would pass untested
-Swift). Nothing else in a repo changes; the host's own `gate.env` sets its `GATE_SLOTS`.
+Swift). Nothing else in a repo changes; the host's own `gate.env` sets its `GATE_SLOTS` and
+`GATE_LOAD_MAX`. On an ssh failure (exit 2, no `VERDICT`), `remote_gate.sh` says whether the host
+was unreachable (off its LAN, VPN or Tailscale) or refused the key, from ssh's last error line.
 
 **Switching finplat, Orbit and locus to linux-box.** Each repo's `gate` target becomes the
 one line above (after its `make devkit-sync`), then on the Mac:
@@ -213,32 +226,76 @@ Real-run checklist (owner, once):
 
 ## Metrics ratchet (ci-metrics)
 
-Collectors write `build/metrics/<collector>.json` in the `docs/metrics-keys.md` shape. Copy
-`devkit/templates/metrics/ratchet.json` to `docs/metrics/ratchet.json`, keep the keys you
-collect, run `make metrics-snapshot` and fill the bounds with `metrics_ratchet.py rebaseline`.
+A repo declares its collectors in `scripts/ci/metrics.conf`, one per line, and its Makefile
+holds three one-line targets. Everything else (which collectors a PR runs, the merge, the
+comparison with main, the label) is devkit's.
 
 ```make
-METRICS_RATCHET := python3 -I devkit/bin/metrics_ratchet.py
-METRICS_BOUNDS  := docs/metrics/ratchet.json
-metrics-snapshot: ## run the collectors; build/metrics.json is the report-only snapshot
-	rm -rf build/metrics && mkdir -p build/metrics
-	# <repo collectors here, each writing build/metrics/<name>.json>
-	$(METRICS_RATCHET) merge --out build/metrics.json build/metrics/*.json
-ci-metrics: metrics-snapshot ## gate job: never worse than main (needs origin/main fetched)
-	$(METRICS_RATCHET) check --snapshot build/metrics.json --bounds $(METRICS_BOUNDS) $(if $(METRICS_REBASELINE),--rebaseline-ok)
-metrics-tighten: metrics-snapshot ## lock in BETTER numbers; commit the bounds in the same PR
-	$(METRICS_RATCHET) tighten --snapshot build/metrics.json --bounds $(METRICS_BOUNDS)
+ci-metrics:       ## gate job: no metric worse than main
+	devkit/bin/metrics_collect.sh check
+metrics-snapshot: ## run the collectors; build/metrics.json is the report
+	devkit/bin/metrics_collect.sh snapshot
+metrics-tighten:  ## lock in BETTER numbers; commit docs/metrics/ratchet.json in the same PR
+	devkit/bin/metrics_collect.sh tighten
 ```
 
-In `scripts/ci/gate_plan.sh` (the label is read fail-closed, from the invoking checkout):
-
-```bash
-if pr_has_label metrics-rebaseline; then job metrics ci-metrics METRICS_REBASELINE=1
-else job metrics ci-metrics; fi
+```sh
+# scripts/ci/metrics.conf: <name> <area> <command...>   (# comments and blank lines ignored)
+py-backend  backend  uv run --frozen --project backend python devkit/metrics/python.py --root backend --src app --scope backend --mccabe --cycles --out build/metrics/py-backend.json
+cov-backend job:unit-backend python3 -I devkit/metrics/coverage.py --scope backend --coverage-json backend/build/coverage.json --out build/metrics/cov-backend.json
+dup         repo     node devkit/metrics/jscpd.mjs --scope repo --out build/metrics/dup.json backend/app frontend/src
 ```
 
-An Actions caller needs `git fetch --depth=1 origin main` first: an unresolvable base ref
-fails the check rather than skipping the comparison.
+`<name>` names the output file `build/metrics/<name>.json` and is recorded as each key's
+`source`. `<area>` is the fleet area (docs, backend, frontend, native, tooling, other) whose
+paths can move the collector's numbers, `repo` for a whole-repo tool, or `job:<gate job>`
+for a collector that reads that gate job's output (coverage from `unit-backend`) rather than
+the tree. The command runs with
+`bash -c` from the repo root under the repo's own dev dependencies (`uv run …`,
+`node_modules/.bin/…`) and must write its file in the `docs/metrics-keys.md` shape. The shared
+collectors in `devkit/metrics/` (`python.py`, `ts.mjs`, `jscpd.mjs`, `coverage.py`; CLIs in the
+Architecture table, keys in `docs/metrics-keys.md`) cover the fleet's stacks, so one
+implementation measures a thing fleet-wide (owner decision B, 2026-10-13); a repo-specific
+collector (finplat's reinvention registry) is any script that writes the file.
+
+In the gate, `ci-metrics` is the last job (`GATE_JOBS_METRICS`, above). An area collector runs
+when a changed path is in its area or when an `other` path changed; `repo` collectors always
+run; `tooling` widens nothing (devkit's collectors and ratchet classify as `other`, so a
+devkit sync that changes one still runs everything, and a tooling-only PR runs no tier); a
+`job:<name>` collector runs only when `build/metrics/gate.json` records that job's seconds,
+which `local_gate.sh` writes after each job, so exactly when the job ran in this gate (a job
+the plan skipped, for any reason, leaves no entry). The rest are skipped, and the snapshot
+says so: `check` reports their tracked keys as `SKIPPED (collector <name> did not run)`
+rather than failing. Why: a frontend-only PR cannot have changed backend coverage, and the
+backend unit job that produces that coverage did not run either. Outside the gate every
+collector runs, on the pinned toolchain (`toolchain_path`, as the gate and the hooks).
+
+**Coverage** is produced by the unit tier, not by a collector: each `ci-unit-<area>` runs with
+coverage on and writes the tool's report (coverage.py JSON, an istanbul summary);
+`devkit/metrics/coverage.py` converts it to `coverage.<area>.lines|branches`, declared with
+`job:<the tier's gate job>` so it runs only when that job ran. Outside the gate
+a missing report fails the collector with "run make ci-unit-<area> first". A tier whose budget
+coverage would break says so in its PR rather than dropping the budget.
+
+**Never track `gate.*`, `tier.*` or `tests.*`** in `ratchet.json`: jobs and tiers are
+area-scoped, so those keys are absent on narrow PRs, and the seconds are noisy. They stay in
+the snapshot as untracked, for the report.
+
+**Gate-only.** Collectors need the dev dependencies and take tens of seconds (target under
+60 s; the job budget is 5 min), so `ci-metrics` is neither a hook step nor an Actions job.
+`check` reads main's bounds through `git show origin/main:docs/metrics/ratchet.json`; an
+unresolvable base ref is an error, never "no guard".
+
+Adoption: start `docs/metrics/ratchet.json` from `{}` (or from
+`devkit/templates/metrics/ratchet.json`, every shared-collector key at `null`), write
+`scripts/ci/metrics.conf`, then `devkit/bin/metrics_collect.sh rebaseline` fills every bound
+from today's numbers, seeds every untracked key the collectors emit (never `gate.*`,
+`tier.*`, `tests.*`; a repo-specific domain is added by hand with its direction) and records
+each key's collector. Commit both files; the devkit-sync commit itself needs no change, the
+adoption PR carries the attribution trailer. From then on a PR
+that improves a number runs `make metrics-tighten` and commits the bounds; a PR that must
+loosen one (a tool knob moved the numbers) produces the looser file with `rebaseline` and
+carries the `metrics-rebaseline` label.
 
 ## Rules
 

@@ -1,13 +1,86 @@
 {
-  "bundle.frontend.kb_login": {"direction": "lower", "bound": null},
-  "bundle.frontend.kb_total": {"direction": "lower", "bound": null},
-  "complexity.backend.cognitive_max": {"direction": "lower", "bound": null},
-  "complexity.frontend.cognitive_max": {"direction": "lower", "bound": null},
-  "coupling.backend.cycles": {"direction": "lower", "bound": null},
-  "coupling.frontend.cycles": {"direction": "lower", "bound": null},
-  "coverage.backend.lines": {"direction": "higher", "bound": null},
-  "coverage.frontend.lines": {"direction": "higher", "bound": null},
-  "dead.backend.vulture": {"direction": "lower", "bound": null},
-  "dead.frontend.knip_exports": {"direction": "lower", "bound": null},
-  "duplication.repo.jscpd_percent": {"direction": "lower", "bound": null}
+  "bundle.frontend.kb_entry": {
+    "direction": "lower",
+    "bound": null
+  },
+  "bundle.frontend.kb_total": {
+    "direction": "lower",
+    "bound": null
+  },
+  "complexity.backend.cognitive_max": {
+    "direction": "lower",
+    "bound": null
+  },
+  "complexity.backend.cognitive_over_15": {
+    "direction": "lower",
+    "bound": null
+  },
+  "complexity.backend.mccabe_max": {
+    "direction": "lower",
+    "bound": null
+  },
+  "complexity.backend.mccabe_over_10": {
+    "direction": "lower",
+    "bound": null
+  },
+  "complexity.frontend.cognitive_max": {
+    "direction": "lower",
+    "bound": null
+  },
+  "complexity.frontend.cognitive_over_15": {
+    "direction": "lower",
+    "bound": null
+  },
+  "complexity.frontend.cyclomatic_max": {
+    "direction": "lower",
+    "bound": null
+  },
+  "coupling.backend.cycles": {
+    "direction": "lower",
+    "bound": null
+  },
+  "coupling.frontend.cycles": {
+    "direction": "lower",
+    "bound": null
+  },
+  "coverage.backend.branches": {
+    "direction": "higher",
+    "bound": null
+  },
+  "coverage.backend.lines": {
+    "direction": "higher",
+    "bound": null
+  },
+  "coverage.frontend.branches": {
+    "direction": "higher",
+    "bound": null
+  },
+  "coverage.frontend.lines": {
+    "direction": "higher",
+    "bound": null
+  },
+  "dead.backend.vulture": {
+    "direction": "lower",
+    "bound": null
+  },
+  "dead.frontend.knip_deps": {
+    "direction": "lower",
+    "bound": null
+  },
+  "dead.frontend.knip_exports": {
+    "direction": "lower",
+    "bound": null
+  },
+  "dead.frontend.knip_files": {
+    "direction": "lower",
+    "bound": null
+  },
+  "duplication.repo.clones": {
+    "direction": "lower",
+    "bound": null
+  },
+  "duplication.repo.jscpd_percent": {
+    "direction": "lower",
+    "bound": null
+  }
 }

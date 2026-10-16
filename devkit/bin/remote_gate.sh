@@ -35,6 +35,12 @@
 #
 # Exit: the remote gate's (0 pass, 1 fail, 2 usage or environment, 130 interrupted); 2 when ssh
 # itself fails (255), with no VERDICT line, like local_gate.sh's environment errors.
+#
+# ssh failures: ssh's stderr is teed to a file (it still streams), and on 255 its last line says
+# which hint to print (ssh_failure_hint): unreachable (timeout, no route, DNS, refused) names the
+# host and the networks it is reachable from; `Permission denied` asks about the key; anything
+# else repeats ssh's own error. One key hint for every 255 sent three lanes chasing keys when
+# the host was simply off-LAN (2026-10-16).
 set -uo pipefail
 
 usage() { echo "usage: $0 <pr-number> [--no-post]"; }
@@ -140,12 +146,15 @@ SSH_OPTS=(${USER_SSH_OPTS[@]+"${USER_SSH_OPTS[@]}"} -T -o BatchMode=yes -o Serve
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/remote_gate.XXXXXX") || exit 2
 mkfifo "$TMP/stdin" || exit 2
+mkfifo "$TMP/stderr" || exit 2
 KEEPER=""
 SSH_PID=""
+TEE_PID=""
 # shellcheck disable=SC2329  # invoked by the EXIT trap
 cleanup() {
   [ -n "$KEEPER" ] && kill "$KEEPER" 2>/dev/null
   [ -n "$SSH_PID" ] && kill "$SSH_PID" 2>/dev/null
+  [ -n "$TEE_PID" ] && kill "$TEE_PID" 2>/dev/null
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -167,16 +176,44 @@ trap interrupted INT TERM
 # exactly as long as this script lives, whatever stdin `make gate` itself was given.
 sleep 2147483647 >"$TMP/stdin" &
 KEEPER=$!
+# The host's stderr (and ssh's own) still streams to this stderr; the copy is for the hint below.
+# A fifo and a waited-for tee, not `2> >(tee ...)`: bash 3.2 cannot wait for a process
+# substitution, so the copy could be read before ssh's last line reached it.
+tee "$TMP/stderr.log" <"$TMP/stderr" >&2 &
+TEE_PID=$!
+
+# ssh_failure_hint <host> <ssh's last stderr line>: what an exit 255 most likely means. Only the
+# last line: ssh prints its own error last, and the host's gate output above it may well
+# contain "Connection refused" from a test.
+ssh_failure_hint() {
+  case "$2" in
+    *"Connection timed out"* | *"No route to host"* | *"Could not resolve"* | *"Connection refused"* \
+      | *"Network is unreachable"* | *"Operation timed out"*)
+      echo "remote_gate: cannot reach the gate host $1 ($2)."
+      echo "remote_gate: it is reachable only from its LAN, a VPN that routes its subnet (check split tunnelling), or Tailscale; or gate here with GATE_REMOTE=0."
+      ;;
+    *"Permission denied"*)
+      echo "remote_gate: $1 refused this machine's key ($2); is it in ~/.ssh/authorized_keys there? (BatchMode never prompts; GATE_REMOTE_SSH_OPTS=-i <key> picks one)"
+      ;;
+    *)
+      echo "remote_gate: ssh to $1 failed (exit 255): ${2:-no error output}"
+      ;;
+  esac
+}
+
 echo "remote_gate: gating $SLUG#$PR on $HOST" >&2
 # Backgrounded so a signal reaches the trap now, not after ssh returns.
 # shellcheck disable=SC2029  # REMOTE_CMD is built here on purpose; the host sees it verbatim
-ssh "${SSH_OPTS[@]}" "$HOST" "$REMOTE_CMD" <"$TMP/stdin" &
+ssh "${SSH_OPTS[@]}" "$HOST" "$REMOTE_CMD" <"$TMP/stdin" 2>"$TMP/stderr" &
 SSH_PID=$!
 wait "$SSH_PID"
 rc=$?
 SSH_PID=""
+wait "$TEE_PID"
+TEE_PID=""
 if [ "$rc" = 255 ]; then
-  echo "remote_gate: ssh to $HOST failed (exit 255); is this machine's key authorized there?" >&2
+  last=$(sed '/^[[:space:]]*$/d' "$TMP/stderr.log" | tail -n 1 | tr -d '\r')
+  ssh_failure_hint "$HOST" "$last" >&2
   exit 2
 fi
 exit "$rc"
