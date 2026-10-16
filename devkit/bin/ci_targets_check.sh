@@ -14,7 +14,7 @@
 #     CI_TARGETS_CHECK_TODAY=YYYY-MM-DD overrides today (tests).
 # Renaming a target also means its callers: scripts/ci/gate_plan.sh, hooks.conf, workflows,
 # AGENTS.md and README. devkit's hook scoping (hook_steps.sh) already matches both orders.
-# No root Makefile (devkit itself), nothing to check.
+# No root Makefile, nothing to check.
 # Output: one `ci-targets-check: …` line per target on stderr, then `ci-targets-check: ok` on
 # stdout or `ci-targets-check: FAIL` on stderr. Exit 0 ok, 1 fail.
 # Usage: devkit/bin/ci_targets_check.sh [repo-root]      (run by toolchain_check.sh, so ci-quick)

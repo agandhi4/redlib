@@ -9,7 +9,7 @@ Design: `~/projects/solo/standardization/PLAN.md` §1 (layer L5) and `docs/decis
 ## Getting started
 
 - A new repo: `devkit-new.sh`, below in "New project". It passes every guard on its first commit.
-- An existing repo: "Vendor into a repo (once)", then `make devkit-sync` for every update.
+- An existing repo: "Vendor into a repo (once)", then its `devkit-sync` target for every update.
 - Changing devkit itself: "Commands" below, and [AGENTS.md](AGENTS.md) for the invariants.
 
 ## Architecture
@@ -24,7 +24,7 @@ What each path is; [AGENTS.md](AGENTS.md) holds the invariants that tie them tog
 | `bin/remote_gate.sh` | Runs the repo's gate on the gate host over ssh (clone if absent, reset to `origin/main`, `local_gate.sh` there); same output, exit code and `local-gate` status. |
 | `bin/devkit-sync.sh` | Fetch upstream, replace `devkit/` with its tree filtered to `VENDOR_PATHS`, record `<commit> <filtered tree>` in `.devkit-rev`, commit. Conflict-free by construction. `--stage` leaves it in the index for the caller's own commit. |
 | `bin/devkit-new.sh`, `templates/new/` | `devkit new <name> --stack <stack> [--dir <parent>] [--no-image]`: a new repo that passes every guard on its first commit, which is made through the hooks. Stacks: `python-fastapi`, `node-service`, `rust`, `next-vercel`, `swift-app`; each is a directory under `templates/new/stacks/` (how to add one: `templates/new/README.md`). See "New project". |
-| `bin/devkit-check.sh` | Offline guard for `ci-quick` and pre-commit: the staged `devkit/` tree equals the staged `.devkit-rev` (both read from the index). Fails on in-repo edits, and on a tree holding paths outside its own `VENDOR_PATHS` (vendored whole by a pre-manifest sync: rerun `make devkit-sync`). |
+| `bin/devkit-check.sh` | Offline guard for `ci-quick` and pre-commit: the staged `devkit/` tree equals the staged `.devkit-rev` (both read from the index). Fails on in-repo edits, and on a tree holding paths outside its own `VENDOR_PATHS` (vendored whole by a pre-manifest sync: rerun the repo's `devkit-sync`). |
 | `bin/node_toolchain.sh` | Provides the exact Node in the repo's `.nvmrc`: uses PATH's node when it matches, else a checksum-verified install cached under `~/.local/share/devkit/node`. The gate and the hooks call it through `toolchain_path.sh`. |
 | `bin/rust_toolchain.sh` | Provides the exact Rust in `rust-toolchain.toml` (or `rust-toolchain`): uses PATH's cargo when it matches, else installs through rustup (PATH's, or a private one bootstrapped under `~/.local/share/devkit/rust`) and prints the toolchain's sysroot bin, so callers export PATH only. `--declared` prints the version. The gate and the hooks call it through `toolchain_path.sh`. |
 | `bin/toolchain_path.sh` | Sourced: `toolchain_path <tree>` puts the tree's pinned Node (`.nvmrc`) and Rust (`rust-toolchain.toml`) first on PATH through the two scripts above, or fails naming the pin. The one provisioning path for `local_gate.sh` (merged worktree) and `hook_steps.sh` (the hook's checkout), so a hook runs the gate's node and cargo on a machine with none. Python needs nothing: uv reads `.python-version`. |
@@ -38,7 +38,7 @@ What each path is; [AGENTS.md](AGENTS.md) holds the invariants that tie them tog
 | `bin/release_check.sh` | Guard for `ci-quick`: the image is the only source of `APP_VERSION`. Dockerfile final stage has the ARG, ENV and OCI `image.version` LABEL; no compose file sets it under `environment:`; every workflow step that pushes an image passes it as a build arg. Every Dockerfile (root and one level down): a non-root final `USER` may `EXPOSE` and health-check only ports >= 1024 (the NAS kernel refuses a privileged bind; Orbit was down 16 h on 2026-10-13). |
 | `bin/workflows_check.sh`, `bin/_workflows_lib.sh` | Guard for `ci-quick`: Actions follows the minutes and supply-chain rules. Every `uses:` is a commit SHA with a `# vX.Y.Z` comment (devkit reusable workflows may float on `@main`). A `pull_request` workflow runs one job, skips drafts, cancels superseded runs and ignores `**.md`; more jobs need a top-level `# workflows-check: multi-job ok: <reason>`. A job pushing an image on main runs with `cancel-in-progress: false`. The lib's push-step detection is shared with `release_check.sh`. |
 | `bin/playwright_browsers.sh` | Installs the Playwright browsers the lockfile pins (default `chromium`) with the lockfile's runner and the `.nvmrc` Node; idempotent via Playwright's cache. `--with-deps` is honoured on Linux, ignored on macOS. |
-| `bin/docs_check.sh` | Guard for `ci-quick`: every `AGENTS.md` is the real file with `CLAUDE.md` symlinked to it, size caps (30 KB root, 16 KB nested, shrink-only allowlist in `scripts/ci/docs_oversize.txt`), `docs/decisions.md` exists, no retired-tool words, and the standard docs set ("Standard docs" below: required files and README sections, dated decisions entries, `make` targets and relative links that resolve, `docs/decisions.md merge=union` in `.gitattributes`; warnings until their date, then failures); repo extras in `scripts/ci/docs_rules.sh`. |
+| `bin/docs_check.sh` | Guard for `ci-quick`: every `AGENTS.md` is the real file with `CLAUDE.md` symlinked to it, size caps (30 KB root, 16 KB nested; the shrink-only allowlist in `scripts/ci/docs_oversize.txt` ends 2026-11-15), `docs/decisions.md` exists, no retired-tool words, and the standard docs set ("Standard docs" below: required files and README sections, the root AGENTS.md's H2 list, the fixed `docs/` set with dated `docs/reports/`, no CONTRIBUTING.md, dated decisions entries, `make` targets and relative links that resolve, `docs/decisions.md merge=union` in `.gitattributes`; warnings until their date, then failures); repo extras in `scripts/ci/docs_rules.sh`. `--report` prints the numbers (sizes vs caps, allowances, docs outside the set, H2s outside the list) for trims and the monthly audit. |
 | `bin/quiet_run.sh`, `bin/hook_steps.sh`, `bin/push_ranges.sh`, `bin/hooks_check.sh`, `templates/githooks/` | Git hooks: one line per step, 40-line tail on failure; per-repo steps in `scripts/ci/hooks.conf`, scoped by changed paths by default from one fleet layout table (docs, backend, frontend, native, tooling, other: `devkit_classify_path` in `_paths_lib.sh`, which the gate uses too; tooling runs every hook step, like other) and each step's target name, so a docs-only change runs docs-check alone, a frontend-only one skips backend steps and a native-only one (ios/, OrbitAgent/) runs nothing, with `:unless=<globs>`, `:only=<globs>` or `:always` per step only where a repo's layout deviates; `hooks_check` asserts `core.hooksPath=.githooks` (a tool install silently repointed finplat's for two months) and `--fix` self-heals it and adds the decisions-log union line to `.gitattributes`; it rejects a malformed step override; LFS chained when the repo uses it. Before the first step the pinned Node and Rust go first on PATH, as in the gate (`toolchain_path.sh`), so `hooks.conf` lists steps only. A passing cargo step's summary sums every `test result:` line (the last one is the doctests). |
 | `bin/tier_guard.sh` | `<tier> --budget <s> [--floor <runner>=<min>]... -- <cmd...>`: one test tier under a wall-clock budget (the whole command's wall time; it fails over budget even when every test passed, `TIER_BUDGET_ENFORCE=0` only reports) and per-runner floors on the tests that RAN (skipped ones do not count), read from the runner's own summary line: `pytest`, `vitest`, `playwright`, `cargo`. Streams the command's output, exits with its code, prints `TIER <tier>: …` / `FAIL` / `FLOOR` / `OVERBUDGET` lines and writes `build/metrics/tier-<tier>.json` at the git top level (`tier.<tier>.seconds`, `tests.<tier>.<runner>`). Every `devkit new` stack's test tiers run through it. |
 | `bin/metrics_collect.sh` | `<snapshot\|check\|tighten\|rebaseline>`: the `ci-metrics` mechanism. Reads `scripts/ci/metrics.conf` (`<name> <area> <command...>`), runs each collector from the repo root into `build/metrics/<name>.json`, skips those whose area no changed path touched (in the gate; `tooling`/`other` and `repo` collectors run regardless), merges with the gate's and tiers' files, then runs the ratchet. A repo's Makefile holds three one-line targets and nothing else. "Metrics ratchet" below. |
@@ -46,7 +46,7 @@ What each path is; [AGENTS.md](AGENTS.md) holds the invariants that tie them tog
 | `bin/metrics_ratchet.py` | The "never worse than main" gate. `check` holds a snapshot to `docs/metrics/ratchet.json` and that file to main's copy (`git show origin/main:…`), so a PR cannot loosen its own bounds; `tighten` locks in BETTER numbers in the improving PR; `merge` joins `build/metrics/*.json` into one snapshot that records each key's collector and the collectors skipped, so a key whose collector did not run is SKIPPED, not a failure. Loosening needs the fail-closed `metrics-rebaseline` PR label. |
 | `templates/metrics/ratchet.json`, `docs/metrics-keys.md` | Starter bounds (all `null` until `rebaseline` fills them, so `check` refuses a raw copy; `{}` is the other valid start) and the flat `<domain>.<scope>.<stat>` key shape every collector emits. |
 | `bin/own_commit_check.py` | Transaction-boundary guard: AST scan fails a raw `.commit()` on a session the function did not open itself (`with … as db` / `db = Session()`), and pins every `commit_now(…, reason=…)` call to a shrink-only `path::qualname` allow-list. Prints `own_commit_allowlist_entries=<n>` for `metrics_ratchet.py` (direction lower). Opener regex and excludes are per repo. |
-| `bin/layer_check.py` | Dependency-direction guard for `ci-quick` (`make layer-check`): the repo's `scripts/ci/layers.conf` declares, per source tree (`[section]`, the ratchet scope), its layers bottom-first by path glob, plus `peer` (same rank, neither imports the other), `entry` (composition root), `leaf` (imports nothing of ours), sanctioned `allow` edges, `deny` for a skipped layer and the shrink-only `known` violations. An import from a lower rank to a higher one fails, as does a file in no layer or a `known` line that is no longer refused. Python reads `metrics/python.py`'s runtime import graph (the one `coupling.<scope>.cycles` counts); TypeScript reads import statements (aliases from the conf, type-only imports erased). Prints `layer_violations=<n>`; `--metrics-out` writes `coupling.<section>.layer_violations` (direction lower), so a scaffold's `metrics.conf` runs it as the `layers` collector. Stdlib only. |
+| `bin/layer_check.py` | Dependency-direction guard for `ci-quick` (the consumer's `layer-check` target): the repo's `scripts/ci/layers.conf` declares, per source tree (`[section]`, the ratchet scope), its layers bottom-first by path glob, plus `peer` (same rank, neither imports the other), `entry` (composition root), `leaf` (imports nothing of ours), sanctioned `allow` edges, `deny` for a skipped layer and the shrink-only `known` violations. An import from a lower rank to a higher one fails, as does a file in no layer or a `known` line that is no longer refused. Python reads `metrics/python.py`'s runtime import graph (the one `coupling.<scope>.cycles` counts); TypeScript reads import statements (aliases from the conf, type-only imports erased). Prints `layer_violations=<n>`; `--metrics-out` writes `coupling.<section>.layer_violations` (direction lower), so a scaffold's `metrics.conf` runs it as the `layers` collector. Stdlib only. |
 | `bin/dead_alert_audit.py` | Monthly review of vmalert rules (not a gate, exit 0): statically flags missing `severity`/`runbook`, `outcome` values outside `success|failure`, names duplicated across files; with `--vm-url` asks VictoriaMetrics which alerts never fired and which selectors matched no series in `--since` (default 30d). One `dead-alert <high|medium|low> <alert> <reason>` line per finding. |
 | `bin/monthly_audit.sh` | Monthly fleet audit, run from this checkout (not vendored). Per active vendoring repo, in a fresh shallow clone: the guards `ci-quick` does not already reach, `.devkit-rev` skew, the ratchet, and a re-invention diff (`reinvent <repo> <path> <kind> <devkit equivalent>`; naming the file under AGENTS.md "Convention deltas" silences it). Fleet: labels/settings dry-runs, `dead_alert_audit.py`, gate-ledger digest. Writes `report.md`, `summary.tsv`, `findings.json`; one read-only `claude -p` proposes ≤ 3 structural findings, which the script files as `fleet-audit` issues (none while 3 are open; off for the first two runs) and PRs the report to homelab `docs/audits/`. Kill switch `~/.config/devkit/audit.off`. Schedule (owner step, install by hand): fill `__DEVKIT__`/`__HOME__` in `templates/launchd/com.agandhi4.devkit.monthly-audit.plist`, `mkdir -p ~/Library/Logs/devkit`, `cp` it to `~/Library/LaunchAgents/`, then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agandhi4.devkit.monthly-audit.plist`. |
 | `github/` | Fleet operations run from this checkout, not vendored: `labels.json` + `labels_sync.sh` (idempotent; `--prune` to delete), `repos.json` + `repo_settings.sh` (squash-only, PR_TITLE/PR_BODY, delete-branch; auto-merge only on public repos). |
@@ -70,7 +70,7 @@ provisions the pinned toolchain itself; for `swift-app`, Xcode, plus `xcodegen` 
 `exit 2` stubs that say so); `scripts/ci/gate_plan.sh`; `.githooks/` + `scripts/ci/hooks.conf`
 (pre-commit `ci-quick`, pre-push `ci-unit`; `ci-lint-swift` for swift-app, whose tests take
 minutes); `.github/workflows/quick-check.yml` calling the reusable workflow (swift-app's runs
-`make ci-guards`, the only tier that runs off a Mac), and for image stacks `publish.yml`
+the `ci-guards` target, the only tier that runs off a Mac), and for image stacks `publish.yml`
 (build, `ci-smoke`, push `sha-<7>` + `latest`, ship tag, never cancelled) with a Dockerfile carrying the `APP_VERSION` trio;
 `renovate.json` on the shared preset; `.claude/settings.json` (claude-kit plugins); `AGENTS.md`
 (the project delta only: Stack + `Conventions:`, Architecture placeholder, Convention deltas,
@@ -101,7 +101,7 @@ Then, by hand, in this order:
 ~/projects/solo/devkit/bin/devkit-sync.sh     # creates devkit/ from upstream main, writes .devkit-rev, commits
 ```
 
-Updates are `make devkit-sync`. The sync fetches upstream and replaces `devkit/` wholesale
+Updates are the consumer's `devkit-sync` target. The sync fetches upstream and replaces `devkit/` wholesale
 (`git read-tree`), so it never conflicts; `devkit-check` compares the tree hash. There is no
 `git subtree` involved any more: squash merges drop the trailers subtree needs.
 
@@ -203,7 +203,7 @@ Swift). Nothing else in a repo changes; the host's own `gate.env` sets its `GATE
 was unreachable (off its LAN, VPN or Tailscale) or refused the key, from ssh's last error line.
 
 **Switching finplat, Orbit and locus to linux-box.** Each repo's `gate` target becomes the
-one line above (after its `make devkit-sync`), then on the Mac:
+one line above (after its `devkit-sync`), then on the Mac:
 
 ```sh
 mkdir -p ~/.config/devkit
@@ -293,14 +293,14 @@ from today's numbers, seeds every untracked key the collectors emit (never `gate
 `tier.*`, `tests.*`; a repo-specific domain is added by hand with its direction) and records
 each key's collector. Commit both files; the devkit-sync commit itself needs no change, the
 adoption PR carries the attribution trailer. From then on a PR
-that improves a number runs `make metrics-tighten` and commits the bounds; a PR that must
+that improves a number runs the repo's `metrics-tighten` target and commits the bounds; a PR that must
 loosen one (a tool knob moved the numbers) produces the looser file with `rebaseline` and
 carries the `metrics-rebaseline` label.
 
 ## Rules
 
 - Never edit `devkit/` inside a consuming repo; `devkit-check` fails quick-check. Change it
-  here, merge, then `make devkit-sync` in each repo.
+  here, merge, then `devkit-sync` in each repo.
 - Output contracts (`GATE …`, `VERDICT …`, `.devkit-rev` format) are APIs: the merge queues,
   `worker.py` and the Mac stand-in parse them. Changing one is a coordinated change.
 - Scripts run on macOS bash 3.2 and GNU bash, with BSD and GNU coreutils. shellcheck clean.
@@ -310,42 +310,54 @@ carries the `metrics-rebaseline` label.
 Every repo carries the same docs set, and `make docs-check` (in `ci-quick`) keeps it present and
 honest. `devkit new` emits all of it from `templates/new/common/`. The new rules warn until
 2026-11-15 and fail from then; the dates live at the top of `bin/docs_check.sh`.
+`docs_check.sh --report` prints where a repo stands (the monthly audit records it), and
+`docs_check.sh --fix` does the mechanical half on a clean tree: report-shaped or unlinked one-off
+docs move to `docs/reports/<first-commit-date>-<slug>.md` with their links rewritten, living docs
+get their README link, old operations names are renamed, the contributors line is added; what
+needs a reader (oversize AGENTS.md, non-standard sections, CONTRIBUTING.md) is listed as judgment
+items. One reviewable diff, then `docs_check.sh --report` again.
 
-Required:
+AGENTS.md is in every agent session's context, so it stays a navigation-sized map and reference
+material lives in `docs/`, which nothing loads unprompted. The caps are absolute from 2026-11-15:
+root `AGENTS.md` ≤ 30 KB, any other ≤ 16 KB (`docs_oversize.txt` allowances end that day).
 
 | File | Holds | Checked |
 |---|---|---|
-| `README.md` | For a human arriving cold. One intro paragraph, then five H2 sections (aliases in `README_SECTIONS`): **Getting started** (install, run locally), **Commands** (the everyday `make` targets), **Architecture** (a short map, linking the full one), **Deploy** (how a change reaches users; "not deployed" is an answer), **Documentation** (an index of the other docs). | sections present; every `make <target>` it names exists |
-| `AGENTS.md` + `CLAUDE.md -> AGENTS.md` | For every agent session: rules, commands, `## Convention deltas`. | pair shape, size cap, retired tools, the deltas heading, `make` targets |
+| `README.md` | For a human arriving cold. One intro paragraph, then five H2 sections (aliases in `README_SECTIONS`): **Getting started** (install, run locally), **Commands** (the everyday `make` targets), **Architecture** (a short map, linking the full one), **Deploy** (how a change reaches users; "not deployed" is an answer), **Documentation** (an index of the other docs, with the line "Contributors and agents: see AGENTS.md"). | sections present; the contributors line; every `make <target>` it names exists |
+| `AGENTS.md` + `CLAUDE.md -> AGENTS.md` | For every agent session: rules, commands, deviations. The root file's H2s come only from: **Stack**, **Architecture**, **Where things live** (or Navigation, TL;DR), **Convention deltas**, **Commands**, **CI and the PR gate**, **Workflow**, **Deliberate exceptions**, **Documentation**. Stack, Convention deltas, Commands and Workflow are required. A Conventions, Guidelines, Patterns or Best practices section restates the convention files: keep only the deltas. It is also the contributor guide: no `CONTRIBUTING.md`. | pair shape, size cap, retired tools, the H2 list, `make` targets, no links into `docs/reports/` |
 | `docs/decisions.md` | Dated entries, newest last: `## YYYY-MM-DD — title`, then Why / Decision / Consequence lines (`**Why:**`, `**Why**:` or `Why:`), at most eight lines. The root `.gitattributes` gives it `merge=union`, so two PRs that each append an entry rebase without a conflict (`hooks_check.sh --fix` adds the line). | exists; every H2 dated, in order, all three lines; the union line |
 | `docs/architecture.md`, or `## Architecture` in the root `AGENTS.md` | Components, data flow, runtime. One home: a repo whose AGENTS.md already maps itself needs no second copy. | one of the two exists |
+| `docs/operations.md` (when there is something to operate) | Deploy, backup and restore, troubleshooting. `docs/runbook.md` and `docs/deployment.md` are old names: rename. | the old names |
+| `docs/reports/<YYYY-MM-DD>-<slug>.md` | Dated one-offs: expert panels, audits, history, perf notes. Never linked from any AGENTS.md, so they stay out of agent context. | the name; no AGENTS.md link into it |
 
-Every relative link in `README.md`, `AGENTS.md` and `docs/*.md` must resolve to a tracked file.
+Any other `docs/**/*.md` is a living doc the repo chose and must be linked from README's
+Documentation section; otherwise it is a report and moves to `docs/reports/`. Every relative link
+in `README.md`, `AGENTS.md` and `docs/**/*.md` must resolve to a tracked file.
 
 Recommended, not checked (the fleet has no common shape for these yet): `docs/observability.md`
-or an Observability section for a running service, testing notes per tier, runbooks under
-`docs/`. A repo's own extra rules go in `scripts/ci/docs_rules.sh`.
+or an Observability section for a running service, testing notes per tier. A repo's own extra
+rules go in `scripts/ci/docs_rules.sh`.
 
 ## Deploy
 
 devkit itself is not deployed. A squash-merge to `main` is the release; each consumer takes it
-with `make devkit-sync` in its own PR, which runs that repo's gate against the new tree.
+with its `devkit-sync` target in its own PR, which runs that repo's gate against the new tree.
 
 ## Commands
 
-devkit's CI runs its own guards (`docs_check`, `toolchain_check`, `workflows_check`) on
-itself, and a PR touching only docs that `docs_check` judges (`AGENTS.md`, `CLAUDE.md`,
-`README.md`, `docs/*.md`) still runs it: devkit has no local gate, so CI is the only check
-before consumers vendor a change.
+Every check is a Makefile target; `scripts/ci/gate_plan.sh` and `.github/workflows/ci.yml` call
+the same ones. `make gate PR=<n>` is the merge signal (it posts `local-gate` on the PR head);
+Actions is a second opinion that the account's billing has blocked before.
 
 ```sh
-shellcheck -s bash bin/*.sh tests/*.bats
-bats tests/
+make ci-quick        # shellcheck 0.11, python unit tests, docs/toolchain/workflows guards on devkit itself
+make ci-unit         # bats tests/
+make gate PR=<n>     # both, on PR <n> merged into origin/main
 ```
 
 ## Documentation
 
-- [AGENTS.md](AGENTS.md): invariants and workflow for changing devkit.
+- Contributors and agents: see [AGENTS.md](AGENTS.md).
 - [docs/decisions.md](docs/decisions.md): every decision, dated, newest last.
 - [docs/metrics-keys.md](docs/metrics-keys.md): the metrics snapshot key shape.
 - [templates/new/README.md](templates/new/README.md): what `devkit new` renders and how to add a stack.
