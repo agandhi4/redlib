@@ -12,22 +12,31 @@
 #   - age secret keys               AGE-SECRET-KEY-1[0-9A-Z]{58}
 #   - assignments of a long literal to a secret-named variable, where the name ENDS with the
 #     secret word (TOKEN, api_key, passwords; not TOKEN_INPUT_ID or secretName) and the literal
-#     is not a path or URL (no leading `/`, no `://`):
+#     is not a path or URL (no leading `/`, no `://`). Test paths include Swift/Kotlin/Go
+#     conventions (`*Tests/`, `*Tests.swift`, `*_test.go`): a fixture UUID under "token" is not a leak.
 #     (api[_-]?key|secret|token|password|passwd)s?["']?\s*[:=]\s*['"][A-Za-z0-9+_=.-][A-Za-z0-9+/_=.-]{19,}['"]
 #     unless the literal is a placeholder (contains example|placeholder|changeme|dummy|test|
 #     xxx|<|>|\$\{), or the file is a test or fixture (tests/, test/, e2e/, *.test.*, *.spec.*,
 #     test_*): a 20-character literal handed to `password` in a test is a fixture. The
 #     key-shaped rules above still apply to tests: a real AWS key in a fixture is still a leak.
-# Skipped: binary files, lock files, minified bundles (*.min.*), the allow file itself (its
+# Skipped: binary files (grep -I), lock files, minified bundles (*.min.*), the allow file itself (its
 # reasons may quote what they allow), and the paths in scripts/ci/secrets_allow.txt (`<path-glob> <reason>` per line; a fixture with a deliberately
 # fake key names itself there, and the reason is reviewed). The allow file is for fixtures,
 # never for a real credential: rotate that and remove it from history.
 # Output: `secrets-check: <file>:<line>: <rule>` per hit on stderr (the matched text is NEVER
 # printed: the log must not become the leak), then `secrets-check: ok (<n> files)` on stdout or
 # `secrets-check: FAIL` on stderr. Exit 0 ok, 1 hits, 2 usage.
-# Usage: devkit/bin/secrets_check.sh [repo-root]      (part of ci-quick; scorecard T11 sec.secrets)
+# Cost: the file list is built in bash with no process per file, then one grep per rule over the
+# list (nine processes in all): ~1 s for 1,000 files. The first version spawned four processes
+# per file to detect binaries and took 28 s on closet, which pushed the check out of pre-commit.
+# `--staged` scans only the paths staged for commit (added, copied, modified, renamed), for a
+# pre-commit hook that wants the check's cost to follow the change; the gate's full scan stays
+# authoritative. The working-tree content is what is read, as every hook step reads it.
+# Usage: devkit/bin/secrets_check.sh [--staged] [repo-root]    (part of ci-quick; scorecard T11 sec.secrets)
 set -uo pipefail
-ROOT=${1:-$(git rev-parse --show-toplevel 2>/dev/null)} || { echo "usage: secrets_check.sh [repo-root]" >&2; exit 2; }
+STAGED=0
+if [ "${1:-}" = --staged ]; then STAGED=1; shift; fi
+ROOT=${1:-$(git rev-parse --show-toplevel 2>/dev/null)} || { echo "usage: secrets_check.sh [--staged] [repo-root]" >&2; exit 2; }
 cd "$ROOT" || exit 2
 ALLOW=scripts/ci/secrets_allow.txt
 
@@ -57,25 +66,30 @@ age-secret-key|\bAGE-SECRET-KEY-1[0-9A-Z]{58}\b
 secret-assignment|(api[_-]?key|secret|token|password|passwd)s?["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9+_=.-][A-Za-z0-9+/_=.-]{19,}["'"'"']'
 PLACEHOLDER='example|placeholder|changeme|change-me|dummy|test|fake|xxx|<|>|\$\{|your[_-]'
 
-# The scan list, built once: tracked, text, not skipped, not allowed. Then one grep per rule over
-# the whole list (nine processes, not nine per file: 1,800 files took a minute the other way).
+# The scan list, built once: tracked (or staged), present, not skipped, not allowed. Pure bash per
+# file; binaries are left to grep -I. Then one grep per rule over the whole list.
+list_paths() {
+  if [ "$STAGED" = 1 ]; then
+    git diff --cached --name-only --diff-filter=ACMR -z | tr '\0' '\n'
+  else
+    git ls-files
+  fi
+}
 LIST=$(mktemp) || exit 2
 trap 'rm -f "$LIST"' EXIT
 while IFS= read -r f; do
-  [ -f "$f" ] || continue
+  [ -n "$f" ] && [ -f "$f" ] || continue
   case "$f" in
     "$ALLOW"|*.min.js|*.min.css|*.map|*.lock|package-lock.json|pnpm-lock.yaml|*.png|*.jpg|*.jpeg|*.gif|*.webp|*.ico|*.pdf|*.woff|*.woff2|*.ttf|*.zip|*.gz|*.sqlite|*.db) continue ;;
   esac
   if allowed "$f"; then continue; fi
-  # Binary: a NUL in the first 8 KB (LC_ALL=C: bytes, not characters, whatever the locale).
-  if LC_ALL=C head -c 8192 "$f" | LC_ALL=C tr -d '\000' | cmp -s - <(head -c 8192 "$f"); then :; else continue; fi
   printf '%s\0' "$f" >>"$LIST"
   nfiles=$((nfiles + 1))
-done < <(git ls-files)
+done < <(list_paths)
 
 is_test_path() {
   case "$1" in
-    tests/*|*/tests/*|test/*|*/test/*|e2e/*|*/e2e/*|*.test.*|*.spec.*|test_*|*/test_*) return 0 ;;
+    tests/*|*/tests/*|test/*|*/test/*|e2e/*|*/e2e/*|*.test.*|*.spec.*|test_*|*/test_*|*Tests/*|*Tests.swift|*Test.swift|*Spec.swift|*_test.go|*Test.kt) return 0 ;;
   esac
   return 1
 }
@@ -94,12 +108,12 @@ if [ "$nfiles" -gt 0 ]; then
         LC_ALL=C grep -qE '://' <<<"$text" && continue
       fi
       fail "$f:$line: $rule"
-    done < <(LC_ALL=C xargs -0 grep -n"$ci"HE -e "$re" -- <"$LIST" 2>/dev/null)
+    done < <(LC_ALL=C xargs -0 grep -In"$ci"HE -e "$re" -- <"$LIST" 2>/dev/null)
   done <<<"$RULES"
 fi
 
 if [ $rc = 0 ]; then
-  echo "secrets-check: ok ($nfiles files)"
+  echo "secrets-check: ok ($nfiles files$([ "$STAGED" = 1 ] && echo ', staged'))"
 else
   echo "secrets-check: FAIL (a committed credential is rotated, then removed from history; a fixture's fake key is named in $ALLOW with its reason)" >&2
 fi

@@ -67,3 +67,8 @@ Consequence: a Rust collector in devkit (layers, cycles, coverage) reopens the g
 Why: devkit was vendored at f7ee75e, behind main (scorecard T15), and redlib measured nothing: no Rust collector existed, so T2 and T11 were unmeasured and no guard looked for committed credentials.
 Decision: devkit synced to main. `scripts/ci/metrics.conf` runs devkit's stack-agnostic `size.py` over `src/*.rs` and `vuln.py` over `Cargo.lock` (OSV); `ci-metrics` is the gate's last job and `docs/metrics/ratchet.json` was rebaselined from empty (size.app.max_lines 1775 for `src/utils.rs`, over_600 at 5). `secrets-check` joins `ci-quick`.
 Consequence: a Rust file may not grow past its bound without a metrics-rebaseline PR. Vulnerability keys are report-only (6 known, 0 critical or high, all RustSec advisories without a severity) and the metrics job needs outbound network for OSV. Complexity, coverage and duplication stay unmeasured until devkit grows Rust collectors.
+
+## 2026-10-16 — Scorecard ratchet opted in
+Why: the devkit scorecard gives redlib one letter per track, but nothing stopped a track's pass share from falling between audits.
+Decision: `docs/metrics/scorecard.json` holds the committed pass share of the 8 ratcheted tracks (T1 T2 T3 T4 T6 T10 T12 T14), written by `scorecard.py --mode rebaseline` from a fresh metrics snapshot; `make ci-metrics` (the gate's last job, via metrics_collect.sh) runs `--mode check` against it. Baseline grade F.
+Consequence: letters can only rise from this baseline; a PR that drops a track fails the gate. The `metrics-rebaseline` label is the escape hatch, as for the metric bounds in `docs/metrics/ratchet.json`.
