@@ -53,12 +53,12 @@ Rust + hyper + Askama (server-rendered HTML), vanilla CSS/JS. No frontend framew
 - No Bugsink error tracking (observability.md): a single-user fork; panics and errors are read from the container log. See `docs/decisions.md` 2026-10-16 "Convention deltas declared (decision F scope)".
 - No `/metrics` endpoint, no homelab scrape and no Alertmanager route (observability.md): no app metrics in a fork; uptime is the compose healthcheck plus autoheal. See `docs/decisions.md` 2026-10-16 "Convention deltas declared (decision F scope)".
 - No layer guard (`layers.conf`) and no import-cycle check (architecture.md): devkit has no Rust collector for either. See `docs/decisions.md` 2026-10-16 "Convention deltas declared (decision F scope)".
-- No ratchet keys and no `ci-metrics` (delivery.md): devkit has no Rust collector; clippy `-D warnings` in ci-quick holds warnings at 0. See `docs/decisions.md` 2026-10-16 "Convention deltas declared (decision F scope)".
+- Ratchet tracks file sizes only, no complexity, coverage or duplication keys (delivery.md): devkit has no Rust collector for those; clippy `-D warnings` in ci-quick holds warnings at 0. See `docs/decisions.md` 2026-10-16 "Scorecard sync: devkit at main, Rust file sizes and vulnerabilities measured, secrets guard in ci-quick".
 - SQLite through `db::Store` instead of per-domain query modules (data.md): one small local store, no Postgres. See `docs/decisions.md` 2026-10-16 "Convention deltas declared (decision F scope)".
 
 ## Commands
 
-- Check: `make ci-quick ci-unit` (prefix the PATH above on the Mac). Image: `make ci-image`.
+- Check: `make ci-quick ci-unit` (prefix the PATH above on the Mac). Image: `make ci-image`. Metrics: `make ci-metrics` (bounds in `docs/metrics/ratchet.json`).
 - Run locally: `REDLIB_DB_PATH=<scratch>/redlib.db ./target/debug/redlib -p 8199` (panics without a writable DB path)
 - Instance config lives in the NAS compose file (e.g. `REDLIB_DEFAULT_THEME=paper`). Feeds parse once at startup (recreate the container after env edits), and a browser's `subscriptions` cookie overrides `REDLIB_DEFAULT_SUBSCRIPTIONS` — verify env changes with a cookie-less client.
 
