@@ -2,17 +2,24 @@
 
 Shared scripts vendored into every app repo by `bin/devkit-sync.sh` (only the paths in `VENDOR_PATHS`). Read `README.md` first.
 
+**Purpose (owner, 2026-10-16): devkit is for agents.** Every mechanism here makes an agent's
+work cheaper (fewer tokens and turns per merged PR), faster (less wall-clock to a green gate) or
+better (defects caught before merge), and its decisions entry names which axis and the number
+that shows it. Prefer `--report` summaries, SKIP lines and one-line verdicts over logs an agent
+must read; guards in ci-quick (seconds) over gate jobs (minutes). A mechanism that costs an
+agent more than it catches is overhead, not standardization.
+
+## Stack
+- Portable shell: macOS bash 3.2 + GNU bash; BSD + GNU coreutils. Empty arrays under `set -u`
+  use `${a[@]+"${a[@]}"}`. No `readarray`, no `declare -A`, no GNU-only `sed -i` without `''`.
+- `shellcheck -s bash` (0.11) clean; `bats tests/` green before any push. CI runs both. On a
+  Mac, bats runs under /bin/bash 3.2, where a false `[[ … ]]` that is not a test's last line
+  passes silently: a Mac run is a smoke test, CI (bash 5, mawk) is the verdict.
+
 ## Architecture
 Scripts in `bin/` and the shared metrics collectors in `metrics/`, vendored by consumers (the
 paths in `VENDOR_PATHS`); fleet operations in `github/`; `devkit new` scaffolds in `templates/new/`; contract tests in `tests/`. The path map
-is README.md "Architecture".
-
-## Invariants
-- Portable shell: macOS bash 3.2 + GNU bash; BSD + GNU coreutils. Empty arrays under `set -u`
-  use `${a[@]+"${a[@]}"}`. No `readarray`, no `declare -A`, no GNU-only `sed -i` without `''`.
-- `shellcheck -s bash` clean; `bats tests/` green before any push. CI runs both. On a Mac,
-  bats runs under /bin/bash 3.2, where a false `[[ … ]]` that is not a test's last line passes
-  silently: a Mac run is a smoke test, CI (bash 5, mawk) is the verdict.
+is README.md "Architecture". Invariants of the design:
 - Output contracts are APIs. `bin/local_gate.sh` prints `GATE <job> PASS|FAIL|SKIPPED|WATCHDOG|OVERBUDGET …` and
   `VERDICT PASS|FAIL head=<sha> main=<sha>`; `finplat_merge_queue.sh`, `mac_merge_queue.sh`
   and `worker.py` parse them. `bin/tier_guard.sh` prints `TIER <tier>: …|FAIL|FLOOR|OVERBUDGET …`
@@ -36,9 +43,19 @@ is README.md "Architecture".
   the gate's last job and nowhere else (not a hook, not Actions). Bounds never track `gate.*`,
   `tier.*` or `tests.*`; a collector that cannot run is exit 2, never a silent skip.
 
+## Commands
+```sh
+make ci-quick                  # shellcheck, python unit tests, devkit's own guards on itself
+make ci-unit                   # bats tests/ (~2 min)
+make gate PR=<n>               # both, on the PR merged into origin/main; posts `local-gate`
+bin/docs_check.sh --report .   # the docs numbers behind the diet rules; --fix does the mechanical moves
+```
+
 ## Workflow
-- Branch, PR, squash-merge with a descriptive sentence title. Consumers pick it up with
-  `make devkit-sync`; a devkit change that needs plan changes ships as devkit PR first, then
+- Branch, PR, `make gate PR=<n>` green (the `local-gate` status is the merge signal; Actions is
+  a second opinion and has been billing-blocked), squash-merge with a descriptive sentence
+  title. Consumers pick it up with
+  their `devkit-sync` target; a devkit change that needs plan changes ships as devkit PR first, then
   one PR per consumer.
 - Record decisions in `docs/decisions.md` in the same PR (`## YYYY-MM-DD — title`, Why /
   Decision / Consequence, ≤ 8 lines).

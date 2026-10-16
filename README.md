@@ -236,6 +236,7 @@ REDLIB_DEFAULT_USE_HLS = "on"
 
 > [!NOTE]
 > The binary loads a `.env` file from its working directory at startup, so for a local run copy `.env.example` (every setting this fork reads, with its default) to `.env` and edit it. The instance's settings are env vars in the homelab compose file.
+- Contributors and agents: see [AGENTS.md](AGENTS.md).
 
 ## Command Line Flags
 
