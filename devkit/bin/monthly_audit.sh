@@ -19,7 +19,9 @@
 #      the devkit guards NOT already reachable from the Makefile's `ci-quick` (transitive
 #      prerequisites, or a recipe calling the script); `.devkit-rev` skew vs devkit main; the
 #      metrics ratchet; the docs-diet numbers (`docs_check.sh --report`, an INFO row with its
-#      totals line; the block is in raw/); the re-invention diff (memo §4). Guards run from THIS devkit checkout,
+#      totals line; the block is in raw/); the fleet scorecard (bin/scorecard.py: an INFO row
+#      with the grade line, the JSON in raw/, the fleet table at the end of report.md;
+#      AUDIT_HOMELAB_DIR enables its alert-rule checks); the re-invention diff (memo §4). Guards run from THIS devkit checkout,
 #      so the audit measures each repo against the current standard, not its vendored copy.
 #      The repo's own code never runs: Makefiles are parsed, not executed.
 #   2. Fleet: labels_sync/repo_settings --dry-run, dead_alert_audit.py, gate ledger digest.
@@ -346,6 +348,19 @@ docs_report() { # <repo> <dir>
   fi
 }
 
+# The fleet scorecard (bin/scorecard.py, standardization/scorecard-design.md): one INFO row with
+# the repo's grade line, the per-repo JSON kept in raw/ for the fleet table write_report renders.
+# Unmeasured checks name devkit mechanisms, so the table is devkit's ranked backlog.
+scorecard_repo() { # <repo> <dir>
+  local repo=$1 dir=$2 out=$RAW/$1.scorecard.txt
+  if (cd "$dir" && python3 -I "$DEVKIT_ROOT/bin/scorecard.py" . --json "$RAW/$repo.scorecard.json" \
+      ${AUDIT_HOMELAB_DIR:+--homelab "$AUDIT_HOMELAB_DIR"}) >"$out" 2>&1; then
+    record "$repo" scorecard INFO "$(grep '^grade ' "$out" | tail -1); $(grep -c ' UNMEASURED ' "$out") unmeasured"
+  else
+    record "$repo" scorecard ERROR "exit $?: $(first_lines "$out")"
+  fi
+}
+
 check_skew() { # <repo> <dir>
   local repo=$1 dir=$2 rev
   if [ ! -f "$dir/.devkit-rev" ]; then record "$repo" devkit-rev SKIP "not vendored"; return; fi
@@ -392,6 +407,7 @@ audit_repo() { # <repo>
   fi
   run_guards "$repo" "$dir"
   docs_report "$repo" "$dir"
+  scorecard_repo "$repo" "$dir"
   check_skew "$repo" "$dir"
   check_ratchet "$repo" "$dir"
   reinvent "$repo" "$dir"
@@ -478,6 +494,11 @@ write_report() {
     echo "Repos: ${AUDITED:-none}. Deterministic findings (FAIL or ERROR): $(det_count). Raw outputs: \`$RAW\`."
     echo
     render_summary
+    if ls "$RAW"/*.scorecard.json >/dev/null 2>&1; then
+      echo "## Fleet scorecard"
+      echo
+      python3 -I "$DEVKIT_ROOT/bin/scorecard.py" --table "$RAW"/*.scorecard.json 2>&1
+    fi
   } >"$REPORT"
 }
 

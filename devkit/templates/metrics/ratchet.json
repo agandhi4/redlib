@@ -39,7 +39,23 @@
     "direction": "lower",
     "bound": null
   },
+  "coupling.backend.fan_in_max": {
+    "direction": "lower",
+    "bound": null
+  },
+  "coupling.backend.fan_out_max": {
+    "direction": "lower",
+    "bound": null
+  },
   "coupling.frontend.cycles": {
+    "direction": "lower",
+    "bound": null
+  },
+  "coupling.frontend.fan_in_max": {
+    "direction": "lower",
+    "bound": null
+  },
+  "coupling.frontend.fan_out_max": {
     "direction": "lower",
     "bound": null
   },
@@ -80,6 +96,22 @@
     "bound": null
   },
   "duplication.repo.jscpd_percent": {
+    "direction": "lower",
+    "bound": null
+  },
+  "size.backend.max_lines": {
+    "direction": "lower",
+    "bound": null
+  },
+  "size.backend.over_600": {
+    "direction": "lower",
+    "bound": null
+  },
+  "size.frontend.max_lines": {
+    "direction": "lower",
+    "bound": null
+  },
+  "size.frontend.over_600": {
     "direction": "lower",
     "bound": null
   }
