@@ -69,9 +69,20 @@
 #   accepts that timing-test risk. Gates run with different GATE_SLOTS lock different files and
 #   do not bound each other: set it once per machine (gate.env below), not per invocation.
 #
+# Load: GATE_LOAD_MAX (default unset: no check; a number, decimals allowed). Before taking a
+#   slot, the gate waits while EITHER the 1- or 5-minute load average exceeds it, printing one
+#   `GATE waiting: load 1m=<x> 5m=<y> > <max>` line per minute. After GATE_LOAD_WAIT_MINUTES
+#   (default 30; decimals allowed) it proceeds anyway with a `GATE note:`; load alone never
+#   fails a gate, and an unreadable load is a note too. Both minutes count: closet's db tier
+#   failed twice at a 5-minute load of ~30 that had just dipped under 12 on the 1-minute figure
+#   (another repo's Xcode builds, 2026-10-16). The wait is before the slot and the budget clock.
+#   Load is `sysctl -n vm.loadavg` (macOS) or /proc/loadavg (Linux). Test hooks, environment
+#   only: GATE_LOADAVG_CMD (a command printing "<1m> <5m> ...") and GATE_LOAD_POLL_SECONDS
+#   (default 60).
+#
 # Per-machine defaults: ${XDG_CONFIG_HOME:-$HOME/.config}/devkit/gate.env, if present, holds
-#   GATE_SLOTS, GATE_SILENT_MINUTES, GATE_JOB_BUDGET_MINUTES, GATE_BUDGET_MINUTES and
-#   GATE_BUDGET_ENFORCE `KEY=value` lines (blank lines and full-line `#` comments
+#   GATE_SLOTS, GATE_SILENT_MINUTES, GATE_JOB_BUDGET_MINUTES, GATE_BUDGET_MINUTES,
+#   GATE_BUDGET_ENFORCE, GATE_LOAD_MAX and GATE_LOAD_WAIT_MINUTES `KEY=value` lines (blank lines and full-line `#` comments
 #   allowed; GATE_REMOTE* lines are gate.sh's and skipped). It is parsed, never sourced: any other
 #   key, quoting, `export` or other shell syntax is a usage error (exit 2) naming the line. An explicit environment variable wins over the
 #   file, so `GATE_SLOTS=1 make gate` still forces one slot. Asking every agent to set
@@ -141,6 +152,15 @@ readonly SLOTS=${GATE_SLOTS:-1}
 [[ "$SLOTS" =~ ^[1-9][0-9]*$ ]] \
   || { echo "local_gate: GATE_SLOTS must be an integer >= 1 (got '$SLOTS')" >&2; exit 2; }
 command -v flock >/dev/null || { echo "local_gate: flock not found (macOS: brew install flock)" >&2; exit 2; }
+readonly LOAD_MAX=${GATE_LOAD_MAX:-}
+[ -z "$LOAD_MAX" ] || [[ "$LOAD_MAX" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
+  || { echo "local_gate: GATE_LOAD_MAX must be a number (got '$LOAD_MAX')" >&2; exit 2; }
+readonly LOAD_WAIT_MINUTES=${GATE_LOAD_WAIT_MINUTES:-30}
+LOAD_WAIT_SECS=$(minutes_to_secs GATE_LOAD_WAIT_MINUTES "$LOAD_WAIT_MINUTES") || exit 2
+readonly LOAD_WAIT_SECS
+readonly LOAD_POLL_SECS=${GATE_LOAD_POLL_SECONDS:-60}
+[[ "$LOAD_POLL_SECS" =~ ^[1-9][0-9]*$ ]] \
+  || { echo "local_gate: GATE_LOAD_POLL_SECONDS must be an integer >= 1 (got '$LOAD_POLL_SECS')" >&2; exit 2; }
 
 ROOT=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel) || exit 2
 # shellcheck source=/dev/null  # bin/toolchain_path.sh: toolchain_path, shared with the hooks
@@ -196,6 +216,38 @@ try_slots() {
   done
   return 1
 }
+# loadavg: "<1m> <5m>" on stdout, or nothing when the load cannot be read.
+loadavg() {
+  if [ -n "${GATE_LOADAVG_CMD:-}" ]; then
+    bash -c "$GATE_LOADAVG_CMD"
+  elif [ -r /proc/loadavg ]; then
+    cat /proc/loadavg
+  else
+    sysctl -n vm.loadavg 2>/dev/null | tr -d '{}'   # macOS: "{ 1.23 4.56 7.89 }"
+  fi | awk '$1 ~ /^[0-9.]+$/ && $2 ~ /^[0-9.]+$/ { print $1, $2; exit }'
+}
+# wait_for_load: header, "Load". Returns once both averages are <= LOAD_MAX, or after
+# LOAD_WAIT_SECS, or at once when the load cannot be read; never fails the gate.
+wait_for_load() {
+  [ -n "$LOAD_MAX" ] || return 0
+  local t0=$SECONDS l1 l5
+  while :; do
+    read -r l1 l5 <<<"$(loadavg)"
+    if [ -z "$l1" ]; then
+      echo "GATE note: cannot read the load average; GATE_LOAD_MAX=$LOAD_MAX not applied"
+      return 0
+    fi
+    awk -v a="$l1" -v b="$l5" -v m="$LOAD_MAX" 'BEGIN { exit !(a > m || b > m) }' || return 0
+    if [ $((SECONDS - t0)) -ge "$LOAD_WAIT_SECS" ]; then
+      echo "GATE note: load 1m=$l1 5m=$l5 still > $LOAD_MAX after $LOAD_WAIT_MINUTES min (GATE_LOAD_WAIT_MINUTES); proceeding anyway"
+      return 0
+    fi
+    echo "GATE waiting: load 1m=$l1 5m=$l5 > $LOAD_MAX"
+    sleep "$LOAD_POLL_SECS"
+  done
+}
+wait_for_load
+
 SLOT=""
 if ! try_slots -n; then
   echo "GATE waiting for another repo's gate to finish"

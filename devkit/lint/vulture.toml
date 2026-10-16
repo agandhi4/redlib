@@ -1,0 +1,35 @@
+# Shared vulture base, merged under the repo's own [tool.vulture] by devkit/metrics/python.py
+# --vulture-base <set>[,<set>...] (lint/README.md). vulture itself has no `extend`.
+# Per-repo on purpose, never here: `paths`, whitelist files, and `ignore_names` for the repo's
+# own symbols.
+
+[tool.vulture]
+# vulture's lowest confidence is 60 (unused functions, classes, variables), so every finding
+# counts; the fleet set it explicitly in each repo.
+min_confidence = 60
+
+# Decorators that register a function with a framework, which then calls it: vulture cannot
+# see the call. One set per library, named in --vulture-base by what the repo uses.
+[sets.fastapi]
+ignore_decorators = ["@*router.*", "@app.exception_handler*"]
+
+[sets.flask]
+ignore_decorators = [
+  "@*.route",
+  "@*.errorhandler",
+  "@*.before_request",
+  "@*.after_request",
+  "@*.shell_context_processor",
+  "@*.command",
+]
+
+[sets.pydantic]
+ignore_decorators = [
+  "@field_validator*",
+  "@model_validator*",
+  "@field_serializer*",
+  "@computed_field*",
+]
+
+[sets.sqlalchemy]
+ignore_decorators = ["@event.listens_for*", "@hybrid_property*", "@*.expression", "@validates*"]

@@ -22,7 +22,8 @@
 # A devkit/bin file is tooling only when it is listed in DEVKIT_TOOLING_BIN or DEVKIT_IMAGE_BIN;
 # DEVKIT_JOB_BIN names the files a gate job executes beyond ci-quick (other, so they run
 # everything). An unlisted file is other until someone decides: tests/gate_contract.bats fails
-# when a bin/ file is in none of the three lists.
+# when a bin/ file is in none of the three lists. devkit/metrics/* (the shared collectors the
+# metrics job runs) is other by the default case, like DEVKIT_JOB_BIN.
 
 DEVKIT_AREA_ORDER="docs backend frontend native tooling other"
 
@@ -40,17 +41,22 @@ DEVKIT_TOOLING_BIN="local_gate.sh gate.sh remote_gate.sh _gate_env.sh _paths_lib
 # to one runs the image group even when nothing else would.
 DEVKIT_IMAGE_BIN="boot_image.sh contract_probe.sh"
 # Executed by unit/db/e2e/build/metrics jobs (tier budgets, throwaway Postgres for db tiers
-# and smokes, Playwright browsers, toolchains a Makefile or cargo.sh provisions): other. Only
+# and smokes, Playwright browsers, toolchains a Makefile or cargo.sh provisions; layer_check.py,
+# a ci-quick guard that is also the metrics job's `layers` collector): other. Only
 # a record of the decision; the classification needs no lookup for other.
 # shellcheck disable=SC2034  # read by tests/gate_contract.bats (every bin/ file listed once)
 DEVKIT_JOB_BIN="tier_guard.sh throwaway_pg.sh playwright_browsers.sh node_toolchain.sh
-  rust_toolchain.sh toolchain_path.sh metrics_ratchet.py"
+  rust_toolchain.sh toolchain_path.sh metrics_ratchet.py metrics_collect.sh layer_check.py"
 
 # <path>: set DEVKIT_AREA (no subshell; devkit_areas calls it once per changed path).
 _devkit_area() {
   case "$1" in
     # Read by docs-check alone (finplat, Orbit, locus, rollcall).
     scripts/ci/docs_oversize.txt) DEVKIT_AREA=docs ;;
+    # The metrics ratchet's inputs: the bounds (under docs/, but a loosened bound must run the
+    # METRICS group and face the label, not pass as docs-only) and the collectors file. Other,
+    # which runs every group: the collectors need the tiers' output.
+    docs/metrics/ratchet.json|scripts/ci/metrics.conf) DEVKIT_AREA=other ;;
     # Fixtures under docs/ that tests read (locus): rule-fixtures by pytest and vitest,
     # sync-wire-fixtures by pytest. Above docs/* so they are not mistaken for prose.
     docs/rule-fixtures/*.md|docs/sync-wire-fixtures/*.md) DEVKIT_AREA=docs ;;
@@ -148,8 +154,8 @@ devkit_gate_areas() {
 #   GATE_AREAS_<GROUP>="<areas>"   which areas run the group; set (even to "") to override the
 #                                  default below. Words are split on spaces: no spaces in a val.
 #   GATE_IMAGE_PATHS=<ERE>         paths that also run the image group (anchor it)
-#   gate_plan_extra()              optional; called last, for the repo's own rules
-#                                  (devkit_group_ran <group> says whether a group ran)
+#   gate_plan_extra()              optional; called after the groups above, for the repo's own
+#                                  rules (devkit_group_ran <group> says whether a group ran)
 #
 #   group     default areas                 notes
 #   QUICK     backend frontend tooling other  required; must include docs-check (every ci-quick does)
@@ -158,10 +164,22 @@ devkit_gate_areas() {
 #   FRONTEND  frontend other
 #   IMAGE     other                           + GATE_IMAGE_PATHS + the DEVKIT_IMAGE_BIN scripts
 #   E2E       backend frontend other
+#   METRICS   backend frontend other          optional; always last (after gate_plan_extra), so
+#                                             its ci-metrics merges every earlier job's gate.*
+#                                             seconds and the tier-*.json the tiers wrote, and
+#                                             metrics_collect.sh reads gate.json for its
+#                                             `job:<name>` collectors. Not tooling: devkit's
+#                                             collectors and ratchet are other (below), so a
+#                                             tooling-only diff cannot move a metric. With
+#                                             the PR labelled metrics-rebaseline (pr_has_label,
+#                                             fail-closed: no gh answer means no label) each
+#                                             job gets METRICS_REBASELINE=1 appended, which
+#                                             metrics_collect.sh turns into --rebaseline-ok.
 #
 # So docs-only runs DOCS; tooling(+docs)-only runs QUICK, plus IMAGE when boot_image.sh or
 # contract_probe.sh changed; native-only (or an empty diff) is nothing_to_run; any other path
-# runs every group. A group not run prints one SKIPPED line per job, naming the areas changed.
+# runs every group. A group not run prints
+# one SKIPPED line per job, naming the areas changed.
 
 devkit_group_ran() { # <group>, lowercase
   case "${DEVKIT_GATE_RAN:-}" in *" $1 "*) return 0 ;; esac
@@ -179,7 +197,7 @@ devkit_default_gate_plan() {
   DEVKIT_GATE_RAN=' '
   _devkit_group QUICK "backend frontend tooling other"
   if devkit_group_ran quick; then
-    _devkit_skip_jobs "$GATE_JOBS_DOCS" "covered by ${GATE_JOBS_QUICK%% *}, which runs docs-check"
+    _devkit_skip_jobs "$GATE_JOBS_DOCS" "covered by the quick group; ci-quick runs docs-check"
   else
     _devkit_group DOCS "docs tooling other"
   fi
@@ -188,13 +206,26 @@ devkit_default_gate_plan() {
   _devkit_group IMAGE "other"
   _devkit_group E2E "backend frontend other"
   if declare -F gate_plan_extra >/dev/null; then gate_plan_extra; fi
+  _devkit_metrics_group
 }
 
-# <GROUP> <default areas>: run the group's jobs when one of its areas changed, else skip them.
-_devkit_group() {
-  local group=$1 jobs areas_var="GATE_AREAS_$1" jobs_var="GATE_JOBS_$1" areas area run=0 list=''
-  jobs=${!jobs_var:-}
+# The METRICS group (header table). The label is read only when the group will run: a
+# docs-only PR asks gh nothing. pr_has_label is the skeleton's (local_gate.sh); a harness that
+# runs a plan without it (tests/new_contract.bats) gets no label, the fail-closed answer.
+_devkit_metrics_group() {
+  local jobs=${GATE_JOBS_METRICS:-} areas="backend frontend other"
   [ -n "$jobs" ] || return 0
+  if _devkit_group_runs METRICS "$areas" && declare -F pr_has_label >/dev/null \
+      && pr_has_label metrics-rebaseline; then
+    jobs=$(sed -e 's/|/ METRICS_REBASELINE=1|/g' -e 's/$/ METRICS_REBASELINE=1/' <<<"$jobs")
+  fi
+  _devkit_group METRICS "$areas" "$jobs"
+}
+
+# <GROUP> <default areas>: true when one of the group's areas (GATE_AREAS_<GROUP> overrides
+# the default) is in GATE_AREAS; IMAGE also runs on its input paths. An unknown area is exit 2.
+_devkit_group_runs() {
+  local areas_var="GATE_AREAS_$1" areas area run=0
   if declare -p "$areas_var" >/dev/null 2>&1; then areas=${!areas_var}; else areas=$2; fi
   for area in $areas; do
     case " $DEVKIT_AREA_ORDER " in
@@ -203,13 +234,22 @@ _devkit_group() {
     esac
     case " $GATE_AREAS " in *" $area "*) run=1 ;; esac
   done
-  if [ "$group" = IMAGE ] && [ "$run" = 0 ] && _devkit_image_input_changed; then run=1; fi
-  group=$(tr '[:upper:]' '[:lower:]' <<<"$group")
-  if [ "$run" = 1 ]; then
-    DEVKIT_GATE_RAN+="$group "
+  if [ "$1" = IMAGE ] && [ "$run" = 0 ] && _devkit_image_input_changed; then run=1; fi
+  [ "$run" = 1 ]
+}
+
+# <GROUP> <default areas> [jobs]: run the group's jobs (GATE_JOBS_<GROUP> unless given) when
+# one of its areas changed, else skip them.
+_devkit_group() {
+  local group=$1 jobs jobs_var="GATE_JOBS_$1" area list=''
+  if [ $# -ge 3 ]; then jobs=$3; else jobs=${!jobs_var:-}; fi
+  [ -n "$jobs" ] || return 0
+  if _devkit_group_runs "$group" "$2"; then
+    DEVKIT_GATE_RAN+="$(tr '[:upper:]' '[:lower:]' <<<"$group") "
     _devkit_run_jobs "$jobs"
     return 0
   fi
+  group=$(tr '[:upper:]' '[:lower:]' <<<"$group")
   for area in $GATE_AREAS; do list+=${list:+, }$area; done
   _devkit_skip_jobs "$jobs" "only $list paths changed; default for the $group group"
 }
