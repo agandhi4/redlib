@@ -18,7 +18,8 @@
 #   1. Per repo, in a fresh shallow clone of the default branch (never a developer checkout):
 #      the devkit guards NOT already reachable from the Makefile's `ci-quick` (transitive
 #      prerequisites, or a recipe calling the script); `.devkit-rev` skew vs devkit main; the
-#      metrics ratchet; the re-invention diff (memo §4). Guards run from THIS devkit checkout,
+#      metrics ratchet; the docs-diet numbers (`docs_check.sh --report`, an INFO row with its
+#      totals line; the block is in raw/); the re-invention diff (memo §4). Guards run from THIS devkit checkout,
 #      so the audit measures each repo against the current standard, not its vendored copy.
 #      The repo's own code never runs: Makefiles are parsed, not executed.
 #   2. Fleet: labels_sync/repo_settings --dry-run, dead_alert_audit.py, gate ledger digest.
@@ -334,6 +335,17 @@ run_guards() { # <repo> <dir>
   done
 }
 
+# docs_check --report runs even when docs-check is in ci-quick: the numbers (sizes vs caps,
+# allowances, docs outside the set) track the docs trims, which a pass/fail cannot show.
+docs_report() { # <repo> <dir>
+  local repo=$1 dir=$2 out=$RAW/$1.docs-report.txt
+  if (cd "$dir" && "$DEVKIT_ROOT/bin/docs_check.sh" --report .) >"$out" 2>&1; then
+    record "$repo" docs-report INFO "$(tail -1 "$out")"
+  else
+    record "$repo" docs-report ERROR "exit $?: $(first_lines "$out")"
+  fi
+}
+
 check_skew() { # <repo> <dir>
   local repo=$1 dir=$2 rev
   if [ ! -f "$dir/.devkit-rev" ]; then record "$repo" devkit-rev SKIP "not vendored"; return; fi
@@ -379,6 +391,7 @@ audit_repo() { # <repo>
     return
   fi
   run_guards "$repo" "$dir"
+  docs_report "$repo" "$dir"
   check_skew "$repo" "$dir"
   check_ratchet "$repo" "$dir"
   reinvent "$repo" "$dir"
