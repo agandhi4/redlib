@@ -53,10 +53,11 @@ _devkit_area() {
   case "$1" in
     # Read by docs-check alone (finplat, Orbit, locus, rollcall).
     scripts/ci/docs_oversize.txt) DEVKIT_AREA=docs ;;
-    # The metrics ratchet's inputs: the bounds (under docs/, but a loosened bound must run the
-    # METRICS group and face the label, not pass as docs-only) and the collectors file. Other,
-    # which runs every group: the collectors need the tiers' output.
-    docs/metrics/ratchet.json|scripts/ci/metrics.conf) DEVKIT_AREA=other ;;
+    # The metrics ratchet's inputs: both bounds files (under docs/, but a loosened bound must run
+    # the METRICS group and face the label, not pass as docs-only; locus #121 slipped through with
+    # scorecard.json before it was listed) and the collectors file. Other, which runs every
+    # group: the collectors need the tiers' output.
+    docs/metrics/ratchet.json|docs/metrics/scorecard.json|scripts/ci/metrics.conf) DEVKIT_AREA=other ;;
     # Fixtures under docs/ that tests read (locus): rule-fixtures by pytest and vitest,
     # sync-wire-fixtures by pytest. Above docs/* so they are not mistaken for prose.
     docs/rule-fixtures/*.md|docs/sync-wire-fixtures/*.md) DEVKIT_AREA=docs ;;

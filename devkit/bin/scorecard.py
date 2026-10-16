@@ -150,34 +150,49 @@ def tracked_files(root: Path) -> set[str]:
 
 
 def repo_name(root: Path) -> str:
-    """The main checkout's directory name, for a worktree too (.claude/worktrees/<branch> grades
-    as its repo and reads the repo's hooks ledger). Mirrors _hook_ledger_name in hook_steps.sh."""
+    """The repo's identity, lowercased: the origin remote's repository name, else the main
+    checkout's directory name (a worktree's common git dir is <main>/.git). So a worktree, a
+    clone under any directory name and the developer checkout all grade as one repo and read
+    one hooks ledger and one agent-cost ledger. Mirrors _hook_ledger_name in hook_steps.sh."""
+    url = git(root, "remote", "get-url", "origin").strip().rstrip("/")
+    if url:
+        name = url.removesuffix(".git").rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+        if name:
+            return name.lower()
     common = git(root, "rev-parse", "--git-common-dir")
-    return (root / common).resolve().parent.name if common else root.name
+    return ((root / common).resolve().parent.name if common else root.name).lower()
 
 
 def load_metrics(repo: Repo) -> None:
-    """build/metrics.json (fresh) else the committed bounds as today's numbers."""
+    """Today's numbers: the committed bounds (docs/metrics/ratchet.json) overlaid by a fresh
+    build/metrics.json when one exists. The overlay matters in the gate: an area-scoped plan
+    skips the collectors of untouched areas (a backend-only PR runs no ts.mjs), so the snapshot
+    lacks their keys; read as missing they graded FAIL and the scorecard ratchet failed every
+    such PR (Orbit #76). A key the snapshot does not carry keeps main's committed value, which
+    is what the metrics ratchet does with a skipped collector's bound."""
+    bounds = repo.root / "docs" / "metrics" / "ratchet.json"
+    carried = 0
+    if bounds.is_file():
+        try:
+            doc = json.loads(bounds.read_text())
+        except ValueError:
+            doc = {}
+        for key, entry in doc.items():
+            if isinstance(entry, dict) and isinstance(entry.get("bound"), (int, float)):
+                repo.metrics[key] = float(entry["bound"])
+                carried += 1
+        repo.metrics_from = "docs/metrics/ratchet.json bounds"
     snap = repo.root / "build" / "metrics.json"
     if snap.is_file():
         try:
             doc = json.loads(snap.read_text())
             raw = doc.get("metrics", doc) if isinstance(doc, dict) else {}
-            repo.metrics = {k: float(v) for k, v in raw.items() if isinstance(v, (int, float))}
-            repo.metrics_from = "build/metrics.json"
-            return
+            fresh = {k: float(v) for k, v in raw.items() if isinstance(v, (int, float))}
         except (ValueError, AttributeError):
-            pass
-    bounds = repo.root / "docs" / "metrics" / "ratchet.json"
-    if bounds.is_file():
-        try:
-            doc = json.loads(bounds.read_text())
-        except ValueError:
             return
-        for key, entry in doc.items():
-            if isinstance(entry, dict) and isinstance(entry.get("bound"), (int, float)):
-                repo.metrics[key] = float(entry["bound"])
-        repo.metrics_from = "docs/metrics/ratchet.json bounds"
+        carried = sum(1 for k in repo.metrics if k not in fresh)
+        repo.metrics.update(fresh)
+        repo.metrics_from = "build/metrics.json" + (f" (+{carried} bounds carried for skipped collectors)" if carried else "")
 
 
 def section_lines(text: str, heading_re: str) -> list[str]:
@@ -513,8 +528,15 @@ def t8_gate(repo: Repo, conf: dict[str, float], state_home: Path) -> None:
 def t9_agent(repo: Repo, conf: dict[str, float]) -> None:
     ledger = DEVKIT / "docs" / "agent-cost.tsv"
     if not ledger.is_file():
+        # The ledger is never vendored (it changes with every merged PR), so a consumer's own run
+        # (devkit/ beside .devkit-rev) cannot measure T9: not applicable there, graded by the fleet
+        # scorecard from the devkit checkout. Lanes read 0% of 3 and reported it as a regression.
+        vendored = DEVKIT.name == "devkit" and (DEVKIT.parent / ".devkit-rev").is_file()
         for cid in ("agent.turns_per_pr", "agent.gate_rounds", "agent.output_tokens"):
-            repo.add("T9", cid, None, "no docs/agent-cost.tsv in devkit", mechanism="bin/agent_cost.py over the session transcripts and the gate state dir")
+            if vendored:
+                repo.na("T9", cid, "agent-cost ledger lives in the devkit checkout; the fleet scorecard grades it")
+            else:
+                repo.add("T9", cid, None, "no docs/agent-cost.tsv in devkit", mechanism="bin/agent_cost.py over the session transcripts and the gate state dir")
         return
     lines = ledger.read_text().splitlines()
     header = lines[0].split("\t") if lines else []
@@ -589,7 +611,11 @@ def t12_ops(repo: Repo, conf: dict[str, float]) -> None:
     drill = re.search(r"last restore drill[^0-9]{0,20}(\d{4}-\d{2}-\d{2})", ops_text, re.I)
     if drill:
         age = (date.today() - date.fromisoformat(drill.group(1))).days
-        repo.add("T12", "ops.backups", age <= conf["ops_restore_drill_days"], f"last restore drill {drill.group(1)} ({age} days ago; max {conf['ops_restore_drill_days']:g})")
+        if age < 0:
+            # A date in the future is a typo or a plan, not a drill that happened.
+            repo.add("T12", "ops.backups", False, f"last restore drill {drill.group(1)} is in the future")
+        else:
+            repo.add("T12", "ops.backups", age <= conf["ops_restore_drill_days"], f"last restore drill {drill.group(1)} ({age} days ago; max {conf['ops_restore_drill_days']:g})")
     elif has_db(repo) or dockerfiles(repo):
         repo.add("T12", "ops.backups", False, "no `Last restore drill: YYYY-MM-DD` line in docs/operations.md")
     else:
@@ -703,21 +729,60 @@ def print_repo(repo: Repo, conf: dict[str, float]) -> None:
     print(f"grade {repo.name} {letter(sum(measured) / len(measured) if measured else None, conf)} metrics from {repo.metrics_from or 'none'}")
 
 
-def ratchet(repo: Repo, conf: dict[str, float], bounds_file: Path, mode: str, rebaseline_ok: bool) -> int:
-    """check|tighten|rebaseline over the committed per-track shares. Returns the exit code."""
+def parse_tracks(text: str, label: str) -> dict[str, float] | None:
+    """The committed shares in a scorecard bounds document, or None when it is not one."""
+    try:
+        doc = json.loads(text)
+        return {k: float(v) for k, v in doc.get("tracks", {}).items() if isinstance(v, (int, float))}
+    except (ValueError, AttributeError):
+        print(f"scorecard-ratchet: {label}: not a scorecard bounds file", file=sys.stderr)
+        return None
+
+
+def base_tracks(repo: Repo, bounds_file: Path, base_ref: str, base_bounds: Path | None) -> tuple[dict[str, float] | None, str] | None:
+    """check mode's bounds: MAIN's copy of the file (as the metrics ratchet reads ratchet.json),
+    never the PR branch's, which is under test: a bound lowered or deleted on the branch would
+    otherwise pass without the label (closet #402 review). Returns (tracks, label); tracks None
+    is first adoption (no file on main); the whole result None is a usage error, already printed.
+    --base-bounds names a file instead, for tests and for a checkout with no origin."""
+    if base_bounds is not None:
+        if not base_bounds.is_file():
+            return None, str(base_bounds)
+        tracks = parse_tracks(base_bounds.read_text(), str(base_bounds))
+        return (tracks, str(base_bounds)) if tracks is not None else None
+    rel = bounds_file.resolve().relative_to(repo.root).as_posix()
+    if not git(repo.root, "rev-parse", "--verify", "--quiet", f"{base_ref}^{{commit}}"):
+        # Fail closed: an unfetched main must never read as "nothing to compare against".
+        print(f"scorecard-ratchet: base ref {base_ref} does not resolve; fetch it (git fetch origin main) or pass --base-bounds", file=sys.stderr)
+        return None
+    shown = git(repo.root, "show", f"{base_ref}:{rel}")
+    if not shown:
+        return None, f"{base_ref}:{rel}"
+    tracks = parse_tracks(shown, f"{base_ref}:{rel}")
+    return (tracks, f"{base_ref}:{rel}") if tracks is not None else None
+
+
+def ratchet(repo: Repo, conf: dict[str, float], bounds_file: Path, mode: str, rebaseline_ok: bool, *, base_ref: str = "origin/main", base_bounds: Path | None = None) -> int:
+    """check|tighten|rebaseline over the committed per-track shares. Returns the exit code.
+    check compares against main's bounds (base_tracks); tighten and rebaseline rewrite the
+    branch's file."""
     shares = track_shares(repo)
     now = {t: round(s, 3) for t, s in shares.items() if t in RATCHETED and s is not None}
     committed: dict[str, float] = {}
-    if bounds_file.is_file():
-        try:
-            doc = json.loads(bounds_file.read_text())
-            committed = {k: float(v) for k, v in doc.get("tracks", {}).items() if isinstance(v, (int, float))}
-        except (ValueError, AttributeError):
-            print(f"scorecard-ratchet: {bounds_file}: not a scorecard bounds file", file=sys.stderr)
+    if mode == "check":
+        base = base_tracks(repo, bounds_file, base_ref, base_bounds)
+        if base is None:
             return EXIT_USAGE
-    elif mode == "check":
-        print(f"scorecard-ratchet: no bounds at {bounds_file}; run --mode rebaseline once and commit it")
-        return 0
+        tracks, label = base
+        if tracks is None:
+            print(f"scorecard-ratchet: no bounds at {label}; run --mode rebaseline once and commit it (first adoption)")
+            return 0
+        committed = tracks
+        print(f"scorecard-ratchet base {label}")
+    elif bounds_file.is_file():
+        committed = parse_tracks(bounds_file.read_text(), str(bounds_file)) or {}
+        if not committed and parse_tracks(bounds_file.read_text(), str(bounds_file)) is None:
+            return EXIT_USAGE
     rc = 0
     if mode == "check":
         for t, bound in sorted(committed.items()):
@@ -774,6 +839,8 @@ def main() -> int:
     ap.add_argument("--mode", choices=["check", "tighten", "rebaseline"], help="the scorecard ratchet over --bounds-file (one repo)")
     ap.add_argument("--bounds-file", default="docs/metrics/scorecard.json", help="repo-relative committed shares")
     ap.add_argument("--rebaseline-ok", action="store_true", help="with --mode check: a lower share is allowed (the PR carries metrics-rebaseline)")
+    ap.add_argument("--base-ref", default="origin/main", help="with --mode check: the ref whose copy of --bounds-file is the bound (default origin/main; the branch's own file is never trusted)")
+    ap.add_argument("--base-bounds", default=None, help="with --mode check: compare against this file instead of --base-ref's copy")
     args = ap.parse_args()
     conf = load_conf(Path(args.conf))
     if args.table:
@@ -802,7 +869,8 @@ def main() -> int:
     if args.mode:
         if args.fleet or len(args.roots) != 1:
             ap.error("--mode takes one repo root")
-        return ratchet(repo, conf, (repo.root / args.bounds_file), args.mode, args.rebaseline_ok or os.environ.get("METRICS_REBASELINE") == "1")
+        return ratchet(repo, conf, (repo.root / args.bounds_file), args.mode, args.rebaseline_ok or os.environ.get("METRICS_REBASELINE") == "1",
+                       base_ref=args.base_ref, base_bounds=Path(args.base_bounds) if args.base_bounds else None)
     if args.fleet:
         md = fleet_markdown(results)
         print(md, end="")
