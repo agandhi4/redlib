@@ -14,12 +14,12 @@ CI_IMAGE ?= redlib:ci
 CI_BUILD_VERSION ?= $(shell git rev-parse --short=7 HEAD)
 
 .DEFAULT_GOAL := help
-.PHONY: help ci-quick ci-unit test-live ci-image gate install hooks-check devkit-sync devkit-check toolchain-check workflows-check docs-check release-check
+.PHONY: help ci-quick ci-unit test-live ci-image gate install hooks-check devkit-sync devkit-check toolchain-check workflows-check docs-check release-check secrets-check ci-metrics metrics-snapshot metrics-tighten metrics-rebaseline
 
 help: ## list targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
 
-ci-quick: devkit-check toolchain-check workflows-check docs-check release-check ## format, lint and repo guards (Actions + gate)
+ci-quick: devkit-check toolchain-check workflows-check docs-check release-check secrets-check ## format, lint and repo guards (Actions + gate)
 	$(CARGO) fmt --all -- --check
 	$(CARGO) clippy --locked --all-targets -- -D warnings
 
@@ -59,6 +59,18 @@ ci-image: ## build Dockerfile as $(CI_IMAGE) with APP_VERSION=$(CI_BUILD_VERSION
 	  echo "ci-image: expected $(CI_BUILD_VERSION), image has APP_VERSION='$$env' label='$$label'" >&2; exit 1; \
 	fi
 
+# devkit/bin/metrics_collect.sh runs the collectors in scripts/ci/metrics.conf and compares the
+# snapshot with docs/metrics/ratchet.json as committed on origin/main (devkit README "Metrics
+# ratchet"). The collectors are python3 only, so no dependency target comes first.
+ci-metrics: ## the metrics ratchet: collect, then check against docs/metrics/ratchet.json (gate's last job)
+	devkit/bin/metrics_collect.sh check
+metrics-snapshot: ## collect the metrics into build/metrics.json, no check
+	devkit/bin/metrics_collect.sh snapshot
+metrics-tighten: ## collect, then lock the better numbers into docs/metrics/ratchet.json
+	devkit/bin/metrics_collect.sh tighten
+metrics-rebaseline: ## collect, then overwrite every bound (label the PR metrics-rebaseline)
+	devkit/bin/metrics_collect.sh rebaseline
+
 gate: ## make gate PR=<n> [GATE_ARGS=--no-post]
 	@test -n "$(PR)" || { echo "usage: make gate PR=<number> [GATE_ARGS=--no-post]" >&2; exit 2; }
 	devkit/bin/gate.sh "$(PR)" $(GATE_ARGS)
@@ -84,6 +96,9 @@ workflows-check: ## part of ci-quick: SHA pins, draft skip, one PR job, uncancel
 
 docs-check: ## part of ci-quick: AGENTS.md real, CLAUDE.md symlink, decisions.md
 	devkit/bin/docs_check.sh
+
+secrets-check: ## part of ci-quick: no committed credentials (fixtures in scripts/ci/secrets_allow.txt)
+	devkit/bin/secrets_check.sh .
 
 release-check: ## part of ci-quick: APP_VERSION baked into the image (ARG/ENV/LABEL), never set by compose
 	devkit/bin/release_check.sh

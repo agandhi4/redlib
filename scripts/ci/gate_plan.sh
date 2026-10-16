@@ -6,7 +6,8 @@
 #   *.md, docs/** only                   -> docs (docs-check)
 #   devkit/, .devkit-rev, hooks only     -> quick (ci-quick runs docs-check and every guard)
 #   anything else (src/, static/, templates/, Cargo.*, Makefile, scripts/, .github/, ...)
-#                                        -> quick + unit, plus image for GATE_IMAGE_PATHS
+#                                        -> quick + unit, plus image for GATE_IMAGE_PATHS,
+#                                           then ci-metrics last (scripts/ci/metrics.conf)
 # Rust sources sit at the repo root, so the table calls them "other", which runs every group
 # whose areas include it; static/ and templates/ are compiled into the binary (include_str!,
 # Askama), so they are code like src/ and, like src/, do not build the image.
@@ -21,6 +22,9 @@ IMAGE="redlib:gate-$PR"
 GATE_JOBS_QUICK="quick ci-quick"
 GATE_JOBS_DOCS="docs docs-check"
 GATE_JOBS_BACKEND="unit ci-unit"
+# devkit runs it last and passes METRICS_REBASELINE=1 when the PR carries the
+# metrics-rebaseline label. vuln-app queries OSV, so the gate host needs outbound network.
+GATE_JOBS_METRICS="metrics ci-metrics"
 GATE_JOBS_IMAGE="image ci-image CI_IMAGE=$IMAGE CI_BUILD_VERSION=gate-$PR"
 # By path only, not on every code change (a 70 s release build). These change what the image's
 # builder resolves before compiling (the dependency layer, the pinned toolchain), the build

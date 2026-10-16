@@ -49,6 +49,8 @@ make ci-quick                  # shellcheck, python unit tests, devkit's own gua
 make ci-unit                   # bats tests/ (~2 min)
 make gate PR=<n>               # both, on the PR merged into origin/main; posts `local-gate`
 bin/docs_check.sh --report .   # the docs numbers behind the diet rules; --fix does the mechanical moves
+make scorecard REPOS='~/projects/solo/finplat …'   # the fleet scorecard (bin/scorecard.py)
+make agent-cost                # append this project's merged-PR costs to docs/agent-cost.tsv (bin/agent_cost.py)
 ```
 
 ## Workflow

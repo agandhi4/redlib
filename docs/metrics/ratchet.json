@@ -1,0 +1,12 @@
+{
+  "size.app.max_lines": {
+    "bound": 1775,
+    "direction": "lower",
+    "source": "size-app"
+  },
+  "size.app.over_600": {
+    "bound": 5,
+    "direction": "lower",
+    "source": "size-app"
+  }
+}
