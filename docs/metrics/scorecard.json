@@ -1,0 +1,13 @@
+{
+  "_comment": "scorecard ratchet: committed pass share per ratcheted track (bin/scorecard.py --mode check|tighten|rebaseline); never edit by hand",
+  "tracks": {
+    "T1": 1.0,
+    "T10": 1.0,
+    "T12": 0.0,
+    "T14": 0.0,
+    "T2": 0.25,
+    "T3": 0.0,
+    "T4": 0.0,
+    "T6": 0.0
+  }
+}

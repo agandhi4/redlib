@@ -149,6 +149,13 @@ def tracked_files(root: Path) -> set[str]:
     return set(git(root, "ls-files").splitlines())
 
 
+def repo_name(root: Path) -> str:
+    """The main checkout's directory name, for a worktree too (.claude/worktrees/<branch> grades
+    as its repo and reads the repo's hooks ledger). Mirrors _hook_ledger_name in hook_steps.sh."""
+    common = git(root, "rev-parse", "--git-common-dir")
+    return (root / common).resolve().parent.name if common else root.name
+
+
 def load_metrics(repo: Repo) -> None:
     """build/metrics.json (fresh) else the committed bounds as today's numbers."""
     snap = repo.root / "build" / "metrics.json"
@@ -415,7 +422,8 @@ def t5_db(repo: Repo, conf: dict[str, float]) -> None:
     drift = [f for f in repo.tracked if re.search(r"(migration.*drift|schema.*(drift|parity)|drift.*migration)", Path(f).name) and f.endswith((".py", ".ts"))]
     repo.add("T5", "db.migration_drift", bool(drift), ", ".join(drift[:2]) if drift else "no drift/parity test")
     makes = "\n".join((repo.root / f).read_text(errors="replace") for f in repo.tracked if Path(f).name == "Makefile")
-    m = re.search(r"migration_check\.py\s+(.*)", makes)
+    # Recipe lines only (a tab), never a comment that names the script (finplat lane, 2026-10-16).
+    m = re.search(r"^\t[^#\n]*migration_check\.py\s+(.*)", makes, re.M)
     if m:
         guard_args = [a for a in m.group(1).split() if not a.startswith("$")]
         code, out = run([sys.executable, "-I", str(HERE / "migration_check.py"), *guard_args], cwd=repo.root)
@@ -478,7 +486,7 @@ def t8_gate(repo: Repo, conf: dict[str, float], state_home: Path) -> None:
         repo.add("T8", "gate.coverage", not bad, "coverage within bands" if not bad else "; ".join(bad))
     else:
         repo.add("T8", "gate.coverage", None, "no coverage.* keys", mechanism="coverage.py collector over the unit tier")
-    ledger = state_home / "devkit" / "hooks" / f"{repo.name}.tsv"
+    ledger = state_home / "devkit" / "hooks" / f"{repo.name}.tsv"  # repo_name(): the main checkout's, as hook_steps.sh writes it
     if ledger.is_file():
         totals: dict[str, list[float]] = {}
         for line in ledger.read_text().splitlines()[-400:]:
@@ -649,7 +657,7 @@ def score_repo(root: Path, conf: dict[str, float], state_home: Path, homelab: Pa
     root = root.resolve()
     if not (root / ".git").exists() and not git(root, "rev-parse", "--show-toplevel"):
         sys.exit(f"scorecard: {root} is not a git repository")
-    repo = Repo(root=root, name=root.name)
+    repo = Repo(root=root, name=repo_name(root))
     repo.tracked = tracked_files(root)
     load_metrics(repo)
     load_declarations(repo)
