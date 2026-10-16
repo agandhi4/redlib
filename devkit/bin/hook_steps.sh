@@ -222,13 +222,19 @@ _hook_record() {
     "$([ "$rc" -eq 0 ] && echo ok || echo fail)" >>"$dir/$(_hook_ledger_name "$root").tsv" 2>/dev/null || true
 }
 
-# <root>: the ledger file's stem: the main checkout's directory name. `--git-common-dir` is
-# <main>/.git for the main checkout and every worktree of it (relative in the main checkout,
-# so it is resolved from <root>). Mirrored by repo_name() in scorecard.py; keep the two agreeing.
+# <root>: the ledger file's stem, lowercased: the origin remote's repository name, else the main
+# checkout's directory name (`--git-common-dir` is <main>/.git for the main checkout and every
+# worktree of it; relative in the main checkout, so resolved from <root>). A worktree, a clone
+# under another directory name and the developer checkout share one file. Mirrored by
+# repo_name() in scorecard.py; keep the two agreeing.
 _hook_ledger_name() {
-  local common
-  common=$(cd "$1" && cd "$(git rev-parse --git-common-dir)" && pwd -P) || { basename "$1"; return; }
-  basename "$(dirname "$common")"
+  local url common name
+  if url=$(git -C "$1" remote get-url origin 2>/dev/null) && [ -n "$url" ]; then
+    url=${url%/}; url=${url%.git}; name=${url##*/}; name=${name##*:}
+    if [ -n "$name" ]; then printf '%s\n' "$name" | tr '[:upper:]' '[:lower:]'; return; fi
+  fi
+  common=$(cd "$1" && cd "$(git rev-parse --git-common-dir)" && pwd -P) || { basename "$1" | tr '[:upper:]' '[:lower:]'; return; }
+  basename "$(dirname "$common")" | tr '[:upper:]' '[:lower:]'
 }
 
 # <uses_lfs> <push stdin> <hook args...>: the last word on a push that may go through.

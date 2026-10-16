@@ -92,6 +92,9 @@ def pass_downgrades(root: Path, dirs: list[str]) -> tuple[list[str], int]:
             # An alembic merge revision changes nothing: both bodies are empty, and that is right.
             if "upgrade" in funcs and _body_is_empty(funcs["upgrade"].body):
                 continue
+            if "upgrade" in funcs and "downgrade" not in funcs:
+                # No downgrade at all is the pass body's quieter twin (closet #402 review).
+                hits.append(f"{f.relative_to(root)}: no downgrade() (data.md 14: write the downgrade, or raise with the reason: raise RuntimeError(\"irreversible: <why>\"))")
             for node in tree.body:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "downgrade" and _body_is_empty(node.body):
                     hits.append(f"{f.relative_to(root)}: downgrade() is a pass body (data.md 14: write the downgrade, or raise with the reason: raise RuntimeError(\"irreversible: <why>\"))")
