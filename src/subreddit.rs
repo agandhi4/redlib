@@ -15,7 +15,6 @@ use chrono::DateTime;
 use regex::Regex;
 use rss::{ChannelBuilder, Enclosure, Item};
 use std::sync::LazyLock;
-use time::{Duration, OffsetDateTime};
 
 // STRUCTS
 #[derive(Template)]
@@ -83,6 +82,16 @@ pub async fn feed(req: Request<Body>) -> Result<Response<Body>, String> {
 	}
 }
 
+/// The sub `/` (and a feed path without `/r/<sub>`) shows: the `front_page` preference, or
+/// for `default` and unset the subscriptions joined with `+`, or `popular` without any.
+fn front_page_sub(front_page: &str, subscribed: &str) -> String {
+	match (front_page, subscribed) {
+		("default" | "", "") => "popular".to_string(),
+		("default" | "", subscribed) => subscribed.to_string(),
+		(front_page, _) => front_page.to_string(),
+	}
+}
+
 pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 	// Build Reddit API path
 	let root = req.uri().path() == "/";
@@ -94,28 +103,19 @@ pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 	let post_sort = req.cookie("post_sort").map_or_else(|| "hot".to_string(), |c| c.value().to_string());
 	let sort = req.param("sort").unwrap_or_else(|| req.param("id").unwrap_or(post_sort));
 
-	let sub_name = req.param("sub").unwrap_or(if front_page == "default" || front_page.is_empty() {
-		if subscribed.is_empty() {
-			"popular".to_string()
-		} else {
-			subscribed.clone()
-		}
-	} else {
-		front_page.clone()
-	});
+	let sub_name = req.param("sub").unwrap_or_else(|| front_page_sub(&front_page, &subscribed));
 
 	if (sub_name == "popular" || sub_name == "all") && remove_default_feeds {
 		if subscribed.is_empty() {
 			return info(req, "Subscribe to some subreddits! (Default feeds disabled in settings)").await;
-		} else {
-			// If there are subscribed subs, but we get here, then the problem is that front_page pref is set to something besides default.
-			// Tell user to go to settings and change front page to default.
-			return info(
-				req,
-				"You have subscribed to some subreddits, but your front page is not set to default. Visit settings and change front page to default.",
-			)
-			.await;
 		}
+		// If there are subscribed subs, but we get here, then the problem is that front_page pref is set to something besides default.
+		// Tell user to go to settings and change front page to default.
+		return info(
+			req,
+			"You have subscribed to some subreddits, but your front page is not set to default. Visit settings and change front page to default.",
+		)
+		.await;
 	}
 
 	let quarantined = can_access_quarantine(&req, &sub_name) || root;
@@ -304,6 +304,76 @@ pub fn join_until_size_limit<T: std::fmt::Display>(vec: &[T]) -> Vec<std::string
 	result
 }
 
+/// Writes `items` as the cookie chain `name`, `name1`, `name2`, … (`join_until_size_limit`
+/// chunks, read back by `Preferences::new`), then expires the numbered cookies after the last
+/// chunk while `has_cookie` says the request carries them. `None` expires the whole chain.
+/// Used by `subscriptions_filters` and `settings::set_cookies_method`, which test for a cookie
+/// differently (parsed cookie vs a substring of the raw header), so the caller passes the test.
+pub fn set_cookie_chain(response: &mut Response<Body>, name: &str, items: Option<&[String]>, has_cookie: impl Fn(&str) -> bool) {
+	let first_stale = match items {
+		Some(items) => {
+			let chunks = join_until_size_limit(items);
+			let written = chunks.len();
+			for (number, chunk) in chunks.into_iter().enumerate() {
+				let cookie_name = if number == 0 { name.to_string() } else { format!("{name}{number}") };
+				response.insert_persistent_cookie(cookie_name, chunk);
+			}
+			written
+		}
+		None => {
+			response.remove_cookie(name.to_string());
+			1
+		}
+	};
+
+	for number in first_stale.. {
+		let numbered = format!("{name}{number}");
+		if !has_cookie(&numbered) {
+			break;
+		}
+		response.remove_cookie(numbered);
+	}
+}
+
+/// The display name to store for one `+`-separated part of a subscribe/filter request:
+/// Reddit's casing, from the sub's listing when it is there, else from its about.json.
+async fn display_name(part: &str, listing_names: &[(String, &str)]) -> String {
+	if part.starts_with("u_") {
+		return part.to_owned();
+	}
+	let lowercase = part.to_lowercase();
+	if let Some(&(_, display)) = listing_names.iter().find(|(name, _)| *name == lowercase) {
+		return display.to_owned();
+	}
+	match json(format!("/r/{part}/about.json?raw_json=1"), true).await {
+		Ok(about) => about["data"]["display_name"].as_str().unwrap_or(part).to_owned(),
+		Err(_) => part.to_owned(),
+	}
+}
+
+/// Applies the request path's action to one sub name. The tests are "the path has this
+/// segment", in this order, so a sub literally named e.g. `filter` can match two of them.
+fn apply_list_action(action: &[String], part: &str, sub_list: &mut Vec<String>, filters: &mut Vec<String>) {
+	let has = |segment: &str| action.iter().any(|s| s == segment);
+	let owned = part.to_owned();
+	let lowercase = part.to_lowercase();
+	if has("subscribe") && !sub_list.contains(&owned) {
+		sub_list.push(owned);
+		filters.retain(|s| s.to_lowercase() != lowercase);
+		sub_list.sort_by_key(|a| a.to_lowercase());
+		filters.sort_by_key(|a| a.to_lowercase());
+	} else if has("unsubscribe") {
+		sub_list.retain(|s| s.to_lowercase() != lowercase);
+	} else if has("filter") && !filters.contains(&owned) {
+		filters.push(owned);
+		sub_list.retain(|s| s.to_lowercase() != lowercase);
+		filters.sort_by_key(|a| a.to_lowercase());
+		sub_list.sort_by_key(|a| a.to_lowercase());
+	} else if has("unfilter") {
+		filters.retain(|s| s.to_lowercase() != lowercase);
+	}
+}
+
 // Sub, filter, unfilter, or unsub by setting subscription cookie using response "Set-Cookie" header
 pub async fn subscriptions_filters(req: Request<Body>) -> Result<Response<Body>, String> {
 	let sub = req.param("sub").unwrap_or_default();
@@ -311,7 +381,7 @@ pub async fn subscriptions_filters(req: Request<Body>) -> Result<Response<Body>,
 
 	// Handle random subreddits
 	if sub == "random" || sub == "randnsfw" {
-		if action.contains(&"filter".to_string()) || action.contains(&"unfilter".to_string()) {
+		if action.iter().any(|s| s == "filter" || s == "unfilter") {
 			return Err("Can't filter random subreddit!".to_string());
 		}
 		return Err("Can't subscribe to random subreddit!".to_string());
@@ -323,175 +393,37 @@ pub async fn subscriptions_filters(req: Request<Body>) -> Result<Response<Body>,
 	let mut sub_list = preferences.subscriptions;
 	let mut filters = preferences.filters;
 
-	// Retrieve list of posts for these subreddits to extract display names
-
+	// The sub's hot listing carries each post's subreddit display name, which spares an
+	// about.json request per part in display_name.
 	let posts = json(format!("/r/{sub}/hot.json?raw_json=1"), true).await;
-	let display_lookup: Vec<(String, &str)> = match &posts {
-		Ok(posts) => posts["data"]["children"]
-			.as_array()
-			.map(|list| {
-				list
-					.iter()
-					.map(|post| {
-						let display_name = post["data"]["subreddit"].as_str().unwrap_or_default();
-						(display_name.to_lowercase(), display_name)
-					})
-					.collect::<Vec<_>>()
-			})
-			.unwrap_or_default(),
-		Err(_) => vec![],
-	};
+	let listing_names: Vec<(String, &str)> = posts
+		.as_ref()
+		.ok()
+		.and_then(|posts| posts["data"]["children"].as_array())
+		.map(|list| {
+			list
+				.iter()
+				.map(|post| {
+					let display_name = post["data"]["subreddit"].as_str().unwrap_or_default();
+					(display_name.to_lowercase(), display_name)
+				})
+				.collect()
+		})
+		.unwrap_or_default();
 
-	// Find each subreddit name (separated by '+') in sub parameter
 	for part in sub.split('+').filter(|x| x != &"") {
-		// Retrieve display name for the subreddit
-		let display;
-		let part = if part.starts_with("u_") {
-			part
-		} else if let Some(&(_, display)) = display_lookup.iter().find(|x| x.0 == part.to_lowercase()) {
-			// This is already known, doesn't require separate request
-			display
-		} else {
-			// This subreddit display name isn't known, retrieve it
-			let path: String = format!("/r/{part}/about.json?raw_json=1");
-			display = json(path, true).await;
-			match &display {
-				Ok(display) => display["data"]["display_name"].as_str(),
-				Err(_) => None,
-			}
-			.unwrap_or(part)
-		};
-
-		// Modify sub list based on action
-		if action.contains(&"subscribe".to_string()) && !sub_list.contains(&part.to_owned()) {
-			// Add each sub name to the subscribed list
-			sub_list.push(part.to_owned());
-			filters.retain(|s| s.to_lowercase() != part.to_lowercase());
-			// Reorder sub names alphabetically
-			sub_list.sort_by_key(|a| a.to_lowercase());
-			filters.sort_by_key(|a| a.to_lowercase());
-		} else if action.contains(&"unsubscribe".to_string()) {
-			// Remove sub name from subscribed list
-			sub_list.retain(|s| s.to_lowercase() != part.to_lowercase());
-		} else if action.contains(&"filter".to_string()) && !filters.contains(&part.to_owned()) {
-			// Add each sub name to the filtered list
-			filters.push(part.to_owned());
-			sub_list.retain(|s| s.to_lowercase() != part.to_lowercase());
-			// Reorder sub names alphabetically
-			filters.sort_by_key(|a| a.to_lowercase());
-			sub_list.sort_by_key(|a| a.to_lowercase());
-		} else if action.contains(&"unfilter".to_string()) {
-			// Remove sub name from filtered list
-			filters.retain(|s| s.to_lowercase() != part.to_lowercase());
-		}
+		let part = display_name(part, &listing_names).await;
+		apply_list_action(&action, &part, &mut sub_list, &mut filters);
 	}
 
 	// Redirect back to subreddit
 	// check for redirect parameter if unsubscribing/unfiltering from outside sidebar
-	let path = if let Some(redirect_path) = param(&format!("?{query}"), "redirect") {
-		format!("/{redirect_path}")
-	} else {
-		format!("/r/{sub}")
-	};
+	let path = param(&format!("?{query}"), "redirect").map_or_else(|| format!("/r/{sub}"), |redirect_path| format!("/{redirect_path}"));
 
 	let mut response = redirect(&path);
-
-	// If sub_list is empty remove all subscriptions cookies, otherwise update them and remove old ones
-	if sub_list.is_empty() {
-		// Remove subscriptions cookie
-		response.remove_cookie("subscriptions".to_string());
-
-		// Start with first numbered subscriptions cookie
-		let mut subscriptions_number = 1;
-
-		// While whatever subscriptionsNUMBER cookie we're looking at has a value
-		while req.cookie(&format!("subscriptions{subscriptions_number}")).is_some() {
-			// Remove that subscriptions cookie
-			response.remove_cookie(format!("subscriptions{subscriptions_number}"));
-
-			// Increment subscriptions cookie number
-			subscriptions_number += 1;
-		}
-	} else {
-		// Start at 0 to keep track of what number we need to start deleting old subscription cookies from
-		let mut subscriptions_number_to_delete_from = 0;
-
-		// Starting at 0 so we handle the subscription cookie without a number first
-		for (subscriptions_number, list) in join_until_size_limit(&sub_list).into_iter().enumerate() {
-			let subscriptions_cookie = if subscriptions_number == 0 {
-				"subscriptions".to_string()
-			} else {
-				format!("subscriptions{subscriptions_number}")
-			};
-
-			response.insert_cookie(
-				Cookie::build((subscriptions_cookie, list))
-					.path("/")
-					.http_only(true)
-					.expires(OffsetDateTime::now_utc() + Duration::weeks(52))
-					.into(),
-			);
-
-			subscriptions_number_to_delete_from += 1;
-		}
-
-		// While whatever subscriptionsNUMBER cookie we're looking at has a value
-		while req.cookie(&format!("subscriptions{subscriptions_number_to_delete_from}")).is_some() {
-			// Remove that subscriptions cookie
-			response.remove_cookie(format!("subscriptions{subscriptions_number_to_delete_from}"));
-
-			// Increment subscriptions cookie number
-			subscriptions_number_to_delete_from += 1;
-		}
-	}
-
-	// If filters is empty remove all filters cookies, otherwise update them and remove old ones
-	if filters.is_empty() {
-		// Remove filters cookie
-		response.remove_cookie("filters".to_string());
-
-		// Start with first numbered filters cookie
-		let mut filters_number = 1;
-
-		// While whatever filtersNUMBER cookie we're looking at has a value
-		while req.cookie(&format!("filters{filters_number}")).is_some() {
-			// Remove that filters cookie
-			response.remove_cookie(format!("filters{filters_number}"));
-
-			// Increment filters cookie number
-			filters_number += 1;
-		}
-	} else {
-		// Start at 0 to keep track of what number we need to start deleting old filters cookies from
-		let mut filters_number_to_delete_from = 0;
-
-		for (filters_number, list) in join_until_size_limit(&filters).into_iter().enumerate() {
-			let filters_cookie = if filters_number == 0 {
-				"filters".to_string()
-			} else {
-				format!("filters{filters_number}")
-			};
-
-			response.insert_cookie(
-				Cookie::build((filters_cookie, list))
-					.path("/")
-					.http_only(true)
-					.expires(OffsetDateTime::now_utc() + Duration::weeks(52))
-					.into(),
-			);
-
-			filters_number_to_delete_from += 1;
-		}
-
-		// While whatever filtersNUMBER cookie we're looking at has a value
-		while req.cookie(&format!("filters{filters_number_to_delete_from}")).is_some() {
-			// Remove that filters cookie
-			response.remove_cookie(format!("filters{filters_number_to_delete_from}"));
-
-			// Increment filters cookie number
-			filters_number_to_delete_from += 1;
-		}
-	}
+	let has_cookie = |name: &str| req.cookie(name).is_some();
+	set_cookie_chain(&mut response, "subscriptions", (!sub_list.is_empty()).then_some(sub_list.as_slice()), has_cookie);
+	set_cookie_chain(&mut response, "filters", (!filters.is_empty()).then_some(filters.as_slice()), has_cookie);
 
 	Ok(response)
 }
@@ -744,6 +676,92 @@ fn get_mime_type(url: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use time::OffsetDateTime;
+
+	/// Each Set-Cookie header as (name, value, still valid): removals carry an expiry of now.
+	fn set_cookies(response: &Response<Body>) -> Vec<(String, String, bool)> {
+		response
+			.headers()
+			.get_all("Set-Cookie")
+			.iter()
+			.map(|header| {
+				let cookie = Cookie::parse(header.to_str().unwrap().to_string()).unwrap();
+				let valid = cookie.expires_datetime().is_some_and(|at| at > OffsetDateTime::now_utc());
+				(cookie.name().to_string(), cookie.value().to_string(), valid)
+			})
+			.collect()
+	}
+
+	fn owned(items: &[&str]) -> Vec<String> {
+		items.iter().map(|s| (*s).to_string()).collect()
+	}
+
+	#[test]
+	fn cookie_chain_writes_chunks_then_expires_the_stale_numbered_cookies() {
+		// Two chunks: two 2500-byte names cannot share one cookie (join_until_size_limit's 4000).
+		let long: Vec<String> = ["a", "b"].iter().map(|c| c.repeat(2500)).collect();
+		let carried = ["subscriptions2", "subscriptions3"];
+		let mut response = Response::new(Body::empty());
+		set_cookie_chain(&mut response, "subscriptions", Some(&long), |name| carried.contains(&name));
+
+		let names: Vec<(String, bool)> = set_cookies(&response).into_iter().map(|(name, _, valid)| (name, valid)).collect();
+		let expected = [("subscriptions", true), ("subscriptions1", true), ("subscriptions2", false), ("subscriptions3", false)];
+		assert_eq!(names, expected.map(|(name, valid)| (name.to_string(), valid)));
+	}
+
+	#[test]
+	fn cookie_chain_joins_items_with_plus() {
+		let mut response = Response::new(Body::empty());
+		set_cookie_chain(&mut response, "filters", Some(&owned(&["rust", "linux"])), |_| false);
+		assert_eq!(set_cookies(&response), vec![("filters".to_string(), "rust+linux".to_string(), true)]);
+	}
+
+	#[test]
+	fn cookie_chain_none_expires_the_whole_chain() {
+		let carried = ["filters1", "filters2", "filters4"];
+		let mut response = Response::new(Body::empty());
+		set_cookie_chain(&mut response, "filters", None, |name| carried.contains(&name));
+
+		// Stops at the first gap: filters4 is past filters3, which the request does not carry.
+		let names: Vec<(String, bool)> = set_cookies(&response).into_iter().map(|(name, _, valid)| (name, valid)).collect();
+		let expected = [("filters", false), ("filters1", false), ("filters2", false)];
+		assert_eq!(names, expected.map(|(name, valid)| (name.to_string(), valid)));
+	}
+
+	#[test]
+	fn front_page_sub_prefers_the_setting_then_subscriptions_then_popular() {
+		assert_eq!(front_page_sub("", ""), "popular");
+		assert_eq!(front_page_sub("default", ""), "popular");
+		assert_eq!(front_page_sub("default", "rust+linux"), "rust+linux");
+		assert_eq!(front_page_sub("", "rust"), "rust");
+		assert_eq!(front_page_sub("all", "rust"), "all");
+	}
+
+	#[test]
+	fn list_actions_move_a_sub_between_subscriptions_and_filters() {
+		let path = |action: &str| owned(&["", "r", "Rust", action]);
+		let (mut subs, mut filters) = (owned(&["linux"]), owned(&["rust"]));
+
+		apply_list_action(&path("subscribe"), "Rust", &mut subs, &mut filters);
+		assert_eq!((subs.clone(), filters.clone()), (owned(&["linux", "Rust"]), owned(&[])));
+
+		apply_list_action(&path("filter"), "Rust", &mut subs, &mut filters);
+		assert_eq!((subs.clone(), filters.clone()), (owned(&["linux"]), owned(&["Rust"])));
+
+		apply_list_action(&path("unfilter"), "rust", &mut subs, &mut filters);
+		apply_list_action(&path("unsubscribe"), "LINUX", &mut subs, &mut filters);
+		assert_eq!((subs, filters), (owned(&[]), owned(&[])));
+	}
+
+	#[test]
+	fn list_action_tests_path_segments_in_order() {
+		// Already subscribed, so "subscribe" does nothing and the sub's own name, a later
+		// segment test, applies: the order apply_list_action documents.
+		let action = owned(&["", "r", "filter", "subscribe"]);
+		let (mut subs, mut filters) = (owned(&["filter"]), owned(&[]));
+		apply_list_action(&action, "filter", &mut subs, &mut filters);
+		assert_eq!((subs, filters), (owned(&[]), owned(&["filter"])));
+	}
 
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "hits live reddit"]

@@ -24,7 +24,7 @@ use std::{
 	str::{from_utf8, Split},
 	string::ToString,
 };
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 
 use crate::{config, dbg_msg};
 
@@ -203,6 +203,8 @@ pub trait RequestExt {
 pub trait ResponseExt {
 	fn cookies(&self) -> Vec<Cookie<'_>>;
 	fn insert_cookie(&mut self, cookie: Cookie<'_>);
+	/// A preference cookie: site-wide, HttpOnly, kept for 52 weeks. `remove_cookie` expires one.
+	fn insert_persistent_cookie(&mut self, name: String, value: String);
 	fn remove_cookie(&mut self, name: String);
 }
 
@@ -255,6 +257,16 @@ impl ResponseExt for Response<Body> {
 		if let Ok(val) = header::HeaderValue::from_str(&cookie.to_string()) {
 			self.headers_mut().append("Set-Cookie", val);
 		}
+	}
+
+	fn insert_persistent_cookie(&mut self, name: String, value: String) {
+		self.insert_cookie(
+			Cookie::build((name, value))
+				.path("/")
+				.http_only(true)
+				.expires(OffsetDateTime::now_utc() + Duration::weeks(52))
+				.into(),
+		);
 	}
 
 	fn remove_cookie(&mut self, name: String) {
