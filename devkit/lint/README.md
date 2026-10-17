@@ -64,6 +64,47 @@ const eslintConfig = defineConfig([
 ]);
 ```
 
+## Graduating a ratchet key to a lint rule
+
+The ratchet holds a count at the gate, minutes after the edit; a lint rule fails the edit
+itself. When a repo's count reaches 0, the repo turns the matching rule on, at the same
+threshold the collector uses, so the next function over it fails in the editor and ci-quick:
+
+| Key at 0 | Rule the repo turns on | Where |
+|---|---|---|
+| `complexity.<s>.mccabe_over_10` (python.py `--mccabe`) | ruff `C901`, `max-complexity = 10` | the repo's ruff block |
+| `complexity.<s>.cyclomatic_max` at 10 or less (ts.mjs `--cyclomatic`; no over-10 key exists) | eslint `complexity` 10 | the repo's eslint config |
+| `complexity.<s>.cognitive_over_15` (ts.mjs `--cognitive`) | `sonarjs/cognitive-complexity` 15, where eslint-plugin-sonarjs is installed | the repo's eslint config |
+
+```toml
+# pyproject.toml, beside the `extend` line
+[tool.ruff.lint]
+extend-select = ["C901"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+```
+
+```js
+// the repo's own layer, after ...base
+{
+  files: ["**/*.{ts,tsx}"],
+  plugins: { sonarjs }, // only where the plugin is installed
+  rules: {
+    complexity: ["error", 10],
+    "sonarjs/cognitive-complexity": ["error", 15],
+  },
+},
+```
+
+The rule lives in the repo, not the base, until every repo of that language is at 0: ruff and
+flat config have no conditional select, so a base `C901` would fail every repo still above 0.
+When the last one graduates, the rule moves into `ruff.toml` or `eslint.base.mjs` and the repo
+lines go. A `# noqa: C901` or `eslint-disable-next-line complexity` carries its reason on the
+line, as PLC0415 does: once the key retires (docs/metrics-keys.md), nothing else counts them.
+Python cognitive complexity (complexipy) has no ruff rule, so `cognitive_over_15` stays a
+ratchet key in every Python repo.
+
 ## swift-format
 
 swift-format has no `extends`, so `swift-format.json` cannot be referenced; the repo's

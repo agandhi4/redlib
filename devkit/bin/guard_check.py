@@ -92,7 +92,8 @@ Matching, for the import and call rules (the semantic rules' shapes are bin/_gua
     `logger.<m>(`). ARG-SHAPE is a closed vocabulary, the identifier written `err` (the error
     names, bin/_guard_rules.py ERROR_NAMES) or `/REGEX/` (searched; no comma): `String(err)`
     and `${err}` (ts; the interpolation is the identifier alone), `str(err)`, `repr(err)` and
-    f-string `{err}` (python), `err.message` and `err.stack` (both). One violation per call.
+    f-string `{err}` (python), `err.message`, `err.stack` and bare `err`, a whole argument that
+    is the name alone (both; python: positional only). One violation per call.
 
 Every glob of a rule, `except` globs included, must match a scanned file: a glob that matches
 nothing makes the rule vacuous (a renamed directory would silently switch it off), so it is

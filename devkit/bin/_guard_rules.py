@@ -12,6 +12,7 @@ like a pass.
 from __future__ import annotations
 
 import ast
+import itertools
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
@@ -923,12 +924,16 @@ _ARG_FORMS: dict[str, tuple[str, tuple[str, ...]]] = {
     "stack": ("{}.stack", ("python", "ts")),
     "template": ("${{{}}}", ("ts",)),
     "fstring": ("{{{}}}", ("python",)),
+    # A whole argument that is the identifier: an interpolating logger (`logger.warning("%s",
+    # exc)`) or console.error formats the text itself. Never put it on a logger whose API takes
+    # the error (devkit's TS `log.error(err)` extracts errorFields).
+    "bare": ("{}", ("python", "ts")),
 }
 _CALLED_FORMS = ("String", "str", "repr")
 _ATTRIBUTE_FORMS = ("message", "stack")
 _SHAPE_SPELLING = re.compile(
     r"(?P<called>String|str|repr)\((?P<a>.+)\)|(?P<b>.+)\.(?P<attr>message|stack)"
-    r"|\$\{(?P<c>.+)\}|\{(?P<d>.+)\}"
+    r"|\$\{(?P<c>.+)\}|\{(?P<d>.+)\}|(?P<bare>\w+|/.+/)"
 )
 
 
@@ -957,6 +962,8 @@ def arg_shape(text: str, lang: str) -> ArgShape:
         form, ident = m["called"], m["a"]
     elif m["attr"]:
         form, ident = m["attr"], m["b"]
+    elif m["bare"]:
+        form, ident = "bare", m["bare"]
     else:
         form, ident = ("template", m["c"]) if m["c"] else ("fstring", m["d"])
     if lang not in _ARG_FORMS[form][1]:
@@ -1013,16 +1020,22 @@ def _py_found(node: ast.AST, shapes: Sequence[ArgShape]) -> Iterable[str]:
 def py_call_arg_ban(file: PyFile, patterns: Sequence[str], shapes: Sequence[ArgShape]) -> list[Hit]:
     """A call whose callee (as written) matches PATTERNS with an argument that holds one of
     SHAPES at any depth: positional, keyword, `**{...}`, inside a dict, a nested call or an
-    f-string part (`{err}`, `{err!r}` too). `x.err.message` is judged by `err`. One hit per call,
-    at its line, naming every shape in it. Not seen: the error passed bare (`log.error("%s",
-    exc)`: an interpolating logger formats it), `"%s" % err`, `err.args`, a name the error was
-    re-bound to, a callee hanging off an expression (`getLogger(x).error(`)."""
+    f-string part (`{err}`, `{err!r}` too). `x.err.message` is judged by `err`. The bare shape is
+    a positional argument that is the name alone (`log.error("%s", exc)`); a keyword is not
+    (`exc_info=exc` is how a logger takes the error). One hit per call, at its line, naming
+    every shape in it. Not seen: `"%s" % err`, `err.args`, a name the error was re-bound to, a
+    callee hanging off an expression (`getLogger(x).error(`)."""
     hits: list[Hit] = []
     for call in file.calls:
         if not callee_matches(call.callee, patterns):
             continue
         roots = [*call.node.args, *(kw.value for kw in call.node.keywords)]
-        found = (f for root in roots for node in ast.walk(root) for f in _py_found(node, shapes))
+        nested = (f for root in roots for node in ast.walk(root) for f in _py_found(node, shapes))
+        bare = (
+            s.found("bare", arg.id) for arg in call.node.args if isinstance(arg, ast.Name)
+            for s in shapes
+        )
+        found = itertools.chain(bare, nested)
         hit = _arg_hit(call.line, call.callee or "", found)
         if hit is not None:
             hits.append(hit)
@@ -1047,14 +1060,42 @@ def _ts_found(tokens: Sequence[Tok], k: int, shapes: Sequence[ArgShape]) -> Iter
         yield from (s.found(tokens[attr].value, tok.value) for s in shapes)
 
 
+def _ts_bare_args(
+    tokens: Sequence[Tok], open_at: int, close: int, spans: Sequence[Span]
+) -> Iterable[int]:
+    """Indices of the call's arguments that are one identifier token. A template yields no
+    token for its text or its `${`/`}` (bin/_ts_lex.py), so `${err}` alone between the
+    parentheses is one identifier too: a token inside an interpolation span is not an argument."""
+    ends: list[int] = []  # the index just past each argument
+    depth = 0
+    for k in range(open_at + 1, close):
+        tok = tokens[k]
+        if tok.kind != "punct":
+            continue
+        if tok.value in ("(", "[", "{"):
+            depth += 1
+        elif tok.value in (")", "]", "}"):
+            depth -= 1
+        elif tok.value == "," and depth == 0:
+            ends.append(k)
+    start = open_at + 1
+    for end in [*ends, close]:
+        if end - start == 1 and tokens[start].kind == "id":
+            at = tokens[start].at
+            if not any(span.at <= at < span.end for span in spans):
+                yield start
+        start = end + 1
+
+
 def ts_call_arg_ban(file: TsFile, patterns: Sequence[str], shapes: Sequence[ArgShape]) -> list[Hit]:
     """A call whose callee (as written, bin/_ts_lex.py calls_in) matches PATTERNS with an
     argument holding one of SHAPES anywhere between its parentheses: an object value, a spread,
     a nested call, a template interpolation that is the identifier alone (`${err}`; `${err ??
-    ""}` is not). `res.error.message` and `err?.message` are judged by `error`/`err`. One hit
-    per call, at its line, naming every shape in it. Not seen: the error passed bare or
-    spread (`{ ...err }`), `err.toString()`, `JSON.stringify(err)`, a name the error was
-    re-bound to, a callee hanging off an expression (`getLogger().error(`)."""
+    ""}` is not). `res.error.message` and `err?.message` are judged by `error`/`err`. The bare
+    shape is a whole argument that is the name alone (`console.error(e)`); `{ err }`, `err!`
+    and `err as Error` are not. One hit per call, at its line, naming every shape in it. Not
+    seen: the error spread (`{ ...err }`), `err.toString()`, `JSON.stringify(err)`, a name the
+    error was re-bound to, a callee hanging off an expression (`getLogger().error(`)."""
     tokens = file.tokens
     hits: list[Hit] = []
     for call in file.calls:
@@ -1063,6 +1104,11 @@ def ts_call_arg_ban(file: TsFile, patterns: Sequence[str], shapes: Sequence[ArgS
         open_at, close = call.args
         inside = range(open_at + 1, close)
         found = [f for k in inside for f in _ts_found(tokens, k, shapes)]
+        found.extend(
+            s.found("bare", tokens[k].value)
+            for k in _ts_bare_args(tokens, open_at, close, file.interpolations)
+            for s in shapes
+        )
         if close < len(tokens):
             first, last = tokens[open_at].at, tokens[close].at
             for span in file.interpolations:

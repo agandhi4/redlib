@@ -19,9 +19,11 @@ CI_BUILD_VERSION ?= $(shell git rev-parse --short=7 HEAD)
 help: ## list targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
 
-ci-quick: devkit-check toolchain-check workflows-check docs-check release-check secrets-check ## format, lint and repo guards (Actions + gate)
+# clippy denies cognitive_complexity over clippy.toml's threshold (15): the ratchet key
+# complexity.app.cognitive_over_15 graduated to this lint (docs/decisions.md 2026-10-17).
+ci-quick: devkit-check toolchain-check workflows-check docs-check release-check secrets-check ## format, lint (clippy -D warnings, cognitive complexity 15) and repo guards (Actions + gate)
 	$(CARGO) fmt --all -- --check
-	$(CARGO) clippy --locked --all-targets -- -D warnings
+	$(CARGO) clippy --locked --all-targets -- -D warnings -D clippy::cognitive_complexity
 
 # Offline and deterministic: every test that calls live Reddit is #[ignore = "hits live reddit"]
 # (Reddit rate-limits and blocks runner IPs, so they cannot gate a PR). Run those with test-live.
