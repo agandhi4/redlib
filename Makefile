@@ -61,7 +61,8 @@ ci-image: ## build Dockerfile as $(CI_IMAGE) with APP_VERSION=$(CI_BUILD_VERSION
 
 # devkit/bin/metrics_collect.sh runs the collectors in scripts/ci/metrics.conf and compares the
 # snapshot with docs/metrics/ratchet.json as committed on origin/main (devkit README "Metrics
-# ratchet"). The collectors are python3 only, so no dependency target comes first.
+# ratchet"). No dependency target comes first: the collectors need python3 and the pinned
+# toolchain's clippy, which metrics_collect.sh puts on PATH itself.
 ci-metrics: ## the metrics ratchet: collect, then check against docs/metrics/ratchet.json (gate's last job)
 	devkit/bin/metrics_collect.sh check
 metrics-snapshot: ## collect the metrics into build/metrics.json, no check

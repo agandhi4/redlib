@@ -4,6 +4,8 @@ Personal **hard fork** of [redlib](https://github.com/redlib-org/redlib) (forked
 
 ## Stack
 
+Conventions: architecture.md, delivery.md, observability.md, backend.md
+
 Rust + hyper + Askama (server-rendered HTML), vanilla CSS/JS. No frontend framework, no build step for assets.
 
 ### Rust toolchain
@@ -53,7 +55,8 @@ Rust + hyper + Askama (server-rendered HTML), vanilla CSS/JS. No frontend framew
 - No Bugsink error tracking (observability.md): a single-user fork; panics and errors are read from the container log. See `docs/decisions.md` 2026-10-16 "Convention deltas declared (decision F scope)".
 - No `/metrics` endpoint, no homelab scrape and no Alertmanager route (observability.md): no app metrics in a fork; uptime is the compose healthcheck plus autoheal. See `docs/decisions.md` 2026-10-16 "Convention deltas declared (decision F scope)".
 - No layer guard (`layers.conf`) and no import-cycle check (architecture.md): devkit has no Rust collector for either. See `docs/decisions.md` 2026-10-16 "Convention deltas declared (decision F scope)".
-- Ratchet tracks file sizes only, no complexity, coverage or duplication keys (delivery.md): devkit has no Rust collector for those; clippy `-D warnings` in ci-quick holds warnings at 0. See `docs/decisions.md` 2026-10-16 "Scorecard sync: devkit at main, Rust file sizes and vulnerabilities measured, secrets guard in ci-quick".
+- Ratchet tracks file sizes, cognitive complexity and rustc dead code only, no coverage or duplication keys (delivery.md): devkit has no Rust coverage collector, and jscpd duplication would bring npm tooling into a Rust repo; clippy `-D warnings` in ci-quick holds warnings at 0. See `docs/decisions.md` 2026-10-17 "Rust complexity and dead code measured".
+- No framework convention file (Conventions line above): `~/.claude/conventions/` has none for Rust or hyper, so backend.md is the most specific layer.
 - SQLite through `db::Store` instead of per-domain query modules (data.md): one small local store, no Postgres. See `docs/decisions.md` 2026-10-16 "Convention deltas declared (decision F scope)".
 
 ## Commands
