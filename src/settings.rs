@@ -4,13 +4,11 @@ use std::collections::HashMap;
 
 // CRATES
 use crate::server::ResponseExt;
-use crate::subreddit::join_until_size_limit;
+use crate::subreddit::set_cookie_chain;
 use crate::utils::{deflate_decompress, redirect, template, Preferences};
 use askama::Template;
-use cookie::Cookie;
 use futures_lite::StreamExt;
 use hyper::{Body, Request, Response};
-use time::{Duration, OffsetDateTime};
 use tokio::time::timeout;
 use url::form_urlencoded;
 
@@ -60,15 +58,7 @@ pub async fn get(req: Request<Body>) -> Result<Response<Body>, String> {
 /// Set cookies using response "Set-Cookie" header
 pub async fn set(req: Request<Body>) -> Result<Response<Body>, String> {
 	// Split the body into parts
-	let (parts, mut body) = req.into_parts();
-
-	// Grab existing cookies
-	let _cookies: Vec<Cookie<'_>> = parts
-		.headers
-		.get_all("Cookie")
-		.iter()
-		.filter_map(|header| Cookie::parse(header.to_str().unwrap_or_default()).ok())
-		.collect();
+	let (_, mut body) = req.into_parts();
 
 	// Aggregate the body...
 	// let whole_body = hyper::body::aggregate(req).await.map_err(|e| e.to_string())?;
@@ -86,13 +76,7 @@ pub async fn set(req: Request<Body>) -> Result<Response<Body>, String> {
 
 	for &name in &PREFS {
 		match form.get(name) {
-			Some(value) => response.insert_cookie(
-				Cookie::build((name.to_owned(), value.clone()))
-					.path("/")
-					.http_only(true)
-					.expires(OffsetDateTime::now_utc() + Duration::weeks(52))
-					.into(),
-			),
+			Some(value) => response.insert_persistent_cookie(name.to_owned(), value.to_string()),
 			None => response.remove_cookie(name.to_string()),
 		};
 	}
@@ -104,52 +88,21 @@ fn set_cookies_method(req: Request<Body>, remove_cookies: bool) -> Response<Body
 	// Split the body into parts
 	let (parts, _) = req.into_parts();
 
-	// Grab existing cookies
-	let _cookies: Vec<Cookie<'_>> = parts
-		.headers
-		.get_all("Cookie")
-		.iter()
-		.filter_map(|header| Cookie::parse(header.to_str().unwrap_or_default()).ok())
-		.collect();
-
 	let query = parts.uri.query().unwrap_or_default().as_bytes();
 
 	let form = url::form_urlencoded::parse(query).collect::<HashMap<_, _>>();
 
-	let path = match form.get("redirect") {
-		Some(value) => {
-			let value = value.replace("%26", "&").replace("%23", "#");
-			if value.starts_with('/') {
-				value
-			} else {
-				format!("/{value}")
-			}
-		}
-		None => "/".to_string(),
-	};
+	let path = form.get("redirect").map_or_else(|| "/".to_string(), |value| redirect_path(value));
 
 	let mut response = redirect(&path);
 
 	for name in PREFS {
 		match form.get(name) {
-			Some(value) => response.insert_cookie(
-				Cookie::build((name.to_owned(), value.clone()))
-					.path("/")
-					.http_only(true)
-					.expires(OffsetDateTime::now_utc() + Duration::weeks(52))
-					.into(),
-			),
-			None => {
-				if remove_cookies {
-					response.remove_cookie(name.to_string());
-				}
-			}
+			Some(value) => response.insert_persistent_cookie(name.to_owned(), value.to_string()),
+			None if remove_cookies => response.remove_cookie(name.to_string()),
+			None => {}
 		};
 	}
-
-	// Get subscriptions/filters to restore from query string
-	let subscriptions = form.get("subscriptions");
-	let filters = form.get("filters");
 
 	// We can't search through the cookies directly like in subreddit.rs, so instead we have to make a string out of the request's headers to search through
 	let cookies_string = parts
@@ -157,110 +110,27 @@ fn set_cookies_method(req: Request<Body>, remove_cookies: bool) -> Response<Body
 		.get("cookie")
 		.map(|hv| hv.to_str().unwrap_or("").to_string()) // Return String
 		.unwrap_or_else(String::new); // Return an empty string if None
+	let has_cookie = |name: &str| cookies_string.contains(&format!("{name}="));
 
-	// If there are subscriptions to restore set them and delete any old subscriptions cookies, otherwise delete them all
-	if let Some(subscriptions) = subscriptions {
-		let sub_list: Vec<String> = subscriptions.split('+').map(str::to_string).collect();
-
-		// Start at 0 to keep track of what number we need to start deleting old subscription cookies from
-		let mut subscriptions_number_to_delete_from = 0;
-
-		// Starting at 0 so we handle the subscription cookie without a number first
-		for (subscriptions_number, list) in join_until_size_limit(&sub_list).into_iter().enumerate() {
-			let subscriptions_cookie = if subscriptions_number == 0 {
-				"subscriptions".to_string()
-			} else {
-				format!("subscriptions{subscriptions_number}")
-			};
-
-			response.insert_cookie(
-				Cookie::build((subscriptions_cookie, list))
-					.path("/")
-					.http_only(true)
-					.expires(OffsetDateTime::now_utc() + Duration::weeks(52))
-					.into(),
-			);
-
-			subscriptions_number_to_delete_from += 1;
-		}
-
-		// While subscriptionsNUMBER= is in the string of cookies add a response removing that cookie
-		while cookies_string.contains(&format!("subscriptions{subscriptions_number_to_delete_from}=")) {
-			// Remove that subscriptions cookie
-			response.remove_cookie(format!("subscriptions{subscriptions_number_to_delete_from}"));
-
-			// Increment subscriptions cookie number
-			subscriptions_number_to_delete_from += 1;
-		}
-	} else {
-		// Remove unnumbered subscriptions cookie
-		response.remove_cookie("subscriptions".to_string());
-
-		// Starts at one to deal with the first numbered subscription cookie and onwards
-		let mut subscriptions_number_to_delete_from = 1;
-
-		// While subscriptionsNUMBER= is in the string of cookies add a response removing that cookie
-		while cookies_string.contains(&format!("subscriptions{subscriptions_number_to_delete_from}=")) {
-			// Remove that subscriptions cookie
-			response.remove_cookie(format!("subscriptions{subscriptions_number_to_delete_from}"));
-
-			// Increment subscriptions cookie number
-			subscriptions_number_to_delete_from += 1;
-		}
-	}
-
-	// If there are filters to restore set them and delete any old filters cookies, otherwise delete them all
-	if let Some(filters) = filters {
-		let filters_list: Vec<String> = filters.split('+').map(str::to_string).collect();
-
-		// Start at 0 to keep track of what number we need to start deleting old subscription cookies from
-		let mut filters_number_to_delete_from = 0;
-
-		// Starting at 0 so we handle the subscription cookie without a number first
-		for (filters_number, list) in join_until_size_limit(&filters_list).into_iter().enumerate() {
-			let filters_cookie = if filters_number == 0 {
-				"filters".to_string()
-			} else {
-				format!("filters{filters_number}")
-			};
-
-			response.insert_cookie(
-				Cookie::build((filters_cookie, list))
-					.path("/")
-					.http_only(true)
-					.expires(OffsetDateTime::now_utc() + Duration::weeks(52))
-					.into(),
-			);
-
-			filters_number_to_delete_from += 1;
-		}
-
-		// While filtersNUMBER= is in the string of cookies add a response removing that cookie
-		while cookies_string.contains(&format!("filters{filters_number_to_delete_from}=")) {
-			// Remove that filters cookie
-			response.remove_cookie(format!("filters{filters_number_to_delete_from}"));
-
-			// Increment filters cookie number
-			filters_number_to_delete_from += 1;
-		}
-	} else {
-		// Remove unnumbered filters cookie
-		response.remove_cookie("filters".to_string());
-
-		// Starts at one to deal with the first numbered subscription cookie and onwards
-		let mut filters_number_to_delete_from = 1;
-
-		// While filtersNUMBER= is in the string of cookies add a response removing that cookie
-		while cookies_string.contains(&format!("filters{filters_number_to_delete_from}=")) {
-			// Remove that sfilters cookie
-			response.remove_cookie(format!("filters{filters_number_to_delete_from}"));
-
-			// Increment filters cookie number
-			filters_number_to_delete_from += 1;
-		}
+	// Restore the subscriptions/filters the query string carries (an empty value is still one
+	// empty chunk); a list it leaves out is expired with every numbered cookie after it.
+	for chain in ["subscriptions", "filters"] {
+		let list: Option<Vec<String>> = form.get(chain).map(|joined| joined.split('+').map(str::to_string).collect());
+		set_cookie_chain(&mut response, chain, list.as_deref(), has_cookie);
 	}
 
 	response
+}
+
+/// A settings redirect target as a site path: the `%26`/`%23` the settings page escapes back
+/// to `&`/`#`, and a leading `/` added when missing.
+fn redirect_path(value: &str) -> String {
+	let value = value.replace("%26", "&").replace("%23", "#");
+	if value.starts_with('/') {
+		value
+	} else {
+		format!("/{value}")
+	}
 }
 
 /// Set cookies using response "Set-Cookie" header
@@ -302,4 +172,15 @@ pub async fn encoded_restore(req: Request<Body>) -> Result<Response<Body>, Strin
 	let url = format!("/settings/restore/?{}", prefs.to_urlencoded()?);
 
 	Ok(redirect(&url))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn redirect_path_unescapes_and_roots_the_target() {
+		assert_eq!(redirect_path("r/rust?sort=new%26t=day%23top"), "/r/rust?sort=new&t=day#top");
+		assert_eq!(redirect_path("/settings"), "/settings");
+	}
 }
