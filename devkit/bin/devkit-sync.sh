@@ -23,6 +23,13 @@
 # Uncommitted changes under devkit/ or to .devkit-rev do not block a sync: it replaces exactly
 # those paths. That is the recovery when an older devkit-sync vendored a full tree and the
 # pre-commit devkit-check refused its commit: run make devkit-sync again.
+#
+# Base copies: a file the repo must hold as a byte copy of a vendored base (base_copies in
+# bin/_vendor_paths.sh: every tracked .swift-format, and .githooks/<hook> for each template) is
+# refreshed from upstream's tree when the repo tracks it and it differs; never created. Without
+# this a base change made every consumer's sync commit fail its own devkit-check (or the audit's
+# hook-differs) until someone copied the file by hand. It also runs when devkit/ is already
+# current, because the first sync to a new base runs the previous, vendored copy of this script.
 set -euo pipefail
 # shellcheck source=bin/_vendor_paths.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_vendor_paths.sh"
@@ -51,20 +58,41 @@ UPSTREAM_TREE=$(git rev-parse "FETCH_HEAD^{tree}")
 if MANIFEST=$(git show FETCH_HEAD:VENDOR_PATHS 2>/dev/null); then
   UPSTREAM_TREE=$(vendor_filter_tree "$UPSTREAM_TREE" "$MANIFEST") || exit 2
 fi
+CURRENT=0
 if [ -f .devkit-rev ] && [ "$(cut -d' ' -f1 .devkit-rev)" = "$UPSTREAM" ] && [ "$(git rev-parse HEAD:devkit 2>/dev/null)" = "$UPSTREAM_TREE" ]; then
-  echo "devkit at ${UPSTREAM:0:7} (tree ${UPSTREAM_TREE:0:7}), already current"; exit 0
+  CURRENT=1
+else
+  # -f: staged leftovers of an interrupted sync are replaced like everything else under devkit/.
+  if [ -e devkit ] || git ls-files --error-unmatch devkit >/dev/null 2>&1; then git rm -r -q -f devkit; fi
+  git read-tree --prefix=devkit/ -u "$UPSTREAM_TREE"
+  printf '%s %s\n' "$UPSTREAM" "$UPSTREAM_TREE" > .devkit-rev
+  git add .devkit-rev devkit
 fi
-# -f: staged leftovers of an interrupted sync are replaced like everything else under devkit/.
-if [ -e devkit ] || git ls-files --error-unmatch devkit >/dev/null 2>&1; then git rm -r -q -f devkit; fi
-git read-tree --prefix=devkit/ -u "$UPSTREAM_TREE"
-printf '%s %s\n' "$UPSTREAM" "$UPSTREAM_TREE" > .devkit-rev
-git add .devkit-rev devkit
+# The base comes from upstream's tree, not the index: on the CURRENT path devkit/ may hold
+# uncommitted edits, which a sync never vouches for.
+REFRESHED=()
+while IFS=' ' read -r base copy; do
+  [ -n "$base" ] || continue
+  blob=$(git rev-parse -q --verify "$UPSTREAM_TREE:$base") || continue # base not in this ref
+  [ "$(git rev-parse -q --verify ":$copy")" != "$blob" ] || continue
+  git cat-file blob "$blob" >"$copy" # rewrites in place: the file's mode (hooks: +x) is kept
+  git add -- "$copy"
+  echo "devkit-sync: refreshed $copy from devkit/$base"
+  REFRESHED+=("$copy")
+done <<<"$(base_copies)"
+if [ "$CURRENT" = 1 ]; then
+  [ "${#REFRESHED[@]}" -gt 0 ] || { echo "devkit at ${UPSTREAM:0:7} (tree ${UPSTREAM_TREE:0:7}), already current"; exit 0; }
+  [ "$STAGE" = 1 ] || git commit -q -m "Refresh devkit base copies to ${UPSTREAM:0:7}" -- "${REFRESHED[@]}"
+  echo "devkit at ${UPSTREAM:0:7} (tree ${UPSTREAM_TREE:0:7}), already current; base copies refreshed"; exit 0
+fi
 if [ "$STAGE" = 1 ]; then
   echo "devkit at ${UPSTREAM:0:7} (tree ${UPSTREAM_TREE:0:7}), staged"; exit 0
 fi
+NOTE=
+[ "${#REFRESHED[@]}" -eq 0 ] || NOTE=$'\n'"Refreshed from the vendored bases: ${REFRESHED[*]}."
 git commit -q -m "Update devkit to ${UPSTREAM:0:7}
 
-Vendored tree ${UPSTREAM_TREE:0:7} from $DEVKIT_URL $REF (replaced wholesale; see devkit/bin/devkit-sync.sh)."
+Vendored tree ${UPSTREAM_TREE:0:7} from $DEVKIT_URL $REF (replaced wholesale; see devkit/bin/devkit-sync.sh).$NOTE"
 TREE=$(git rev-parse HEAD:devkit)
 [ "$TREE" = "$UPSTREAM_TREE" ] || { echo "devkit-sync: vendored tree $TREE != upstream $UPSTREAM_TREE" >&2; exit 1; }
 echo "devkit at ${UPSTREAM:0:7} (tree ${TREE:0:7})"

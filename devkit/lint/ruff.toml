@@ -1,9 +1,16 @@
 # Shared ruff base: the settings finplat (backend/pyproject.toml) and locus (pyproject.toml)
 # had byte for byte. Consumers `extend` it; see lint/README.md.
 # Per-project on purpose, never here: `src`, `exclude`, `[lint.isort] known-first-party`
-# (it names the project's own package).
+# (it names the project's own package), and `per-file-ignores` (scripts/** = T20).
 target-version = "py313"
 line-length = 100
 
 [lint]
-select = ["E", "F", "I", "N", "W", "UP"]
+select = [
+  "E", "F", "I", "N", "W", "UP",
+  # observability.md: never print() in app code, use the module logger. Retires the print half
+  # of the repos' logger guard tests.
+  "T20",
+  # backend.md: all imports at module top. Retires orbit's test_no_deferred_imports.py.
+  "PLC0415",
+]

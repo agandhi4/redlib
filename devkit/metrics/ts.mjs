@@ -7,7 +7,7 @@
 //       --cyclomatic --cognitive --knip --cycles --bundle --out build/metrics/ts-frontend.json
 //
 // Usage: ts.mjs --root <dir> --src <subdir> --scope <name> [--out FILE]
-//               [--tsconfig tsconfig.app.json] [--test-glob <glob>]...
+//               [--tsconfig tsconfig.app.json] [--test-glob <glob>]... [--list-out FILE]
 //               [--cyclomatic] [--cognitive] [--knip [--knip-base]] [--cycles] [--bundle [--bundle-entry index.html]]
 //   --root       the package: holds package.json and node_modules/.bin, where every tool comes
 //                from (never PATH: the lockfile's version measures). A requested tool that is
@@ -52,11 +52,24 @@
 //                                                     environment (PATH, HOME only), so values a
 //                                                     vite `define` bakes in do not vary per machine
 //
+// --list-out FILE: the findings behind the counts (metrics/python.py's format, written by
+// _lib.mjs writeFindings): `# <key>`, then one line per finding; empty when there are none.
+// Paths are --root joined with the root-relative path. Never read by the ratchet or the
+// scorecard; the JSON is the same with or without it.
+//   cyclomatic_max      <path>:<line> <function> cyclomatic=<n>, functions over 10 (McCabe's
+//                       threshold in python.py), worst first
+//   cognitive_over_15   <path>:<line> <function> cognitive=<n>, worst first; sonarjs names no
+//                       function, so <function> is the identifier at the reported column
+//                       (`<anonymous>` for an arrow or an unnamed `function` expression)
+//   knip_exports, knip_files, knip_deps   <path>[:<line>] <name> <kind>
+//   cycles              one line per cycle: its module files, space-separated, largest first
+//   fan_in_max, fan_out_max   <path> fan_in=<n> | fan_out=<n>, the top 10 (FAN_TOP)
+//
 // Deterministic: same tree, same numbers (sorted inputs, no timings, no paths). Exit: 0 ok,
 // 2 a missing tool, a report that cannot be read or a bad call.
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { join, posix, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import {
@@ -70,11 +83,15 @@ import {
   runTool,
   stronglyConnected,
   withMergedConfig,
+  writeFindings,
   writeOutput,
 } from "./_lib.mjs";
 
 const SCRIPT = "ts.mjs";
 const COGNITIVE_THRESHOLD = 15;
+const CYCLOMATIC_LIST_THRESHOLD = 10; // --list-out only: there is no cyclomatic_over key
+const FAN_TOP = 10; // --list-out modules per fan key; the same in metrics/python.py
+const ANONYMOUS = "<anonymous>"; // --list-out's name for a function the tool does not name
 const SOURCE_EXT = /\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$/;
 // Tests and scaffolding, as the fleet names them (finplat, Orbit, closet, rollcall); a repo
 // adds its own with --test-glob.
@@ -98,6 +115,7 @@ function parse(argv) {
       src: { type: "string" },
       scope: { type: "string" },
       out: { type: "string" },
+      "list-out": { type: "string" },
       tsconfig: { type: "string" },
       "test-glob": { type: "string", multiple: true, default: [] },
       cyclomatic: { type: "boolean", default: false },
@@ -155,31 +173,71 @@ function productionFiles(opts) {
   return found;
 }
 
-// eslintFindings: one number per function the rule reported, over the production files only.
-// The repo's own config still loads (parser, plugins); the rule comes from the CLI.
+// shown: a root-relative path as a lane opens it (repo-relative in a gate run, cwd = repo root).
+function shown(opts, rel) {
+  return posix.join(opts.root, rel);
+}
+
+// eslintFindings: one { rel, line, column, score, match } per function the rule reported,
+// over the production files only. The repo's own config still loads (parser, plugins); the
+// rule comes from the CLI.
 function eslintFindings(opts, files, extraArgs, ruleId, pattern) {
   const eslint = requireBin(opts.root, "eslint", "eslint");
   const out = runTool(eslint, [...extraArgs, "--no-inline-config", "--format", "json", ...files], {
     cwd: opts.root,
   });
-  const values = [];
+  const found = [];
+  // Both sides real paths: eslint may report a symlinked root's target (macOS /var/folders is
+  // /private/var/folders), and a relative path across that link would climb out of the root.
+  const root = realpathSync(opts.root);
   for (const report of parseJson(out, "eslint output")) {
+    const rel = relative(root, realpathSync(report.filePath)).split("\\").join("/");
     for (const msg of report.messages) {
       if (msg.fatal) throw new CollectorError(`eslint could not lint ${report.filePath}: ${msg.message}`);
       if (msg.ruleId !== ruleId) continue;
       const match = pattern.exec(msg.message);
       if (!match) throw new CollectorError(`unparseable ${ruleId} message: ${JSON.stringify(msg.message)}`);
-      values.push(Number(match.groups.cx));
+      found.push({ rel, line: msg.line, column: msg.column, score: Number(match.groups.cx), match });
     }
   }
-  return values;
+  return found;
+}
+
+// worstFirst: the --list-out lines of the functions scoring over `threshold`, highest first.
+function worstFirst(opts, found, threshold, metric, nameOf) {
+  return found
+    .filter((f) => f.score > threshold)
+    .sort((x, y) => y.score - x.score || compare(x.rel, y.rel) || x.line - y.line)
+    .map((f) => `${shown(opts, f.rel)}:${f.line} ${nameOf(f)} ${metric}=${f.score}`);
+}
+
+function compare(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 function collectCyclomatic(opts, files) {
-  const values = eslintFindings(
+  const found = eslintFindings(
     opts, files, ["--rule", '{"complexity": ["warn", 0]}'], "complexity", ESLINT_COMPLEXITY,
   );
-  return { [`complexity.${opts.scope}.cyclomatic_max`]: Math.max(0, ...values) };
+  const key = `complexity.${opts.scope}.cyclomatic_max`;
+  // The rule's message names the function ("Method 'load' has ..."), or only its kind
+  // ("Arrow function has ...").
+  const nameOf = (f) => /'(?<name>[^']+)'/.exec(f.match.groups.name)?.groups.name ?? ANONYMOUS;
+  return {
+    keys: { [key]: Math.max(0, ...found.map((f) => f.score)) },
+    findings: { [key]: worstFirst(opts, found, CYCLOMATIC_LIST_THRESHOLD, "cyclomatic", nameOf) },
+  };
+}
+
+// identifierAt: sonarjs reports cognitive complexity on the function's name token, the
+// `function` keyword of a function expression (`memo(function Row(`) or the `=>` of an arrow,
+// and its message names no function, so the name is read from the source at the reported
+// 1-based line and column. An inline arrow callback is <anonymous>; its line still locates it.
+const NAME_AT = /^(?:function\s*\*?\s*)?(?<name>[A-Za-z_$][\w$]*)/;
+function identifierAt(opts, rel, line, column, cache) {
+  if (!cache.has(rel)) cache.set(rel, readFileSync(join(opts.root, rel), "utf8").split("\n"));
+  const name = NAME_AT.exec((cache.get(rel)[line - 1] ?? "").slice(column - 1))?.groups.name;
+  return name === undefined || name === "function" ? ANONYMOUS : name;
 }
 
 function collectCognitive(opts, files) {
@@ -188,20 +246,38 @@ function collectCognitive(opts, files) {
       `eslint-plugin-sonarjs is not installed in ${opts.root}/node_modules; add it to the dev dependencies`,
     );
   }
-  const values = eslintFindings(
+  const found = eslintFindings(
     opts, files,
     ["--plugin", "sonarjs", "--rule", '{"sonarjs/cognitive-complexity": ["warn", 0]}'],
     "sonarjs/cognitive-complexity", SONAR_COMPLEXITY,
   );
+  const overKey = `complexity.${opts.scope}.cognitive_over_${COGNITIVE_THRESHOLD}`;
+  const sources = new Map();
+  const nameOf = (f) => identifierAt(opts, f.rel, f.line, f.column, sources);
   return {
-    [`complexity.${opts.scope}.cognitive_max`]: Math.max(0, ...values),
-    [`complexity.${opts.scope}.cognitive_over_${COGNITIVE_THRESHOLD}`]: values.filter((v) => v > COGNITIVE_THRESHOLD).length,
+    keys: {
+      [`complexity.${opts.scope}.cognitive_max`]: Math.max(0, ...found.map((f) => f.score)),
+      [overKey]: found.filter((f) => f.score > COGNITIVE_THRESHOLD).length,
+    },
+    findings: { [overKey]: worstFirst(opts, found, COGNITIVE_THRESHOLD, "cognitive", nameOf) },
   };
 }
 
 // What knip reads as its config, in its own lookup order; the code forms cannot be merged.
 const KNIP_CONFIGS = { files: ["knip.json", "knip.jsonc", ".knip.json", ".knip.jsonc"], pkgKey: "knip",
   scriptFiles: ["knip.ts", "knip.js", "knip.mts", "knip.mjs", "knip.config.ts", "knip.config.js"] };
+
+// Key suffix -> knip's issue kinds it counts -> the kind word --list-out prints.
+const KNIP_KEYS = {
+  knip_exports: { exports: "export", types: "type" },
+  // knip 6 reports an unused file as an issue whose `files` holds it; there is no top-level
+  // `files` list any more, so reading one counted 0 forever.
+  knip_files: { files: "file" },
+  knip_deps: {
+    dependencies: "dependency", devDependencies: "devDependency", unlisted: "unlisted",
+    unresolved: "unresolved", binaries: "binary",
+  },
+};
 
 function collectKnip(opts) {
   const knip = requireBin(opts.root, "knip", "knip");
@@ -213,19 +289,25 @@ function collectKnip(opts) {
     : run([]);
   const report = parseJson(out, "knip output");
   if (!Array.isArray(report?.issues)) throw new CollectorError("knip output has no `issues` array");
-  const count = (kinds) =>
-    report.issues.reduce(
-      (n, issue) => n + kinds.reduce((m, kind) => m + (Array.isArray(issue[kind]) ? issue[kind].length : 0), 0),
-      0,
-    );
-  return {
-    [`dead.${opts.scope}.knip_exports`]: count(["exports", "types"]),
-    // knip 6 reports an unused file as an issue whose `files` holds it; there is no top-level
-    // `files` list any more, so reading one counted 0 forever.
-    [`dead.${opts.scope}.knip_files`]: count(["files"]),
-    [`dead.${opts.scope}.knip_deps`]: count(["dependencies", "devDependencies", "unlisted", "unresolved", "binaries"]),
-  };
+  const keys = {};
+  const findings = {};
+  for (const [suffix, kinds] of Object.entries(KNIP_KEYS)) {
+    const found = [];
+    for (const issue of report.issues) {
+      for (const [kind, label] of Object.entries(kinds)) {
+        for (const item of Array.isArray(issue[kind]) ? issue[kind] : []) {
+          found.push({ path: shown(opts, issue.file), line: item.line, name: item.name, label });
+        }
+      }
+    }
+    found.sort((x, y) => compare(x.path, y.path) || (x.line ?? 0) - (y.line ?? 0) || compare(x.name, y.name));
+    const key = `dead.${opts.scope}.${suffix}`;
+    keys[key] = found.length;
+    findings[key] = found.map((f) => `${f.path}${f.line === undefined ? "" : `:${f.line}`} ${f.name} ${f.label}`);
+  }
+  return { keys, findings };
 }
+
 
 // importGraph: production module -> the production modules it imports at runtime, from
 // dependency-cruiser; shared by --cycles and --fan so both see one graph.
@@ -259,7 +341,11 @@ function importGraph(opts) {
 }
 
 function collectCycles(opts, graph) {
-  return { [`coupling.${opts.scope}.cycles`]: stronglyConnected(graph).length };
+  const cycles = stronglyConnected(graph)
+    .map((component) => component.map((m) => shown(opts, m)).sort())
+    .sort((x, y) => y.length - x.length || compare(x.join(" "), y.join(" ")));
+  const key = `coupling.${opts.scope}.cycles`;
+  return { keys: { [key]: cycles.length }, findings: { [key]: cycles.map((c) => c.join(" ")) } };
 }
 
 // fan-in: the most importers one module has; fan-out: the most modules one module imports (a
@@ -267,9 +353,19 @@ function collectCycles(opts, graph) {
 function collectFan(opts, graph) {
   const fanIn = new Map([...graph.keys()].map((m) => [m, 0]));
   for (const imports of graph.values()) for (const t of imports) fanIn.set(t, (fanIn.get(t) ?? 0) + 1);
+  const fanOut = new Map([...graph].map(([m, imports]) => [m, imports.size]));
+  const top = (counts, metric) =>
+    [...counts]
+      .filter(([, n]) => n > 0)
+      .map(([m, n]) => [shown(opts, m), n])
+      .sort(([pa, a], [pb, b]) => b - a || compare(pa, pb))
+      .slice(0, FAN_TOP)
+      .map(([path, n]) => `${path} ${metric}=${n}`);
+  const inKey = `coupling.${opts.scope}.fan_in_max`;
+  const outKey = `coupling.${opts.scope}.fan_out_max`;
   return {
-    [`coupling.${opts.scope}.fan_in_max`]: Math.max(0, ...fanIn.values()),
-    [`coupling.${opts.scope}.fan_out_max`]: Math.max(0, ...[...graph.values()].map((s) => s.size)),
+    keys: { [inKey]: Math.max(0, ...fanIn.values()), [outKey]: Math.max(0, ...fanOut.values()) },
+    findings: { [inKey]: top(fanIn, "fan_in"), [outKey]: top(fanOut, "fan_out") },
   };
 }
 
@@ -328,30 +424,38 @@ function collectBundle(opts) {
     walk(dist);
     const entryBytes = [...entryFiles].reduce((n, f) => n + statSync(join(dist, f)).size, 0);
     return {
-      [`bundle.${opts.scope}.kb_total`]: kib(total),
-      [`bundle.${opts.scope}.kb_entry`]: kib(entryBytes),
+      keys: { [`bundle.${opts.scope}.kb_total`]: kib(total), [`bundle.${opts.scope}.kb_entry`]: kib(entryBytes) },
+      findings: {},
     };
   } finally {
     rmSync(dist, { recursive: true, force: true });
   }
 }
 
+// collect: every requested collector's { keys, findings } merged: keys are the JSON, findings
+// (key -> --list-out lines) explain them.
 function collect(opts) {
-  const out = {};
+  const out = { keys: {}, findings: {} };
+  const add = ({ keys, findings }) => {
+    Object.assign(out.keys, keys);
+    Object.assign(out.findings, findings);
+  };
   const files = opts.cyclomatic || opts.cognitive ? productionFiles(opts) : [];
-  if (opts.cyclomatic) Object.assign(out, collectCyclomatic(opts, files));
-  if (opts.cognitive) Object.assign(out, collectCognitive(opts, files));
-  if (opts.knip) Object.assign(out, collectKnip(opts));
+  if (opts.cyclomatic) add(collectCyclomatic(opts, files));
+  if (opts.cognitive) add(collectCognitive(opts, files));
+  if (opts.knip) add(collectKnip(opts));
   const graph = opts.cycles || opts.fan ? importGraph(opts) : null;
-  if (opts.cycles) Object.assign(out, collectCycles(opts, graph));
-  if (opts.fan) Object.assign(out, collectFan(opts, graph));
-  if (opts.bundle) Object.assign(out, collectBundle(opts));
+  if (opts.cycles) add(collectCycles(opts, graph));
+  if (opts.fan) add(collectFan(opts, graph));
+  if (opts.bundle) add(collectBundle(opts));
   return out;
 }
 
 try {
   const opts = parse(process.argv.slice(2));
-  writeOutput(collect(opts), opts.out);
+  const { keys, findings } = collect(opts);
+  writeOutput(keys, opts.out);
+  if (opts["list-out"] !== undefined) writeFindings(findings, opts["list-out"]);
 } catch (err) {
   if (err instanceof CollectorError || (typeof err.code === "string" && err.code.startsWith("ERR_PARSE_ARGS"))) {
     fail(SCRIPT, err.message);

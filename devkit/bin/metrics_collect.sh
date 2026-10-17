@@ -11,10 +11,13 @@
 #   snapshot    run the collectors and merge; build/metrics.json is the report
 #   check       snapshot, then `metrics_ratchet.py check` (the gate job; METRICS_REBASELINE=1,
 #               which the gate plan sets from the metrics-rebaseline label, adds --rebaseline-ok)
-#   tighten     snapshot, then lock in the BETTER numbers (commit the bounds in the same PR)
+#   tighten     snapshot, then lock in the BETTER numbers (commit the bounds in the same PR);
+#               exit 1 when a key is WORSE or MISSING, printed as check prints it, after
+#               writing the BETTER bounds and running the scorecard's tighten
 #   rebaseline  snapshot, then overwrite every bound (first adoption, or after a tool change)
 #   Every mode also runs the scorecard ratchet (bin/scorecard.py --mode <same>) when
-#   docs/metrics/scorecard.json exists (SCORECARD_BOUNDS overrides the path).
+#   docs/metrics/scorecard.json exists, and `check` also when only origin/main has it
+#   (SCORECARD_BOUNDS overrides the path).
 #
 # scripts/ci/metrics.conf, one collector per line (`#` comments and blank lines ignored):
 #   <name> <area> <command...>
@@ -56,8 +59,15 @@
 # tiers that ran in this gate) were written before this job and are merged into the snapshot;
 # an `rm -rf build/metrics` here would silently drop them.
 #
+# Findings: a collector whose command runs devkit's metrics/python.py, ts.mjs or rust.py gets
+# `--list-out build/metrics/<name>.findings.txt` appended (nothing to declare in the conf; a
+# command that names its own --list-out keeps it): the file, function, module behind every
+# count, so a lane reads what to fix instead of scripting it. Appended to the end of the
+# command, so the collector must be its last command (no trailing `&&`, `|` or `;`). The run ends with one `findings: <files>` line, whatever the verdict. The ratchet and the
+# scorecard never read these files.
+#
 # Output: the `metrics …` lines above, each collector's log tail (40 lines) on failure, then
-# the ratchet's own `ratchet …` lines. Exit: 0 ok, 1 the ratchet failed, 2 usage, a malformed
+# the ratchet's own `ratchet …` lines, then the `findings:` line. Exit: 0 ok, 1 the ratchet failed, 2 usage, a malformed
 # conf, a collector that failed or wrote no file, or an unreadable bounds file.
 # Portability: macOS bash 3.2 and GNU bash.
 set -uo pipefail
@@ -70,6 +80,9 @@ readonly COLLECT_DIR=build/metrics
 readonly AREAS="docs backend frontend native tooling other repo"
 readonly GATE_JSON=build/metrics/gate.json   # local_gate.sh's job seconds: which jobs ran
 readonly SUBCOMMANDS="snapshot check tighten rebaseline"
+# A conf command that runs one of devkit's --list-out collectors (any path prefix: devkit/,
+# ../devkit/). Matched against " <command> " so the name may end the line.
+readonly LIST_OUT_COLLECTOR='[[:space:]/]metrics/(python\.py|ts\.mjs|rust\.py)[[:space:]]'
 
 usage() {
   echo "usage: $0 <snapshot|check|tighten|rebaseline> [--conf FILE] [--bounds FILE] [--out FILE]" >&2
@@ -172,8 +185,17 @@ done
 toolchain_path . || die "$TOOLCHAIN_ERROR"
 mkdir -p "$COLLECT_DIR" || die "cannot create $COLLECT_DIR"
 for name in ${NAMES[@]+"${NAMES[@]}"}; do
-  rm -f "$COLLECT_DIR/$name.json" "$COLLECT_DIR/$name.log"
+  rm -f "$COLLECT_DIR/$name.json" "$COLLECT_DIR/$name.log" "$COLLECT_DIR/$name.findings.txt"
 done
+# print_findings: the last line of every run from here on (EXIT trap: the ratchet's `exit 1`
+# included), naming the findings files this run wrote.
+# shellcheck disable=SC2329  # invoked by the EXIT trap
+print_findings() {
+  local files=() f
+  for f in "$COLLECT_DIR"/*.findings.txt; do [ -f "$f" ] && files+=("$f"); done
+  [ ${#files[@]} -eq 0 ] || echo "findings: ${files[*]}"
+}
+trap print_findings EXIT
 t0=$SECONDS
 ran=0
 i=0
@@ -182,7 +204,11 @@ while [ "$i" -lt "${#NAMES[@]}" ]; do
     name=${NAMES[$i]}
     log=$COLLECT_DIR/$name.log
     out=$COLLECT_DIR/$name.json
-    bash -c "${COMMANDS[$i]}" </dev/null >"$log" 2>&1
+    command=${COMMANDS[$i]}
+    if [[ " $command " =~ $LIST_OUT_COLLECTOR ]] && [[ "$command" != *--list-out* ]]; then
+      command="$command --list-out $COLLECT_DIR/$name.findings.txt"
+    fi
+    bash -c "$command" </dev/null >"$log" 2>&1
     rc=$?
     if [ "$rc" -ne 0 ]; then
       echo "metrics $name FAIL (exit $rc; log: $log)"
@@ -213,14 +239,23 @@ python3 -I "$RATCHET" merge --out "$OUT" ${MERGE_ARGS[@]+"${MERGE_ARGS[@]}"} \
 
 RATCHET_ARGS=("$SUB" --snapshot "$OUT" --bounds "$BOUNDS")
 if [ "$SUB" = check ] && [ "${METRICS_REBASELINE:-0}" = 1 ]; then RATCHET_ARGS+=(--rebaseline-ok); fi
-python3 -I "$RATCHET" "${RATCHET_ARGS[@]}" || exit $?
+python3 -I "$RATCHET" "${RATCHET_ARGS[@]}"
+ratchet_rc=$?
+# A failing tighten (rc 1: a WORSE key) has still written its BETTER bounds; the scorecard's
+# tighten runs too, so one command locks in everything that improved before reporting the rest.
+if [ "$ratchet_rc" -ne 0 ] && { [ "$SUB" != tighten ] || [ "$ratchet_rc" -ne 1 ]; }; then
+  exit "$ratchet_rc"
+fi
 
 # The scorecard ratchet (bin/scorecard.py --mode): opt-in by committing docs/metrics/scorecard.json
 # (`scorecard.py . --mode rebaseline` once). Same subcommand, same label semantics, after the
 # metric bounds so its evidence lines read the snapshot this job just merged.
+# check also runs when only main has the file: deleting it lowers every track, which needs the label.
 SCORECARD_BOUNDS=${SCORECARD_BOUNDS:-docs/metrics/scorecard.json}
-if [ -f "$SCORECARD_BOUNDS" ]; then
+if [ -f "$SCORECARD_BOUNDS" ] \
+  || { [ "$SUB" = check ] && git cat-file -e "origin/main:$SCORECARD_BOUNDS" 2>/dev/null; }; then
   SC_ARGS=(. --mode "$SUB" --bounds-file "$SCORECARD_BOUNDS")
   if [ "$SUB" = check ] && [ "${METRICS_REBASELINE:-0}" = 1 ]; then SC_ARGS+=(--rebaseline-ok); fi
-  python3 -I "$HERE/scorecard.py" "${SC_ARGS[@]}" | grep -E '^(scorecard-ratchet|grade) ' || exit "${PIPESTATUS[0]}"
+  python3 -I "$HERE/scorecard.py" "${SC_ARGS[@]}" | grep -E '^(scorecard-ratchet(-bound)?|grade|metrics-rebaseline:) ' || exit "${PIPESTATUS[0]}"
 fi
+exit "$ratchet_rc"

@@ -9,7 +9,18 @@ keeps the gate deterministic and pays for one snapshot, not two.
 
 Who tightens (owner decision A, 2026-10-13): the PR that improves a number. `check` prints
 BETTER and a hint; the author runs `tighten` (`make metrics-tighten`) and commits the bounds in
-the same PR. Nothing writes to main after a merge.
+the same PR. Nothing writes to main after a merge. `tighten` also prints every WORSE and MISSING
+key with check's line and exits 1 after writing the BETTER bounds: it is the command an author
+runs before the gate, so it must show what the gate will refuse (finplat #660 learned of a
+regression only from a gate run).
+
+Report-only keys (`vuln.*`, `coupling.<scope>.fan_in_max`; is_report_only): collected and
+printed, never gated, even when a bounds file still holds one. `check` prints them as
+REPORT-ONLY and ignores them in the comparison with main (dropping one needs no label),
+`tighten` leaves them, `rebaseline` drops them and seeds none. Why fan-in (lead decision
+2026-10-17): a models or core hub has many importers by design, so its count is architecture,
+not drift; finplat #659 failed its gate because a new module imported the models hub. Fan-out
+(a god module) stays gated.
 
 Why `check` reads MAIN's bounds too: the gate checks the merged tree, so the bounds file it
 sees is the PR's own copy. Without a second reference a PR could loosen a bound by editing it.
@@ -22,7 +33,14 @@ Why a fail-closed label for loosening: tool knobs (jscpd min-tokens, a vulture w
 move numbers without code moving, so a legitimate reset must exist. It is granted only when
 the gate plan reads the `metrics-rebaseline` PR label and passes `--rebaseline-ok`; an
 unreadable label means no flag, so the ratchet holds. The author produces the looser file with
-`rebaseline`.
+`rebaseline` (`make metrics-rebaseline`) and commits it.
+
+What the label permits (Orbit #78/#79): COMMITTING bounds looser than main's, nothing else.
+Every measured value is still held to the PR's own bounds file in both modes, so a key the PR
+did not loosen cannot regress under the label. Before this, the label passed every WORSE key:
+#78 loosened two size bounds and merged with an unrelated coverage drop, and main then failed
+its own bounds on the next PR. The gate verifies the committed file; it never trusts the label
+for a number the file does not admit.
 
 Usage:
   metrics_ratchet.py check --snapshot S --bounds B [--base-ref REF | --base-bounds F]
@@ -54,10 +72,10 @@ Bounds (`docs/metrics/ratchet.json`): `{"<metric>": {"direction": "lower"|"highe
 (templates/metrics/ratchet.json): `rebaseline` fills it, `check` refuses it, so a copied
 template never gates on a placeholder such as coverage 0. `rebaseline` also seeds every
 snapshot key the bounds do not track yet (except the `gate`, `tier` and `tests` domains, never
-tracked) with the direction its domain fixes (DOMAIN_DIRECTIONS, the docs/metrics-keys.md
-table); a key of an unknown domain is an error naming it, so a repo-specific domain is added
-by hand with its direction. `rebaseline` and `tighten` copy
-`source` from the snapshot into every bound they write; `check` uses it only to recognise a
+seeded, and the report-only keys, which it also drops from the bounds) with the direction
+its domain fixes (DOMAIN_DIRECTIONS, the docs/metrics-keys.md table); a key of an unknown
+domain is an error naming it, so a repo-specific domain is added by hand with its direction.
+`rebaseline` and `tighten` copy `source` from the snapshot into every bound they write; `check` uses it only to recognise a
 skipped collector, and a bound whose `source` alone differs from main's has not moved. An
 empty bounds file `{}` is valid everywhere: a repo whose metrics.conf declares no collector
 yet still runs `check` and passes.
@@ -66,13 +84,17 @@ Output: `ratchet base <ref>:<path>|<file>|none (...)`; then one `ratchet-bound <
 -> <pr> LOOSENED|REMOVED|DIRECTION|TIGHTENED|ADDED` line per bound that differs from main; then
 one `ratchet <metric> <value> vs <bound> SAME|BETTER|WORSE|MISSING` line per tracked metric, or
 `ratchet <metric> - vs <bound> SKIPPED (collector <name> did not run)` when the bound's source
-is in the snapshot's `skipped`; `ratchet untracked <n>` (each listed with --show-untracked) and
-a summary line. SKIPPED never fails: a frontend-only PR cannot have changed backend coverage.
+is in the snapshot's `skipped`, `ratchet <metric> <value>|- vs <bound> REPORT-ONLY (...)` for a
+report-only bound; `ratchet untracked <n>` (each listed with --show-untracked) and a summary
+line. SKIPPED never fails: a frontend-only PR cannot have changed backend coverage.
 A tracked metric absent for any other reason (no `source`, or its collector ran) is MISSING
 and fails even with --rebaseline-ok: a renamed or removed metric is fixed by editing the
 bounds file (which itself needs the label).
+WORSE fails with or without --rebaseline-ok; the label only accepts LOOSENED, REMOVED and
+DIRECTION bound lines, and under it each WORSE key prints a `metrics-rebaseline: ...` fix line.
 
-Exit codes: 0 ok, 1 ratchet failed, 2 usage error or unreadable/invalid file or base ref.
+Exit codes: 0 ok, 1 ratchet failed (`tighten`: a WORSE or MISSING key, after writing the
+tightened bounds), 2 usage error or unreadable/invalid file or base ref.
 """
 
 from __future__ import annotations
@@ -99,15 +121,20 @@ DOMAIN_DIRECTIONS = {
     "dead": "lower",
     "complexity": "lower",
     "coupling": "lower",
+    "guards": "lower",
     "bundle": "lower",
     "statements": "lower",
     "size": "lower",
     "vuln": "lower",
     "allowlist": "lower",
 }
-# Never tracked (docs/metrics-keys.md): area-scoped jobs leave them absent on narrow PRs and
-# the seconds are noisy. rebaseline leaves them untracked.
-NEVER_TRACKED_DOMAINS = frozenset({"gate", "tier", "tests", "vuln"})
+# Never seeded by rebaseline (docs/metrics-keys.md): area-scoped jobs leave them absent on
+# narrow PRs and the seconds are noisy. A repo may still track one by hand, with headroom.
+NEVER_SEEDED_DOMAINS = frozenset({"gate", "tier", "tests"})
+# Report-only (module docstring): never gated, whatever the bounds file says. `vuln` moves with
+# a new advisory, not a code change; fan-in of a hub is architecture, not drift.
+REPORT_ONLY_DOMAINS = frozenset({"vuln"})
+REPORT_ONLY_STATS = frozenset({("coupling", "fan_in_max")})  # (domain, last key segment)
 DEFAULT_BASE_REF = "origin/main"
 
 
@@ -304,6 +331,18 @@ def skipped_collector(metric: str, bound: Bound, snapshot: Snapshot) -> str | No
     return None
 
 
+def is_report_only(metric: str) -> bool:
+    parts = metric.split(".")
+    return parts[0] in REPORT_ONLY_DOMAINS or (parts[0], parts[-1]) in REPORT_ONLY_STATS
+
+
+def _fail(message: str) -> None:
+    """A FAIL line on stderr, after everything already printed: stdout is block-buffered in a
+    pipe (metrics_collect.sh), so without the flush the line can land above the keys it names."""
+    sys.stdout.flush()
+    print(message, file=sys.stderr)
+
+
 def is_better(a: float, b: float, direction: str) -> bool:
     """True when `a` is strictly better than `b` under `direction`."""
     return a < b if direction == "lower" else a > b
@@ -325,6 +364,8 @@ def compare_to_base(base: dict[str, Bound], bounds: dict[str, Bound]) -> dict[st
     """Print one `ratchet-bound` line per bound that moved from main; count loosenings."""
     counts = {"loosened": 0, "tightened": 0, "added": 0}
     for metric in sorted(set(base) | set(bounds)):
+        if is_report_only(metric):
+            continue  # never gated, so moving or dropping its bound loosens nothing
         old, new = base.get(metric), bounds.get(metric)
         if new is None:
             status = "REMOVED"
@@ -352,11 +393,32 @@ def compare_to_base(base: dict[str, Bound], bounds: dict[str, Bound]) -> dict[st
     return counts
 
 
+def _status_line(metric: str, bound: Bound, snapshot: Snapshot, bounds_path: Path) -> str:
+    """Print check's `ratchet <metric> ...` line for a gated bound and return its status
+    (SAME, BETTER, WORSE, MISSING, SKIPPED). `tighten` prints the same lines, so an author sees
+    before the gate exactly what the gate will say."""
+    if metric not in snapshot.values:
+        collector = skipped_collector(metric, bound, snapshot)
+        if collector is None:
+            print(f"ratchet {metric} - vs {_fmt(bound.bound)} MISSING")
+            return "MISSING"
+        print(
+            f"ratchet {metric} - vs {_fmt(bound.bound)} SKIPPED (collector {collector} did not run)"
+        )
+        return "SKIPPED"
+    value = snapshot.values[metric]
+    if bound.bound is None:  # check refuses unset bounds first; tighten fills them
+        raise InputError(f"bounds {bounds_path}: {metric} unset")
+    status = classify(value, bound.bound, bound.direction)
+    print(f"ratchet {metric} {_fmt(value)} vs {_fmt(bound.bound)} {status}")
+    return status
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     snapshot = load_snapshot(Path(args.snapshot), allow_empty=True)
     bounds_path = Path(args.bounds)
     bounds = load_bounds(bounds_path)
-    unset = sorted(m for m, b in bounds.items() if b.bound is None)
+    unset = sorted(m for m, b in bounds.items() if b.bound is None and not is_report_only(m))
     if unset:
         raise InputError(
             f"bounds {bounds_path}: {', '.join(unset)} unset; run `metrics_ratchet.py rebaseline` "
@@ -371,27 +433,22 @@ def cmd_check(args: argparse.Namespace) -> int:
     print(f"ratchet base {base_label}")
     moved = compare_to_base(base, bounds) if base is not None else {"loosened": 0}
 
-    counts = {"SAME": 0, "BETTER": 0, "WORSE": 0, "MISSING": 0, "SKIPPED": 0}
+    counts = {"SAME": 0, "BETTER": 0, "WORSE": 0, "MISSING": 0, "SKIPPED": 0, "REPORT-ONLY": 0}
+    worse: list[tuple[str, float, float]] = []
     for metric in sorted(bounds):
         bound = bounds[metric]
-        if metric not in snapshot.values:
-            collector = skipped_collector(metric, bound, snapshot)
-            if collector is None:
-                counts["MISSING"] += 1
-                print(f"ratchet {metric} - vs {_fmt(bound.bound)} MISSING")
-            else:
-                counts["SKIPPED"] += 1
-                print(
-                    f"ratchet {metric} - vs {_fmt(bound.bound)} SKIPPED "
-                    f"(collector {collector} did not run)"
-                )
+        if is_report_only(metric):
+            counts["REPORT-ONLY"] += 1
+            value = snapshot.values.get(metric)
+            print(
+                f"ratchet {metric} {'-' if value is None else _fmt(value)} vs {_fmt(bound.bound)} "
+                "REPORT-ONLY (never gated; the bound may be dropped)"
+            )
             continue
-        value = snapshot.values[metric]
-        if bound.bound is None:  # refused above; narrows the type for classify
-            raise InputError(f"bounds {bounds_path}: {metric} unset")
-        status = classify(value, bound.bound, bound.direction)
+        status = _status_line(metric, bound, snapshot, bounds_path)
         counts[status] += 1
-        print(f"ratchet {metric} {_fmt(value)} vs {_fmt(bound.bound)} {status}")
+        if status == "WORSE":
+            worse.append((metric, snapshot.values[metric], bound.bound))
 
     untracked = sorted(set(snapshot.values) - set(bounds))
     if args.show_untracked:
@@ -400,30 +457,37 @@ def cmd_check(args: argparse.Namespace) -> int:
     print(
         f"ratchet summary same={counts['SAME']} better={counts['BETTER']} "
         f"worse={counts['WORSE']} missing={counts['MISSING']} skipped={counts['SKIPPED']} "
-        f"untracked={len(untracked)} loosened={moved['loosened']}"
+        f"untracked={len(untracked)} loosened={moved['loosened']} "
+        f"report_only={counts['REPORT-ONLY']}"
     )
 
     failed = False
     if counts["MISSING"]:
-        print(
+        _fail(
             f"ratchet FAIL: {counts['MISSING']} tracked metric(s) absent from the snapshot; "
-            f"remove or rename them in {bounds_path}",
-            file=sys.stderr,
+            f"remove or rename them in {bounds_path}"
         )
         failed = True
-    regressions = counts["WORSE"] + moved["loosened"]
-    if regressions and not args.rebaseline_ok:
-        print(
-            f"ratchet FAIL: {counts['WORSE']} metric(s) worse than their bound, "
-            f"{moved['loosened']} bound(s) looser than main; fix them, or label the PR "
-            "metrics-rebaseline if a tool change moved the numbers",
-            file=sys.stderr,
+    if worse and args.rebaseline_ok:
+        # The label admits a looser committed bound, never a value past the committed one.
+        for metric, value, bound_value in worse:
+            _fail(
+                f"metrics-rebaseline: {metric} {_fmt(value)} is past its bound "
+                f"{_fmt(bound_value)}; set the bound in {bounds_path} or fix the regression"
+            )
+        failed = True
+    elif worse or (moved["loosened"] and not args.rebaseline_ok):
+        _fail(
+            f"ratchet FAIL: {len(worse)} metric(s) worse than their bound, "
+            f"{moved['loosened']} bound(s) looser than main; fix them, or, if a tool change "
+            f"moved the numbers, commit the looser {bounds_path} (`make metrics-rebaseline`) "
+            "and label the PR metrics-rebaseline"
         )
         failed = True
     if failed:
         return EXIT_RATCHET
-    if regressions:
-        print("ratchet rebaseline accepted")
+    if moved["loosened"]:
+        print(f"ratchet rebaseline accepted: {moved['loosened']} bound(s) looser than main")
     if counts["BETTER"]:
         print(
             f"ratchet hint: {counts['BETTER']} metric(s) better than their bound; run "
@@ -433,28 +497,42 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def cmd_tighten(args: argparse.Namespace) -> int:
-    """Move every bound the snapshot beats to the snapshot value; never loosen any."""
+    """Move every bound the snapshot beats to the snapshot value; never loosen any. Every
+    WORSE and MISSING key prints check's line and makes the exit 1, after the write."""
     snapshot = load_snapshot(Path(args.snapshot), allow_empty=True)
     bounds_path = Path(args.bounds)
     bounds = load_bounds(bounds_path)
     tightened = dict(bounds)
     changed = 0
+    failing = {"WORSE": 0, "MISSING": 0}
     for metric in sorted(bounds):
         bound = bounds[metric]
-        if metric not in snapshot.values:
-            collector = skipped_collector(metric, bound, snapshot)
-            why = "MISSING" if collector is None else f"SKIPPED (collector {collector} did not run)"
-            print(f"ratchet {metric} - vs {_fmt(bound.bound)} {why} (left as is)")
+        if is_report_only(metric):
             continue
-        value = snapshot.values[metric]
-        if bound.bound is None or is_better(value, bound.bound, bound.direction):
+        if metric in snapshot.values and (
+            bound.bound is None or is_better(snapshot.values[metric], bound.bound, bound.direction)
+        ):
             tightened[metric] = _with_value(metric, bound, snapshot)
             changed += 1
-            print(f"ratchet {metric} {_fmt(bound.bound)} -> {_fmt(value)}")
+            print(f"ratchet {metric} {_fmt(bound.bound)} -> {_fmt(snapshot.values[metric])}")
+            continue
+        status = _status_line(metric, bound, snapshot, bounds_path)
+        if status in failing:
+            failing[status] += 1
     if changed:
         write_bounds(bounds_path, tightened)
     print(f"ratchet tightened {changed} bound(s) in {bounds_path}")
-    return EXIT_OK
+    if not any(failing.values()):
+        return EXIT_OK
+    _fail(
+        f"ratchet FAIL: {failing['WORSE']} metric(s) worse than their bound and "
+        f"{failing['MISSING']} absent from the snapshot; `make ci-metrics` and the gate will "
+        "fail on them. Fix each WORSE regression (build/metrics/*.findings.txt names the code), "
+        f"remove or rename a MISSING key in {bounds_path}, or, if a tool change moved the "
+        "numbers, run `make metrics-rebaseline`, commit the bounds and label the PR "
+        "metrics-rebaseline"
+    )
+    return EXIT_RATCHET
 
 
 def cmd_rebaseline(args: argparse.Namespace) -> int:
@@ -466,7 +544,9 @@ def cmd_rebaseline(args: argparse.Namespace) -> int:
     missing = sorted(
         m
         for m, b in bounds.items()
-        if m not in snapshot.values and skipped_collector(m, b, snapshot) is None
+        if m not in snapshot.values
+        and skipped_collector(m, b, snapshot) is None
+        and not is_report_only(m)
     )
     if missing:
         for metric in missing:
@@ -478,8 +558,13 @@ def cmd_rebaseline(args: argparse.Namespace) -> int:
         )
         return EXIT_RATCHET
     rebased: dict[str, Bound] = {}
+    dropped = 0
     for metric in sorted(bounds):
         bound = bounds[metric]
+        if is_report_only(metric):
+            dropped += 1
+            print(f"ratchet {metric} {_fmt(bound.bound)} -> - (dropped: report-only, never gated)")
+            continue
         if metric in snapshot.values:
             rebased[metric] = _with_value(metric, bound, snapshot)
             print(f"ratchet {metric} {_fmt(bound.bound)} -> {_fmt(rebased[metric].bound)}")
@@ -490,11 +575,12 @@ def cmd_rebaseline(args: argparse.Namespace) -> int:
                 f"(collector {bound.source} did not run) (left as is)"
             )
     # Seed what the snapshot has and the bounds do not, so adoption starts from `{}`: every
-    # key except the never-tracked domains, with the direction its domain fixes.
+    # key except the never-seeded domains and the report-only keys, with the direction its
+    # domain fixes.
     seeded = 0
     for metric in sorted(set(snapshot.values) - set(bounds)):
         domain = metric.partition(".")[0]
-        if domain in NEVER_TRACKED_DOMAINS:
+        if domain in NEVER_SEEDED_DOMAINS or is_report_only(metric):
             continue
         direction = DOMAIN_DIRECTIONS.get(domain)
         if direction is None:
@@ -506,7 +592,11 @@ def cmd_rebaseline(args: argparse.Namespace) -> int:
         seeded += 1
         print(f"ratchet {metric} - -> {_fmt(snapshot.values[metric])} (seeded, {direction})")
     write_bounds(bounds_path, rebased)
-    print(f"ratchet rebaselined {len(rebased)} bound(s) in {bounds_path} ({seeded} seeded)")
+    dropped_note = f", {dropped} report-only dropped" if dropped else ""
+    print(
+        f"ratchet rebaselined {len(rebased)} bound(s) in {bounds_path} "
+        f"({seeded} seeded{dropped_note})"
+    )
     return EXIT_OK
 
 
@@ -561,8 +651,8 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument(
         "--rebaseline-ok",
         action="store_true",
-        help="accept WORSE metrics and looser bounds; pass only when the PR carries the "
-        "metrics-rebaseline label",
+        help="accept bounds looser than main's (values still meet the PR's bounds); pass "
+        "only when the PR carries the metrics-rebaseline label",
     )
     check.add_argument(
         "--show-untracked",

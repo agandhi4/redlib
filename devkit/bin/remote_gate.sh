@@ -4,7 +4,7 @@
 # its exit code is this exit code. The host posts the `local-gate` status itself (it has gh).
 # Normally reached through gate.sh (`make gate PR=<n>`), which decides remote vs local.
 #
-# Usage: devkit/bin/remote_gate.sh <pr> [--no-post]
+# Usage: devkit/bin/remote_gate.sh <pr> [--no-post] [--expect-head <sha>]   (both forwarded)
 #
 # Settings (environment, else ${XDG_CONFIG_HOME:-$HOME/.config}/devkit/gate.env; env wins):
 #   GATE_REMOTE_HOST      [user@]host to ssh to (required here)
@@ -21,7 +21,7 @@
 #   2. fetch origin main, force the checkout onto it and remove untracked files: local_gate.sh
 #      reads the plan from the checkout it runs from, so a stale or dirty one would gate with
 #      the wrong policy;
-#   3. run devkit/bin/local_gate.sh <pr> [--no-post] there, which fetches the PR ref itself
+#   3. run devkit/bin/local_gate.sh <pr> [--no-post] [--expect-head <sha>] there, which fetches the PR ref itself
 #      (with its fork guard and missing-pull-ref fallback).
 # Remote gates keep their state in $GATE_REMOTE_ROOT/.state (logs: .state/<GATE_STATE_NAME>/
 # logs/<pr>/), not the host's default: the host's merge queue gates the same repo from its own
@@ -43,17 +43,24 @@
 # the host was simply off-LAN (2026-10-16).
 set -uo pipefail
 
-usage() { echo "usage: $0 <pr-number> [--no-post]"; }
+usage() { echo "usage: $0 <pr-number> [--no-post] [--expect-head <sha>]"; }
 
 PR=""
 FORWARD=()
-for arg in "$@"; do
-  case "$arg" in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --no-post) FORWARD+=(--no-post) ;;
+    --expect-head)
+      # Validated here too: the value travels inside the single-quoted remote command.
+      [[ "${2:-}" =~ ^[0-9a-f]{40}$ ]] \
+        || { echo "remote_gate: --expect-head needs a full 40-hex commit SHA (got '${2:-}')" >&2; exit 2; }
+      FORWARD+=(--expect-head "$2")
+      shift ;;
     -h|--help) usage; exit 0 ;;
     ''|*[!0-9]*) usage >&2; exit 2 ;;
-    *) PR=$arg ;;
+    *) PR=$1 ;;
   esac
+  shift
 done
 [ -n "$PR" ] || { usage >&2; exit 2; }
 

@@ -45,7 +45,7 @@ is README.md "Architecture". Invariants of the design:
 
 ## Commands
 ```sh
-make ci-quick                  # shellcheck, python unit tests, devkit's own guards on itself
+make ci-quick                  # shellcheck, python + template unit tests (npm), devkit's own guards on itself
 make ci-unit                   # bats tests/ (~2 min)
 make gate PR=<n>               # both, on the PR merged into origin/main; posts `local-gate`
 bin/docs_check.sh --report .   # the docs numbers behind the diet rules; --fix does the mechanical moves

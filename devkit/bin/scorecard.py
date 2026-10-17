@@ -17,8 +17,10 @@ hooks), config files, the gate's state dir, and the devkit checkout this script 
 The ratchet (flywheel step 4): docs/metrics/scorecard.json holds the committed pass share per
 RATCHETED track; `check` fails when a track's share is below its committed share (exit 1,
 `scorecard-ratchet <track> <now> vs <bound> WORSE`), `tighten` raises the committed shares to
-the better current ones, `rebaseline` writes them all (METRICS_REBASELINE=1 makes `check` accept
-a drop, like the metrics ratchet). Only the tracks the code owns are ratcheted: T7 (live
+the better current ones, `rebaseline` writes them all. `check` holds today's shares to the
+PR's committed file and that file to main's copy; METRICS_REBASELINE=1 (the metrics-rebaseline
+label) accepts a committed share lower than main's, never a share below the committed file, as
+in the metrics ratchet. Only the tracks the code owns are ratcheted: T7 (live
 runtime), T8 (gate and hook seconds), T9 (ledger), T11 (new advisories) and T15 (devkit moving)
 change without a code change and would fail PRs for nothing; they stay graded, not gated.
 metrics_collect.sh runs the mode it was given when the bounds file exists, after the metrics
@@ -357,7 +359,7 @@ def t2_quality(repo: Repo, conf: dict[str, float]) -> None:
                 bad.append(f"{k}={v:g}>{limit:g}")
         repo.add("T2", "quality.complexity", not bad, "complexity within bands" if not bad else "; ".join(bad))
     else:
-        repo.add("T2", "quality.complexity", None, "no complexity.* keys", mechanism="python.py --mccabe --cognitive / ts.mjs --cyclomatic --cognitive")
+        repo.add("T2", "quality.complexity", None, "no complexity.* keys", mechanism="python.py --mccabe --cognitive / ts.mjs --cyclomatic --cognitive / rust.py --cognitive")
     pct = [v for k, v in repo.metrics.items() if k.startswith("duplication.") and k.endswith("jscpd_percent")]
     clones = [v for k, v in repo.metrics.items() if k.startswith("duplication.") and k.endswith("clones")]
     if pct:
@@ -378,7 +380,7 @@ def t2_quality(repo: Repo, conf: dict[str, float]) -> None:
 def t3_dead(repo: Repo, conf: dict[str, float]) -> None:
     dead = {k: v for k, v in repo.metrics.items() if k.startswith("dead.")}
     if not dead:
-        repo.add("T3", "dead.unused", None, "no dead.* keys", mechanism="python.py --vulture / ts.mjs --knip")
+        repo.add("T3", "dead.unused", None, "no dead.* keys", mechanism="python.py --vulture / ts.mjs --knip / rust.py --dead")
         return
     bad = [f"{k}={v:g}" for k, v in sorted(dead.items()) if v > conf["dead_findings_max"]]
     repo.add("T3", "dead.unused", not bad, "no dead code findings" if not bad else "; ".join(bad))
@@ -762,41 +764,64 @@ def base_tracks(repo: Repo, bounds_file: Path, base_ref: str, base_bounds: Path 
     return (tracks, f"{base_ref}:{rel}") if tracks is not None else None
 
 
+def ratchet_check(now: dict[str, float], bounds_file: Path, rebaseline_ok: bool, base: tuple[dict[str, float] | None, str] | None) -> int:
+    """The gate's check, the metrics ratchet's semantics (Orbit #78/#79): every share must meet
+    the branch's committed file, and that file may sit below main's only under the label. The
+    label admits a lower COMMITTED share; it never admits a share below the committed one, so a
+    track the PR did not lower cannot regress under it. A deleted file lowers every track."""
+    if base is None:
+        return EXIT_USAGE
+    main, label = base
+    if bounds_file.is_file():
+        committed = parse_tracks(bounds_file.read_text(), str(bounds_file))
+        if committed is None:
+            return EXIT_USAGE
+    elif main is None:
+        print(f"scorecard-ratchet: no bounds at {bounds_file} or {label}; run --mode rebaseline once and commit it (first adoption)")
+        return 0
+    else:
+        committed = {}
+    print(f"scorecard-ratchet base {label}" + (" (none: first adoption)" if main is None else ""))
+    lowered = 0
+    for t, was in sorted((main or {}).items()):
+        if t not in committed or committed[t] < was:
+            lowered += 1
+            print(f"scorecard-ratchet-bound {t} {was:g} -> {f'{committed[t]:g}' if t in committed else '-'} LOOSENED")
+    rc = 0
+    for t, bound in sorted(committed.items()):
+        cur = now.get(t)
+        if cur is None:
+            print(f"scorecard-ratchet {t} - vs {bound:g} MISSING")
+            rc = 1
+            continue
+        verdict = "SAME" if cur == bound else "BETTER" if cur > bound else "WORSE"
+        print(f"scorecard-ratchet {t} {cur:g} vs {bound:g} {verdict}")
+        if verdict == "WORSE":
+            rc = 1
+            if rebaseline_ok:
+                print(f"metrics-rebaseline: {t} {cur:g} is past its bound {bound:g}; lower it in {bounds_file} (scorecard.py . --mode rebaseline) or fix the regression")
+    if lowered and not rebaseline_ok:
+        rc = 1
+    if rc:
+        print(f"scorecard-ratchet FAIL: {len(committed)} tracks ratcheted, {lowered} lowered from main; fix the track, or, when a tool change moved it, commit the lower file (--mode rebaseline) and label the PR metrics-rebaseline")
+    else:
+        print(f"scorecard-ratchet ok: {len(committed)} tracks ratcheted" + (f"; rebaseline accepted: {lowered} lowered from main" if lowered else ""))
+    return rc
+
+
 def ratchet(repo: Repo, conf: dict[str, float], bounds_file: Path, mode: str, rebaseline_ok: bool, *, base_ref: str = "origin/main", base_bounds: Path | None = None) -> int:
     """check|tighten|rebaseline over the committed per-track shares. Returns the exit code.
-    check compares against main's bounds (base_tracks); tighten and rebaseline rewrite the
-    branch's file."""
+    check holds today's shares to the branch's file and the branch's file to main's
+    (base_tracks); tighten and rebaseline rewrite the branch's file."""
     shares = track_shares(repo)
     now = {t: round(s, 3) for t, s in shares.items() if t in RATCHETED and s is not None}
-    committed: dict[str, float] = {}
     if mode == "check":
-        base = base_tracks(repo, bounds_file, base_ref, base_bounds)
-        if base is None:
+        return ratchet_check(now, bounds_file, rebaseline_ok, base_tracks(repo, bounds_file, base_ref, base_bounds))
+    committed: dict[str, float] | None = {}
+    if bounds_file.is_file():
+        committed = parse_tracks(bounds_file.read_text(), str(bounds_file))
+        if committed is None:
             return EXIT_USAGE
-        tracks, label = base
-        if tracks is None:
-            print(f"scorecard-ratchet: no bounds at {label}; run --mode rebaseline once and commit it (first adoption)")
-            return 0
-        committed = tracks
-        print(f"scorecard-ratchet base {label}")
-    elif bounds_file.is_file():
-        committed = parse_tracks(bounds_file.read_text(), str(bounds_file)) or {}
-        if not committed and parse_tracks(bounds_file.read_text(), str(bounds_file)) is None:
-            return EXIT_USAGE
-    rc = 0
-    if mode == "check":
-        for t, bound in sorted(committed.items()):
-            cur = now.get(t)
-            if cur is None:
-                print(f"scorecard-ratchet {t} - vs {bound:g} MISSING")
-                rc = 1
-                continue
-            verdict = "SAME" if cur == bound else "BETTER" if cur > bound else "WORSE"
-            print(f"scorecard-ratchet {t} {cur:g} vs {bound:g} {verdict}" + (" (allowed: METRICS_REBASELINE)" if verdict == "WORSE" and rebaseline_ok else ""))
-            if verdict == "WORSE" and not rebaseline_ok:
-                rc = 1
-        print(f"scorecard-ratchet {'FAIL' if rc else 'ok'}: {len(committed)} tracks ratcheted" + ("; fix the track, or label the PR metrics-rebaseline when a tool change moved it" if rc else ""))
-        return rc
     new = dict(committed)
     for t, cur in now.items():
         if mode == "rebaseline" or t not in new or cur > new[t]:

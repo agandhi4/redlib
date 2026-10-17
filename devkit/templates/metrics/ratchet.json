@@ -7,6 +7,14 @@
     "direction": "lower",
     "bound": null
   },
+  "complexity.app.cognitive_max": {
+    "direction": "lower",
+    "bound": null
+  },
+  "complexity.app.cognitive_over_15": {
+    "direction": "lower",
+    "bound": null
+  },
   "complexity.backend.cognitive_max": {
     "direction": "lower",
     "bound": null
@@ -39,19 +47,11 @@
     "direction": "lower",
     "bound": null
   },
-  "coupling.backend.fan_in_max": {
-    "direction": "lower",
-    "bound": null
-  },
   "coupling.backend.fan_out_max": {
     "direction": "lower",
     "bound": null
   },
   "coupling.frontend.cycles": {
-    "direction": "lower",
-    "bound": null
-  },
-  "coupling.frontend.fan_in_max": {
     "direction": "lower",
     "bound": null
   },
@@ -73,6 +73,10 @@
   },
   "coverage.frontend.lines": {
     "direction": "higher",
+    "bound": null
+  },
+  "dead.app.rustc": {
+    "direction": "lower",
     "bound": null
   },
   "dead.backend.vulture": {
