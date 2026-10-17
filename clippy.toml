@@ -1,0 +1,4 @@
+# Graduated from the ratchet key complexity.app.cognitive_over_15 (docs/decisions.md
+# 2026-10-17 "Cognitive complexity graduates to clippy"); ci-quick denies the lint. Same
+# threshold as devkit/metrics/rust.py, which overrides this line with 0 to score every function.
+cognitive-complexity-threshold = 15
