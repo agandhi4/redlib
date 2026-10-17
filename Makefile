@@ -14,15 +14,29 @@ CI_IMAGE ?= redlib:ci
 CI_BUILD_VERSION ?= $(shell git rev-parse --short=7 HEAD)
 
 .DEFAULT_GOAL := help
-.PHONY: help ci-quick ci-unit test-live ci-image gate install hooks-check devkit-sync devkit-check toolchain-check workflows-check docs-check release-check secrets-check ci-metrics metrics-snapshot metrics-tighten metrics-rebaseline
+.PHONY: help ci-quick ci-guards ci-lint ci-typecheck ci-unit test-live ci-image gate install hooks-check devkit-sync devkit-check toolchain-check workflows-check docs-check release-check secrets-check secrets-staged ci-metrics metrics-snapshot metrics-tighten metrics-rebaseline
 
 help: ## list targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
 
-# clippy denies cognitive_complexity over clippy.toml's threshold (15): the ratchet key
-# complexity.app.cognitive_over_15 graduated to this lint (docs/decisions.md 2026-10-17).
-ci-quick: devkit-check toolchain-check workflows-check docs-check release-check secrets-check ## format, lint (clippy -D warnings, cognitive complexity 15) and repo guards (Actions + gate)
+# The union recipe: Actions and the gate run ci-quick; the two git hooks run its parts
+# (scripts/ci/hooks.conf, devkit README "Git hooks"): pre-commit the seconds-long ci-guards,
+# secrets-staged and ci-lint, pre-push ci-typecheck and ci-unit. A new quick check goes into a
+# part, and a new part into both ci-quick and one hook, or the hooks stop covering the gate.
+# Guards first: an in-repo devkit/ edit, a disagreeing Rust pin or an unpinned action fails
+# before anything compiles.
+ci-quick: ci-guards secrets-check ci-lint ci-typecheck ## guards, secrets, fmt and clippy (Actions + gate)
+
+ci-guards: devkit-check toolchain-check workflows-check docs-check release-check ## pre-commit: the repo guards, no compile
+
+# rustfmt parses without compiling, so it stays seconds.
+ci-lint: ## pre-commit: cargo fmt --check
 	$(CARGO) fmt --all -- --check
+
+# clippy is `cargo check` plus its lints: the compile is the cost, so it is pre-push's typecheck.
+# It denies cognitive_complexity over clippy.toml's threshold (15): the ratchet key
+# complexity.app.cognitive_over_15 graduated to this lint (docs/decisions.md 2026-10-17).
+ci-typecheck: ## pre-push: clippy -D warnings, cognitive complexity 15
 	$(CARGO) clippy --locked --all-targets -- -D warnings -D clippy::cognitive_complexity
 
 # Offline and deterministic: every test that calls live Reddit is #[ignore = "hits live reddit"]
@@ -102,6 +116,9 @@ docs-check: ## part of ci-quick: AGENTS.md real, CLAUDE.md symlink, decisions.md
 
 secrets-check: ## part of ci-quick: no committed credentials (fixtures in scripts/ci/secrets_allow.txt)
 	devkit/bin/secrets_check.sh .
+
+secrets-staged: ## pre-commit's half of secrets-check: the staged paths only (the gate scans the tree)
+	devkit/bin/secrets_check.sh --staged .
 
 release-check: ## part of ci-quick: APP_VERSION baked into the image (ARG/ENV/LABEL), never set by compose
 	devkit/bin/release_check.sh

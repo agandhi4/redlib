@@ -35,8 +35,9 @@
 #   :only=<globs>    run the step only when SOME changed path matches one of the globs
 #   :always          run the step on every change
 #
-# Timings: every step that ran appends `<date>\t<hook>\t<label>\t<seconds>\t<ok|fail>` and the
-# hook appends `<date>\t<hook>\ttotal\t<seconds>\t<ok|fail>` to
+# Timings: every step that ran appends `<date>\t<hook>\t<label>\t<seconds>\t<ok|fail>` (plus a
+# sixth note column when it flipped core.bare, below) and the hook appends
+# `<date>\t<hook>\ttotal\t<seconds>\t<ok|fail>` to
 # ${XDG_STATE_HOME:-~/.local/state}/devkit/hooks/<repo>.tsv (never printed, never fails the
 # hook). <repo> is the MAIN checkout's directory name (the parent of the common git dir), so a
 # commit in a worktree (.claude/worktrees/<branch>) lands in the repo's file, not <branch>.tsv;
@@ -68,6 +69,17 @@
 # pre-push. When .gitattributes uses LFS, every pre-push outcome that lets the push through
 # (pass, skip, nothing to check) runs `git lfs pre-push` with the same args and stdin, or LFS
 # objects would never upload. LFS without git-lfs installed blocks the push.
+#
+# core.bare (devkit #48): in a linked worktree's hook git exports GIT_DIR, and a step that runs
+# `git init <dir>` (or `git clone`, `git -C <other> config`) then reinitializes the HOOK's
+# repository instead, writing core.bare=true into the config every checkout of it shares; the main
+# checkout then refuses `git status`. So the steps run without GIT_DIR/GIT_WORK_TREE whenever git
+# finds the same git dir from <root> without them (always, unless git was invoked with an explicit
+# --git-dir). GIT_INDEX_FILE stays: a pre-commit step reads the index being committed. And each
+# step is watched: core.bare (and `rev-parse --is-bare-repository`) is read before the first step
+# and after every step; a change prints `hook_steps: core.bare flipped to <v> after step <label>`
+# to stderr, adds `core.bare=<v> is-bare=<v>` as a sixth column on that step's ledger row, and
+# restores the value from before the step. Only a failed restore fails the hook.
 #
 # Toolchains: before the first step, toolchain_path (bin/toolchain_path.sh, the gate's own code)
 # puts the checkout's pinned Node (.nvmrc) and Rust (rust-toolchain.toml) first on PATH, so
@@ -183,7 +195,9 @@ run_hook_steps() {
     echo "– native-only change (ios/, OrbitAgent/, *.xcodeproj/): hooks run nothing for it; build and test it on the Mac"
   fi
 
-  local i=0 hook_start step_start
+  _hook_drop_git_dir "$root"
+  local i=0 hook_start step_start bare_before
+  bare_before=$(_hook_bare_state "$root")
   hook_start=$(date +%s)
   for step in ${steps[@]+"${steps[@]}"}; do
     reason=${plan[$i]}
@@ -199,7 +213,8 @@ run_hook_steps() {
     rc=0
     step_start=$(date +%s)
     run_step "$HOOK_STEP_LABEL" make -C "$root" --no-print-directory "$HOOK_STEP_TARGET" || rc=$?
-    _hook_record "$root" "$hook" "$HOOK_STEP_LABEL" "$step_start" "$rc"
+    _hook_bare_restore "$root" "$HOOK_STEP_LABEL" "$bare_before" || [ "$rc" -ne 0 ] || rc=1
+    _hook_record "$root" "$hook" "$HOOK_STEP_LABEL" "$step_start" "$rc" "$HOOK_BARE_NOTE"
     if [ "$rc" -ne 0 ]; then
       _hook_record "$root" "$hook" total "$hook_start" "$rc"
       echo "$hook: blocked by '$HOOK_STEP_LABEL'; fix it and try again"
@@ -212,14 +227,57 @@ run_hook_steps() {
   _hook_allow_push "$uses_lfs" "$push_input" "$@"
 }
 
-# <root> <hook> <label> <start epoch> <rc>: one timing line in the per-machine hooks ledger
-# (header comment above). Best effort: an unwritable state dir never fails a hook.
+# <root> <hook> <label> <start epoch> <rc> [note]: one timing line in the per-machine hooks
+# ledger (header comment above); a note is a sixth column, which scorecard.py T8 ignores (it reads
+# columns 2-4). Best effort: an unwritable state dir never fails a hook.
 _hook_record() {
-  local root=$1 hook=$2 label=$3 start=$4 rc=$5 dir
+  local root=$1 hook=$2 label=$3 start=$4 rc=$5 note=${6:-} dir row
   dir=${XDG_STATE_HOME:-$HOME/.local/state}/devkit/hooks
   mkdir -p "$dir" 2>/dev/null || return 0
-  printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$hook" "$label" "$(( $(date +%s) - start ))" \
-    "$([ "$rc" -eq 0 ] && echo ok || echo fail)" >>"$dir/$(_hook_ledger_name "$root").tsv" 2>/dev/null || true
+  row=$(printf '%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$hook" "$label" "$(( $(date +%s) - start ))" \
+    "$([ "$rc" -eq 0 ] && echo ok || echo fail)")
+  [ -z "$note" ] || row+=$'\t'$note
+  printf '%s\n' "$row" >>"$dir/$(_hook_ledger_name "$root").tsv" 2>/dev/null || true
+}
+
+# <root>: unexport GIT_DIR and GIT_WORK_TREE when git resolves the same git dir from <root>
+# without them (header: core.bare). Left alone otherwise: then the steps need them to find it.
+_hook_drop_git_dir() {
+  [ -n "${GIT_DIR:-}" ] || return 0
+  local exported found
+  exported=$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null) || return 0
+  found=$(cd "$1" && env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --absolute-git-dir 2>/dev/null) || return 0
+  [ "$exported" = "$found" ] || return 0
+  unset GIT_DIR GIT_WORK_TREE
+}
+
+# <root>: "<core.bare> <is-bare-repository>" as git sees them from <root>; "unset" for no key.
+_hook_bare_state() {
+  local bare is_bare
+  bare=$(git -C "$1" config --get core.bare 2>/dev/null) || bare='unset'
+  is_bare=$(git -C "$1" rev-parse --is-bare-repository 2>/dev/null) || is_bare=error
+  printf '%s %s\n' "$bare" "$is_bare"
+}
+
+# <root> <label> <state before>: after a step, report and undo a core.bare change (header:
+# core.bare). Sets HOOK_BARE_NOTE (the ledger note, "" when nothing changed); returns 1 only when
+# the restore fails.
+_hook_bare_restore() {
+  local root=$1 label=$2 before=$3 now
+  HOOK_BARE_NOTE=''
+  now=$(_hook_bare_state "$root")
+  [ "$now" != "$before" ] || return 0
+  HOOK_BARE_NOTE="core.bare=${now%% *} is-bare=${now#* }"
+  echo "hook_steps: core.bare flipped to ${now%% *} after step $label" >&2
+  if [ "${before%% *}" = unset ]; then
+    git -C "$root" config --unset core.bare
+  else
+    git -C "$root" config core.bare "${before%% *}"
+  fi
+  if [ "$(_hook_bare_state "$root")" != "$before" ]; then
+    echo "hook_steps: could not restore core.bare=${before%% *}; run: git -C $root config core.bare false" >&2
+    return 1
+  fi
 }
 
 # <root>: the ledger file's stem, lowercased: the origin remote's repository name, else the main

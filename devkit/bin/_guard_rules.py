@@ -981,20 +981,61 @@ def arg_shape(text: str, lang: str) -> ArgShape:
         raise ValueError(f"{text!r}: bad regex: {exc}") from exc
 
 
-def callee_matches(callee: str | None, patterns: Sequence[str]) -> bool:
-    """CALLEE as written matches a pattern on a dotted suffix (_suffix_in: `log.error` names
-    `this.log.error`); `RECEIVER.*` names any method of that receiver (`logger.*` names
-    `logger.warn` and `ctx.logger.warn`, not `logger.child.warn` or `logger(`)."""
-    if not callee:
-        return False
-    receiver = callee.rpartition(".")[0]
-    for pattern in patterns:
-        if pattern.endswith(".*"):
-            if _suffix_in(receiver, (pattern[:-2],)):
-                return True
-        elif _suffix_in(callee, (pattern,)):
-            return True
-    return False
+# A callee segment is a name or `/REGEX/`, searched against one segment as an ARG-SHAPE's
+# identifier is: guard rules otherwise see a logger only by the variable it is bound to, so a
+# fleet binds every logger `const log = logger("domain")`, and a repo whose loggers are named
+# otherwise writes `/^(log|\w+Log)$/.*` rather than listing each binding.
+_CALLEE_SEGMENT = re.compile(r"/[^/]+/|[A-Za-z_$][A-Za-z0-9_$]*")
+_CALLEE_PATTERN = re.compile(
+    rf"(?:{_CALLEE_SEGMENT.pattern})(?:\.(?:{_CALLEE_SEGMENT.pattern}))*(?:\.\*)?"
+)
+
+
+@dataclass(frozen=True)
+class CalleePattern:
+    segments: tuple[str | re.Pattern[str], ...]  # the dotted suffix, a name or a regex each
+    any_method: bool  # `RECEIVER.*`: the segments name the receiver, any method of it
+    text: str  # as the conf wrote it
+
+    def matches(self, callee: str | None) -> bool:
+        """CALLEE as written matches on a dotted suffix (`log.error` names `this.log.error`);
+        `RECEIVER.*` names any method of that receiver (`logger.*` names `logger.warn` and
+        `ctx.logger.warn`, not `logger.child.warn` or `logger(`)."""
+        if not callee:
+            return False
+        names = callee.split(".")
+        if self.any_method:
+            names = names[:-1]
+        if len(names) < len(self.segments):
+            return False
+        tail = names[len(names) - len(self.segments) :]
+        return all(
+            name == seg if isinstance(seg, str) else seg.search(name) is not None
+            for name, seg in zip(tail, self.segments)
+        )
+
+
+def callee_pattern(text: str) -> CalleePattern:
+    """One CALLEE of a call-arg-ban line; ValueError names what is wrong with it."""
+    if _CALLEE_PATTERN.fullmatch(text) is None:
+        raise ValueError(
+            f"{text!r} is not a dotted name or RECEIVER.*, each segment a name or /REGEX/"
+        )
+    any_method = text.endswith(".*")
+    segments: list[str | re.Pattern[str]] = []
+    for seg in _CALLEE_SEGMENT.findall(text.removesuffix(".*")):
+        if not seg.startswith("/"):
+            segments.append(seg)
+            continue
+        try:
+            segments.append(re.compile(seg[1:-1]))
+        except re.error as exc:
+            raise ValueError(f"{text!r}: bad regex {seg}: {exc}") from exc
+    return CalleePattern(tuple(segments), any_method, text)
+
+
+def callee_matches(callee: str | None, patterns: Sequence[CalleePattern]) -> bool:
+    return any(p.matches(callee) for p in patterns)
 
 
 def _arg_hit(line: int, callee: str, found: Iterable[str]) -> Hit | None:
@@ -1017,7 +1058,7 @@ def _py_found(node: ast.AST, shapes: Sequence[ArgShape]) -> Iterable[str]:
         yield from (s.found("fstring", node.value.id) for s in shapes)
 
 
-def py_call_arg_ban(file: PyFile, patterns: Sequence[str], shapes: Sequence[ArgShape]) -> list[Hit]:
+def py_call_arg_ban(file: PyFile, patterns: Sequence[CalleePattern], shapes: Sequence[ArgShape]) -> list[Hit]:
     """A call whose callee (as written) matches PATTERNS with an argument that holds one of
     SHAPES at any depth: positional, keyword, `**{...}`, inside a dict, a nested call or an
     f-string part (`{err}`, `{err!r}` too). `x.err.message` is judged by `err`. The bare shape is
@@ -1087,7 +1128,7 @@ def _ts_bare_args(
         start = end + 1
 
 
-def ts_call_arg_ban(file: TsFile, patterns: Sequence[str], shapes: Sequence[ArgShape]) -> list[Hit]:
+def ts_call_arg_ban(file: TsFile, patterns: Sequence[CalleePattern], shapes: Sequence[ArgShape]) -> list[Hit]:
     """A call whose callee (as written, bin/_ts_lex.py calls_in) matches PATTERNS with an
     argument holding one of SHAPES anywhere between its parentheses: an object value, a spread,
     a nested call, a template interpolation that is the identifier alone (`${err}`; `${err ??

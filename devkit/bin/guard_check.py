@@ -89,9 +89,12 @@ Matching, for the import and call rules (the semantic rules' shapes are bin/_gua
     `from datetime import datetime as dt` is datetime.datetime.now).
   - call-arg-ban's CALLEE matches as written on a dotted suffix (`log.error` names
     `this.log.error`), and `RECEIVER.*` names any method of the receiver (`logger.*`: every
-    `logger.<m>(`). ARG-SHAPE is a closed vocabulary, the identifier written `err` (the error
-    names, bin/_guard_rules.py ERROR_NAMES) or `/REGEX/` (searched; no comma): `String(err)`
-    and `${err}` (ts; the interpolation is the identifier alone), `str(err)`, `repr(err)` and
+    `logger.<m>(`). A segment may be `/REGEX/`, searched against that one name (no comma, no
+    `/`): `/^(log|.+Log)$/.*`. A logger is seen only by the variable it is bound to, so bind
+    each `const log = logger("domain")` and name `log.*`; the regex is for a repo that did
+    not. ARG-SHAPE is a closed vocabulary, the identifier written `err` (the error names,
+    bin/_guard_rules.py ERROR_NAMES) or `/REGEX/` (searched; no comma): `String(err)` and
+    `${err}` (ts; the interpolation is the identifier alone), `str(err)`, `repr(err)` and
     f-string `{err}` (python), `err.message`, `err.stack` and bare `err`, a whole argument that
     is the name alone (both; python: positional only). One violation per call.
 
@@ -102,6 +105,9 @@ exit 2, and so is a calls-one-of or decorated-with whose filter (`server-only`, 
 (python: ast; ts: the lexer ends where it started), and scoped-exports and calls-one-of cannot
 judge a TS file in their scope that re-exports (`export * from`, `export { f } from`, an
 imported name exported): exit 2, as rollcall's walker failed loudly.
+A ts tree scans `.vue`/`.svelte` components by their top-level `<script>` blocks, lines as in
+the file (bin/_source_tree.py sfc_scripts); a template is not code to any rule, so a template
+`@click="client.get()"` is not seen.
 A sanctioned site (an only-*/single-writer glob, an `except` glob) under which nothing fires
 any more is a stale exception and fails like a stale `known` line, as the allow-lists of the
 repo tests this replaces did (finplat fetch.guard "every allowlisted file still needs its
@@ -291,6 +297,7 @@ class Rule:
     server_only: bool = False  # calls-one-of: judge only "use server" modules
     when: tuple[str, ...] = ()  # decorated-with: the decorators that select a function
     shapes: tuple[rules.ArgShape, ...] = ()  # call-arg-ban
+    callees: tuple[rules.CalleePattern, ...] = ()  # call-arg-ban: targets, compiled
 
     @property
     def spec(self) -> Kind:
@@ -456,6 +463,7 @@ def _rule(kind: str, name: str, args: list[str], where: str, lineno: int, lang: 
     if len(main) < low or (high is not None and len(main) > high):
         raise ConfError(f"{where}: expected `{shape}`")
     subject, globs = "", tuple(main[1:])
+    callees: tuple[rules.CalleePattern, ...] = ()
     if kind == "ban-import":
         subject, globs = main[-1], tuple(main[:-1])
         module, names = _ban_subject(subject, lang, where)
@@ -463,9 +471,10 @@ def _rule(kind: str, name: str, args: list[str], where: str, lineno: int, lang: 
     elif kind == "call-arg-ban":
         subject, globs = main[0], tuple(main[2:])
         targets = _split(subject, where, subject)
-        for pattern in targets:
-            if CALLEE.fullmatch(pattern.removesuffix(".*")) is None:
-                raise ConfError(f"{where}: {pattern!r} is not a dotted name or RECEIVER.*")
+        try:
+            callees = tuple(rules.callee_pattern(pattern) for pattern in targets)
+        except ValueError as exc:
+            raise ConfError(f"{where}: {exc}") from exc
     elif kind in GLOB_FIRST:
         subject, globs = main[1], (main[0],)
         targets = _split(subject, where, subject)
@@ -520,6 +529,7 @@ def _rule(kind: str, name: str, args: list[str], where: str, lineno: int, lang: 
         server_only="server-only" in options,
         when=when,
         shapes=shapes,
+        callees=callees,
     )
 
 
@@ -624,7 +634,7 @@ def ts_file(section: Section, root: Path, rel: str) -> rules.TsFile:
     comments: list = []
     interpolations: list = []
     try:
-        tokens = list(lex.tokenize(tree.read_source(root, rel), comments, interpolations))
+        tokens = list(lex.tokenize(tree.ts_source(root, rel), comments, interpolations))
     except lex.LexError as exc:
         raise ConfError(f"cannot lex {section.display}/{rel}: {exc}") from exc
     imports = [
@@ -671,7 +681,7 @@ def fires(
         )(parsed, frozenset(targets), rule.marker),
         "call-arg-ban": lambda: (
             rules.py_call_arg_ban if section.lang == "python" else rules.ts_call_arg_ban
-        )(parsed, targets, rule.shapes),
+        )(parsed, rule.callees, rule.shapes),
     }
     return rules.Judged(semantic[kind]())
 

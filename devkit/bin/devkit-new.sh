@@ -105,8 +105,8 @@ case "$STACK_IMAGE" in
      IMAGE=0 ;;
   *) die "$STACK/stack.conf: STACK_IMAGE must be 0 or 1 (got '$STACK_IMAGE')" ;;
 esac
-command -v "$STACK_TOOL" >/dev/null || { echo "devkit-new: '$STACK_TOOL' not found on PATH; the $STACK stack needs it for its lockfile or the first commit's ci-quick" >&2; exit 2; }
-command -v make >/dev/null || { echo "devkit-new: make not found on PATH; the first commit runs make ci-quick" >&2; exit 2; }
+command -v "$STACK_TOOL" >/dev/null || { echo "devkit-new: '$STACK_TOOL' not found on PATH; the $STACK stack needs it for its lockfile or the first commit's hooks" >&2; exit 2; }
+command -v make >/dev/null || { echo "devkit-new: make not found on PATH; the first commit runs the hooks' make steps" >&2; exit 2; }
 
 DATE=$(date +%F)
 # The name as a Swift/Kotlin-style type name (my-app -> MyApp), for stacks whose targets and
@@ -120,7 +120,9 @@ HOOKS=$(
   PRE_COMMIT_STEPS=() PRE_PUSH_STEPS=()
   # shellcheck source=/dev/null  # format in bin/hook_steps.sh
   . "$HOOKS_CONF"
-  targets() { local s out=''; for s in "$@"; do out+="${out:+, }\`${s#*=}\`"; done; printf '%s' "${out:-nothing}"; }
+  # One code span per hook: "pre-commit `ci-guards ci-lint`, pre-push `ci-unit`".
+  # shellcheck disable=SC2016  # the backticks are Markdown, not command substitution
+  targets() { local s out=''; for s in "$@"; do out+="${out:+ }${s#*=}"; done; if [ -n "$out" ]; then printf '`%s`' "$out"; else printf nothing; fi; }
   printf 'pre-commit %s, pre-push %s' "$(targets ${PRE_COMMIT_STEPS[@]+"${PRE_COMMIT_STEPS[@]}"})" \
     "$(targets ${PRE_PUSH_STEPS[@]+"${PRE_PUSH_STEPS[@]}"})"
 )
