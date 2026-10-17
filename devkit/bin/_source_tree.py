@@ -14,6 +14,10 @@ comments, one `[section]` per source tree; the keys every section takes:
 
 A glob matches a file's root-relative path, or names a directory the file is under
 (`server/core` holds `server/core/config.py`).
+
+A ts tree also scans single-file components (`.vue`, `.svelte`): the lexer reads their
+top-level `<script>` blocks (sfc_scripts), never the template, whose `@click="api.get()"` no
+rule sees.
 """
 
 from __future__ import annotations
@@ -35,6 +39,13 @@ LANGS = ("python", "ts")
 TS_EXTS = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
 # A specifier written with the emitted extension names the TypeScript source (`./x.js` -> x.ts).
 TS_EMITTED = {".js": (".ts", ".tsx"), ".jsx": (".tsx",), ".mjs": (".mts",), ".cjs": (".cts",)}
+# Single-file components: only their top-level <script> blocks are code (sfc_scripts).
+SFC_EXTS = (".vue", ".svelte")
+_SFC_TAG = re.compile(r"<!--.*?-->|<(/?)(script|style|template)\b([^>]*)>", re.S | re.I)
+_SFC_LANG = re.compile(r"""\blang\s*=\s*["']?([\w-]*)""", re.I)
+_SFC_CLOSE = {name: re.compile(rf"</{name}\s*>", re.I) for name in ("script", "style")}
+_SCRIPT_LANGS = frozenset({"", "ts", "js", "tsx", "jsx"})
+_NOT_NEWLINE = re.compile(r"[^\n]")
 ALWAYS_SKIPPED_DIRS = frozenset({"node_modules", "__pycache__"})
 TREE_KEYS = frozenset({"lang", "root", "src", "exclude", "alias"})
 
@@ -195,7 +206,8 @@ def python_files(tree: SourceTree, root: Path) -> list[str]:
 
 
 def ts_files(tree: SourceTree, root: Path) -> list[str]:
-    """Root-relative TS/JS sources of the tree; dot-directories and node_modules skipped."""
+    """Root-relative TS/JS sources and single-file components of the tree; dot-directories and
+    node_modules skipped. Read each with ts_source."""
     found: set[str] = set()
     for entry in tree.src:
         base = root / entry
@@ -204,7 +216,7 @@ def ts_files(tree: SourceTree, root: Path) -> list[str]:
             rel = path.relative_to(root)
             if (
                 path.is_file()
-                and path.suffix in TS_EXTS
+                and path.suffix in (*TS_EXTS, *SFC_EXTS)
                 and not any(p.startswith(".") or p in ALWAYS_SKIPPED_DIRS for p in rel.parts[:-1])
                 and not tree.excluded(rel.as_posix())
             ):
@@ -217,6 +229,54 @@ def read_source(root: Path, rel: str) -> str:
         return (root / rel).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise ConfError(f"cannot read {root / rel}: {exc}") from exc
+
+
+def ts_source(root: Path, rel: str) -> str:
+    """The code the TS lexer reads for a file of ts_files: a component's script blocks."""
+    text = read_source(root, rel)
+    if posixpath.splitext(rel)[1] not in SFC_EXTS:
+        return text
+    try:
+        return sfc_scripts(text)
+    except ValueError as exc:
+        raise ConfError(f"cannot read {root / rel}: {exc}") from exc
+
+
+def sfc_scripts(text: str) -> str:
+    """A .vue/.svelte file with everything but its top-level <script> blocks (no lang, or
+    ts/js/tsx/jsx) blanked to spaces, newlines kept: the same length and lines as the file, so
+    every line and offset the lexer reports is the file's own, and two blocks (`<script>` and
+    `<script setup>`) lex as one module. A <template> (nested ones counted) and a <style> are
+    skipped whole, so markup that reads like code (`import` in text, `@click="f()"`) is
+    never lexed. ValueError for a block that is never closed."""
+    kept: list[tuple[int, int]] = []
+    depth = 0  # open <template> elements; a <script> inside one is markup
+    pos = 0
+    while (tag := _SFC_TAG.search(text, pos)) is not None:
+        pos = tag.end()
+        closing, name, attrs = tag.group(1), (tag.group(2) or "").lower(), tag.group(3) or ""
+        if not name or attrs.rstrip().endswith("/"):
+            continue  # a comment, or a self-closing `<script src="..." />`
+        if name == "template":
+            depth = max(depth - 1, 0) if closing else depth + 1
+            continue
+        if closing or depth:
+            continue
+        end = _SFC_CLOSE[name].search(text, pos)
+        if end is None:
+            line = text.count("\n", 0, tag.start()) + 1
+            raise ValueError(f"<{name}> at line {line} is never closed")
+        lang = _SFC_LANG.search(attrs)
+        if name == "script" and (lang.group(1).lower() if lang else "") in _SCRIPT_LANGS:
+            kept.append((pos, end.start()))
+        pos = end.end()
+    parts: list[str] = []
+    last = 0
+    for start, stop in kept:
+        parts += [_NOT_NEWLINE.sub(" ", text[last:start]), text[start:stop]]
+        last = stop
+    parts.append(_NOT_NEWLINE.sub(" ", text[last:]))
+    return "".join(parts)
 
 
 def ts_local_base(spec: str, importer: str, tree: SourceTree) -> str | None:

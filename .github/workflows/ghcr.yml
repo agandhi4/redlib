@@ -36,7 +36,7 @@ env:
 jobs:
   build-and-push:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # contents: write only for the ship tag (ship_tag.sh creates it through `gh api`).
     permissions:
       contents: write

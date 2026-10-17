@@ -349,6 +349,10 @@ def t2_quality(repo: Repo, conf: dict[str, float]) -> None:
         repo.add("T2", "quality.complexity", None, "no snapshot or bounds", mechanism="metrics ratchet (scripts/ci/metrics.conf + docs/metrics/ratchet.json)")
         repo.add("T2", "quality.duplication", None, "no snapshot or bounds", mechanism="jscpd collector")
         return
+    # File size is report-only (decisions 2026-10-17): the refactor skill forbids size-driven
+    # splits and every size-ranked candidate in the 2026-10 audits was coherent, so a long file
+    # is a detail on the complexity line, never a check. The metrics ratchet still bounds size.*.
+    size = [f"{k}={v:g} (report-only)" for k, v in sorted(repo.metrics.items()) if k.startswith("size.")]
     cx = {k: v for k, v in repo.metrics.items() if k.startswith("complexity.")}
     if cx:
         bad = []
@@ -357,9 +361,9 @@ def t2_quality(repo: Repo, conf: dict[str, float]) -> None:
             limit = conf["quality_cognitive_max"] if stat == "cognitive_max" else conf["quality_cyclomatic_max"] if stat in ("mccabe_max", "cyclomatic_max") else conf["quality_over15_max"]
             if v > limit:
                 bad.append(f"{k}={v:g}>{limit:g}")
-        repo.add("T2", "quality.complexity", not bad, "complexity within bands" if not bad else "; ".join(bad))
+        repo.add("T2", "quality.complexity", not bad, "; ".join(["complexity within bands" if not bad else "; ".join(bad), *size]))
     else:
-        repo.add("T2", "quality.complexity", None, "no complexity.* keys", mechanism="python.py --mccabe --cognitive / ts.mjs --cyclomatic --cognitive / rust.py --cognitive")
+        repo.add("T2", "quality.complexity", None, "; ".join(["no complexity.* keys", *size]), mechanism="python.py --mccabe --cognitive / ts.mjs --cyclomatic --cognitive / rust.py --cognitive")
     pct = [v for k, v in repo.metrics.items() if k.startswith("duplication.") and k.endswith("jscpd_percent")]
     clones = [v for k, v in repo.metrics.items() if k.startswith("duplication.") and k.endswith("clones")]
     if pct:
@@ -369,12 +373,6 @@ def t2_quality(repo: Repo, conf: dict[str, float]) -> None:
         repo.add("T2", "quality.duplication", None, "no duplication.* keys", mechanism="jscpd.mjs collector")
     targets = makefile_targets(repo.root)
     repo.add("T2", "quality.lint_in_quick", "ci-quick" in targets, "ci-quick target present" if "ci-quick" in targets else "no ci-quick target")
-    size = {k: v for k, v in repo.metrics.items() if k.startswith("size.")}
-    if size:
-        bad = [f"{k}={v:g}" for k, v in sorted(size.items()) if (k.endswith(".max_lines") and v > conf["quality_max_lines"]) or (k.endswith(".over_600") and v > conf["quality_over_600_max"])]
-        repo.add("T2", "quality.file_size", not bad, "file sizes within bands" if not bad else "; ".join(bad))
-    else:
-        repo.add("T2", "quality.file_size", None, "no size.* keys", mechanism="metrics/size.py collector line in metrics.conf")
 
 
 def t3_dead(repo: Repo, conf: dict[str, float]) -> None:
@@ -640,19 +638,41 @@ def t14_domain(repo: Repo) -> None:
     repo.add("T14", "dom.glossary", glossary, "GLOSSARY.md present" if glossary else "no GLOSSARY.md (standard pending: devkit #47)")
 
 
-def t15_currency(repo: Repo, conf: dict[str, float]) -> None:
+def is_devkit_checkout(devkit: Path) -> bool:
+    # Inside a consumer, DEVKIT is its vendored devkit/ and `git -C` would answer for the
+    # consumer's own history (962 commits behind, finplat lane): only a devkit CHECKOUT counts.
+    return git(devkit, "rev-parse", "--show-toplevel") == str(devkit) and (devkit / "VENDOR_PATHS").is_file()
+
+
+def devkit_distance(devkit: Path, commit: str) -> tuple[float, int] | None:
+    """(days, commits) from `commit` to the devkit checkout's HEAD; None when unmeasurable.
+
+    Days are the commit dates' difference, not the wall clock: the grade stays deterministic and
+    a quiet devkit never ages a repo that is at its tip. T15 grades days (decisions 2026-10-17):
+    a commits limit made every devkit merge day a fleet-wide sync wave with no quality signal.
+    """
+    if not is_devkit_checkout(devkit):
+        return None
+    vendored, tip = git(devkit, "log", "-1", "--format=%ct", commit), git(devkit, "log", "-1", "--format=%ct", "HEAD")
+    behind = git(devkit, "rev-list", "--count", f"{commit}..HEAD")
+    if not (vendored and tip and behind):
+        return None
+    return max(0, int(tip) - int(vendored)) / 86400, int(behind)
+
+
+def t15_currency(repo: Repo, conf: dict[str, float], devkit: Path = DEVKIT) -> None:
     rev = repo.root / ".devkit-rev"
     if not rev.is_file():
         repo.add("T15", "kit.devkit_rev", False, "no .devkit-rev: devkit not vendored")
         return
     commit = rev.read_text().split()[0]
-    # Only a devkit CHECKOUT can count: inside a consumer, DEVKIT is its vendored devkit/ and
-    # `git -C` would answer for the consumer's own history (962 commits behind, finplat lane).
-    behind = git(DEVKIT, "rev-list", "--count", f"{commit}..HEAD") if git(DEVKIT, "rev-parse", "--show-toplevel") == str(DEVKIT) and (DEVKIT / "VENDOR_PATHS").is_file() else ""
-    if behind == "":
-        repo.add("T15", "kit.devkit_rev", None, f"vendored {commit[:7]}; distance needs a devkit checkout", mechanism="running scorecard.py from a devkit checkout (make scorecard there, or the audit)")
+    distance = devkit_distance(devkit, commit)
+    if distance is None:
+        where = "not in this devkit checkout (fetch it?)" if is_devkit_checkout(devkit) else "distance needs a devkit checkout"
+        repo.add("T15", "kit.devkit_rev", None, f"vendored {commit[:7]}; {where}", mechanism="running scorecard.py from a devkit checkout (make scorecard there, or the audit)")
     else:
-        repo.add("T15", "kit.devkit_rev", int(behind) <= conf["kit_devkit_behind_max"], f"vendored {commit[:7]}, {behind} devkit commits behind (max {conf['kit_devkit_behind_max']:g})")
+        days, behind = distance
+        repo.add("T15", "kit.devkit_rev", days <= conf["kit_devkit_days_max"], f"vendored {commit[:7]}, {days:.1f} days older than devkit's tip (max {conf['kit_devkit_days_max']:g}), {behind} commits behind")
     agents = repo.root / "AGENTS.md"
     text = agents.read_text(errors="replace") if agents.is_file() else ""
     repo.add("T15", "kit.conventions_line", bool(re.search(r"^Conventions:\s*\S", text, re.M)), "AGENTS.md names its convention files" if re.search(r"^Conventions:\s*\S", text, re.M) else "no `Conventions:` line under Stack")
