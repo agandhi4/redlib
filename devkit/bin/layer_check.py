@@ -17,7 +17,9 @@ the rules are data, `scripts/ci/layers.conf`, and the graph is devkit's:
     side-effect imports, re-exports, `import()` and `require()`. Type-only imports (`import
     type`, all-`type` specifier lists) are erased, as `TYPE_CHECKING` is. Relative specifiers
     and the conf's aliases resolve to scanned files (extension, `/index`, `.js` written for a
-    `.ts` source); anything else is a package and is not ours.
+    `.ts` source); anything else is a package and is not ours. A `.vue`/`.svelte` component is
+    a file of the graph by its script blocks (bin/_source_tree.py sfc_scripts), imported by
+    its full name (`./Card.vue`).
 
 Usage, from the repo root:
   layer_check.py [--conf scripts/ci/layers.conf] [--section NAME ...] [--metrics-out FILE]
@@ -273,7 +275,7 @@ def ts_graph(section: Section, root: Path) -> dict[str, set[str]]:
     graph: dict[str, set[str]] = {}
     for rel in files:
         try:
-            specs = lex.ts_runtime_imports(tree.read_source(root, rel))
+            specs = lex.ts_runtime_imports(tree.ts_source(root, rel))
         except lex.LexError as exc:
             raise ConfError(f"cannot lex {root / rel}: {exc}") from exc
         targets = {_resolve_ts(spec, rel, section, known) for spec in specs}

@@ -322,13 +322,16 @@ function importGraph(opts) {
   const out = runTool(depcruise, args, { cwd: opts.root, ok: [0] });
   const report = parseJson(out, "dependency-cruiser output");
   if (!Array.isArray(report?.modules)) throw new CollectorError("dependency-cruiser output has no `modules`");
-  // Tests, scaffolding and declaration files leave the graph here, with the same glob matcher
-  // as the complexity file set: dependency-cruiser's --exclude refuses a regex with nested
-  // repetition as "probably very slow", which every `**` glob becomes.
+  // A node is a production source file, the complexity file set's definition: SOURCE_EXT, no
+  // tests, no declaration files, the same glob matcher (dependency-cruiser's --exclude refuses a
+  // regex with nested repetition as "probably very slow", which every `**` glob becomes). A
+  // stylesheet, an image or a `?raw`/`?url` import is an asset the bundler inlines, not a
+  // module whose API the importer couples to, so it is no fan-out edge (orbit #82: a .css
+  // import moved fan_out_max 23 -> 24).
   const tests = [...DEFAULT_TEST_GLOBS, ...opts["test-glob"], "**/*.d.ts"].map(globToRegExp);
   const isProduction = (module) => {
     const rel = module.startsWith(`${opts.src}/`) ? module.slice(opts.src.length + 1) : null;
-    return rel !== null && !tests.some((re) => re.test(rel));
+    return rel !== null && SOURCE_EXT.test(rel) && !tests.some((re) => re.test(rel));
   };
   const graph = new Map();
   for (const module of report.modules) {

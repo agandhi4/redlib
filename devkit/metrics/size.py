@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Shared file-size collector: how big the production source files are, as ratchet keys.
 
-A file that keeps growing is the first symptom of a missing abstraction (scorecard T2
-`quality.file_size`), and no stack's linter counts it the same way. This collector counts
+A file that keeps growing can signal a missing abstraction, and no stack's linter counts it
+the same way. The ratchet holds these keys never-worse; the scorecard prints them as T2 detail
+only (report-only since 2026-10-17: size alone never justifies a split). This collector counts
 lines per production file in any language, so Python, TypeScript, Rust and Swift repos get the
 same two keys from one line in scripts/ci/metrics.conf:
 

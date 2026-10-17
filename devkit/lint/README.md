@@ -64,6 +64,32 @@ const eslintConfig = defineConfig([
 ]);
 ```
 
+### Prettier
+
+eslint-plugin-prettier doubles the cost: it runs prettier as an eslint rule over the files
+`prettier --check` already reads, and it reports formatting as lint errors. Use
+eslint-config-prettier, which only turns off the stylistic rules prettier owns, and run
+`prettier --check` as its own command in the lint step. In closet (#407) the plugin read every
+file a second time, a third of a cold lint. With it gone and the hook split (README "Git
+hooks"), closet's pre-commit went from p90 33 s to 21 s cold and 3 s warm.
+
+### Caches
+
+The scaffolds lint with `eslint --cache --cache-strategy content --cache-location
+node_modules/.cache/eslint/` and type-check with `tsc --incremental` (node-service's build
+info in `node_modules/.cache/tsc/`, next-vercel's in the gitignored `tsconfig.tsbuildinfo`).
+`content` keys on file hashes, so a rebase that rewrites mtimes keeps the cache. The caches
+are per checkout, and a cold one costs a lane's first commit 16 to 21 s in closet. They cannot
+be shared across a repo's worktrees (measured 2026-10-17, ESLint 9.39 and 10.8, tsc 5.9 and
+6.0, two worktrees of one fixture):
+
+- ESLint (file-entry-cache 8) keys every entry by absolute path. A directory location gets
+  one `.cache_<hash of cwd>` file per worktree; a file location holds both worktrees' entries
+  side by side, and every run rewrites the whole file, so concurrent lanes race.
+- tsc's build info stores paths relative to itself, and each worktree's own `node_modules`
+  gives every file, `lib.d.ts` included, another path. A shared file re-checks everything
+  after each worktree switch, so the two worktrees thrash it.
+
 ## Graduating a ratchet key to a lint rule
 
 The ratchet holds a count at the gate, minutes after the edit; a lint rule fails the edit
@@ -75,6 +101,9 @@ threshold the collector uses, so the next function over it fails in the editor a
 | `complexity.<s>.mccabe_over_10` (python.py `--mccabe`) | ruff `C901`, `max-complexity = 10` | the repo's ruff block |
 | `complexity.<s>.cyclomatic_max` at 10 or less (ts.mjs `--cyclomatic`; no over-10 key exists) | eslint `complexity` 10 | the repo's eslint config |
 | `complexity.<s>.cognitive_over_15` (ts.mjs `--cognitive`) | `sonarjs/cognitive-complexity` 15, where eslint-plugin-sonarjs is installed | the repo's eslint config |
+| `complexity.<s>.cognitive_over_15` (rust.py `--cognitive`) | clippy `cognitive_complexity`: `cognitive-complexity-threshold = 15` in clippy.toml, `-D clippy::cognitive_complexity` on the clippy command (redlib #21) | the repo's clippy.toml and ci-quick recipe |
+
+In Rust, `#[allow(clippy::cognitive_complexity)]` is forbidden: it is the same lint rust.py runs, so it also hides the function from the collector.
 
 ```toml
 # pyproject.toml, beside the `extend` line

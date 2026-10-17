@@ -14,7 +14,10 @@
 #
 # scripts/ci/hooks.conf, when present, must parse: every step goes through hook_steps.sh's own
 # parser, so a bad path filter (unknown key, empty glob list) fails install and the gate
-# preflight, naming the step, instead of blocking the next commit.
+# preflight, naming the step, instead of blocking the next commit. A pre-commit step whose
+# target names typecheck or unit (ci-typecheck, ci-unit-backend) is a warning on stderr, never a
+# failure: those belong at pre-push (README "Git hooks"; closet's and rollcall's pre-commit
+# ran tsc on every commit of every lane, p90 33 s and 51 s against the 30 s budget).
 #
 # --fix also adds `docs/decisions.md merge=union` to the root .gitattributes when it is missing,
 # leaving the edit for the developer to commit: this is the one devkit path that installs
@@ -96,17 +99,35 @@ if [ -f "$CONF" ]; then
     local name=$1 step
     shift
     for step in "$@"; do
-      _hook_parse_step "$step" || { echo "$name: $HOOK_STEP_ERROR"; return 0; }
+      _hook_parse_step "$step" || { echo "error $name: $HOOK_STEP_ERROR"; return 0; }
     done
   }
-  conf_error=$(
+  slow_precommit_steps() { # <steps...>: a warning line per step that typechecks or runs unit tests
+    local step word words
+    for step in "$@"; do
+      _hook_parse_step "$step" || continue
+      IFS='-_' read -r -a words <<<"$HOOK_STEP_TARGET"
+      for word in "${words[@]}"; do
+        case "$word" in
+          typecheck|unit)
+            echo "hooks-check: warning: scripts/ci/hooks.conf runs '$HOOK_STEP_LABEL' ($HOOK_STEP_TARGET) at pre-commit; typecheck and unit steps belong in PRE_PUSH_STEPS (devkit README \"Git hooks\": pre-commit p90 <= 30 s)"
+            break ;;
+        esac
+      done
+    done
+  }
+  # One subshell sources the conf: "error <reason>" lines fail the check, other lines are warnings.
+  conf_report=$(
     PRE_COMMIT_STEPS=() PRE_PUSH_STEPS=()
     # shellcheck source=/dev/null
-    . "$CONF" || { echo "cannot be sourced"; exit 0; }
+    . "$CONF" || { echo "error cannot be sourced"; exit 0; }
     check_steps PRE_COMMIT_STEPS ${PRE_COMMIT_STEPS[@]+"${PRE_COMMIT_STEPS[@]}"}
     check_steps PRE_PUSH_STEPS ${PRE_PUSH_STEPS[@]+"${PRE_PUSH_STEPS[@]}"}
+    slow_precommit_steps ${PRE_COMMIT_STEPS[@]+"${PRE_COMMIT_STEPS[@]}"}
   )
-  [ -z "$conf_error" ] || fail "scripts/ci/hooks.conf ${conf_error%%$'\n'*}"
+  conf_error=$(grep -m1 '^error ' <<<"$conf_report" || true)
+  [ -z "$conf_error" ] || fail "scripts/ci/hooks.conf ${conf_error#error }"
+  grep -v '^error ' <<<"$conf_report" | grep . >&2 || true
 fi
 
 echo "hooks-check: ok"

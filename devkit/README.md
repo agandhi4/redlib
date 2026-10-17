@@ -36,10 +36,10 @@ What each path is; [AGENTS.md](AGENTS.md) holds the invariants that tie them tog
 | `bin/contract_probe.sh` | `<base> --live P --health P --request-id P --json-log FILE\|CONTAINER --metrics P --require-metric NAME --proxy-404 URL`: the observability contract asserted against a booted app, each assertion opt-in so repos switch them on as they comply. Called from a smoke after `boot_image.sh up`; `BOOT_EXPECT_VERSION` is checked in health, logs and `app_info`. One `probe <name> PASS\|FAIL` line each, every assertion runs. |
 | `bin/ship_tag.sh` | `<owner/repo> <sha> [--date YYYY-MM-DD]`: the deploying step marks a main commit shipped with the annotated tag `ship-<date>-<sha7>` via `gh api` (no clone). Idempotent for the same sha, refuses another, survives a create race; prints `SHIP_TAG=<tag>`. Needs `contents: write`. |
 | `bin/release_check.sh` | Guard for `ci-quick`: the image is the only source of `APP_VERSION`. Dockerfile final stage has the ARG, ENV and OCI `image.version` LABEL; no compose file sets it under `environment:`; every workflow step that pushes an image passes it as a build arg. Every Dockerfile (root and one level down): a non-root final `USER` may `EXPOSE` and health-check only ports >= 1024 (the NAS kernel refuses a privileged bind; Orbit was down 16 h on 2026-10-13). |
-| `bin/workflows_check.sh`, `bin/_workflows_lib.sh` | Guard for `ci-quick`: Actions follows the minutes and supply-chain rules. Every `uses:` is a commit SHA with a `# vX.Y.Z` comment (devkit reusable workflows may float on `@main`). A `pull_request` workflow runs one job, skips drafts, cancels superseded runs and ignores `**.md`; more jobs need a top-level `# workflows-check: multi-job ok: <reason>`. A job pushing an image on main runs with `cancel-in-progress: false`. The lib's push-step detection is shared with `release_check.sh`. |
+| `bin/workflows_check.sh`, `bin/_workflows_lib.sh` | Guard for `ci-quick`: Actions follows the minutes and supply-chain rules. Every `uses:` is a commit SHA with a `# vX.Y.Z` comment (devkit reusable workflows may float on `@main`). A `pull_request` workflow runs one job, skips drafts, cancels superseded runs and ignores `**.md`; more jobs need a top-level `# workflows-check: multi-job ok: <reason>`. A job pushing an image on main runs with `cancel-in-progress: false`. Every `runs-on:` names a versioned image (`ubuntu-24.04`), never a `-latest` label. The lib's push-step detection is shared with `release_check.sh`. |
 | `bin/playwright_browsers.sh` | Installs the Playwright browsers the lockfile pins (default `chromium`) with the lockfile's runner and the `.nvmrc` Node; idempotent via Playwright's cache. `--with-deps` is honoured on Linux, ignored on macOS. |
 | `bin/docs_check.sh` | Guard for `ci-quick`: every `AGENTS.md` is the real file with `CLAUDE.md` symlinked to it, size caps (30 KB root, 16 KB nested; the shrink-only allowlist in `scripts/ci/docs_oversize.txt` ends 2026-11-15), `docs/decisions.md` exists, no retired-tool words, and the standard docs set ("Standard docs" below: required files and README sections, the root AGENTS.md's H2 list, the fixed `docs/` set with dated `docs/reports/`, no CONTRIBUTING.md, dated decisions entries, `make` targets and relative links that resolve, `docs/decisions.md merge=union` in `.gitattributes`; warnings until their date, then failures); repo extras in `scripts/ci/docs_rules.sh`. `--report` prints the numbers (sizes vs caps, allowances, docs outside the set, H2s outside the list) for trims and the monthly audit. |
-| `bin/quiet_run.sh`, `bin/hook_steps.sh`, `bin/push_ranges.sh`, `bin/hooks_check.sh`, `templates/githooks/` | Git hooks: one line per step, 40-line tail on failure; per-repo steps in `scripts/ci/hooks.conf`, scoped by changed paths by default from one fleet layout table (docs, backend, frontend, native, tooling, other: `devkit_classify_path` in `_paths_lib.sh`, which the gate uses too; tooling runs every hook step, like other) and each step's target name, so a docs-only change runs docs-check alone, a frontend-only one skips backend steps and a native-only one (ios/, OrbitAgent/) runs nothing, with `:unless=<globs>`, `:only=<globs>` or `:always` per step only where a repo's layout deviates; `hooks_check` asserts `core.hooksPath=.githooks` (a tool install silently repointed finplat's for two months) and `--fix` self-heals it and adds the decisions-log union line to `.gitattributes`; it rejects a malformed step override; LFS chained when the repo uses it. Before the first step the pinned Node and Rust go first on PATH, as in the gate (`toolchain_path.sh`), so `hooks.conf` lists steps only. A passing cargo step's summary sums every `test result:` line (the last one is the doctests). Every run appends step and total wall seconds to `$XDG_STATE_HOME/devkit/hooks/<repo>.tsv` (`<repo>` = the main checkout's directory, so worktree lanes share the repo's file), the per-machine hooks ledger the scorecard reads (T8: pre-commit p90 ≤ 30 s, pre-push ≤ 60 s). |
+| `bin/quiet_run.sh`, `bin/hook_steps.sh`, `bin/push_ranges.sh`, `bin/hooks_check.sh`, `templates/githooks/` | Git hooks: one line per step, 40-line tail on failure; per-repo steps in `scripts/ci/hooks.conf`, scoped by changed paths by default from one fleet layout table (docs, backend, frontend, native, tooling, other: `devkit_classify_path` in `_paths_lib.sh`, which the gate uses too; tooling runs every hook step, like other) and each step's target name, so a docs-only change runs docs-check alone, a frontend-only one skips backend steps and a native-only one (ios/, OrbitAgent/) runs nothing, with `:unless=<globs>`, `:only=<globs>` or `:always` per step only where a repo's layout deviates; `hooks_check` asserts `core.hooksPath=.githooks` (a tool install silently repointed finplat's for two months) and `--fix` self-heals it and adds the decisions-log union line to `.gitattributes`; it rejects a malformed step override and warns on a typecheck or unit step at pre-commit ("Git hooks"); LFS chained when the repo uses it. Before the first step the pinned Node and Rust go first on PATH, as in the gate (`toolchain_path.sh`), so `hooks.conf` lists steps only. A passing cargo step's summary sums every `test result:` line (the last one is the doctests). Every run appends step and total wall seconds to `$XDG_STATE_HOME/devkit/hooks/<repo>.tsv` (`<repo>` = the origin remote's repository name, lowercased, so worktree lanes share the repo's file), the per-machine hooks ledger the scorecard reads (T8: pre-commit p90 ≤ 30 s, pre-push ≤ 60 s). Steps run without the GIT_DIR git exports to a worktree's hooks (a step's `git init` would otherwise set core.bare=true in the shared config), and a step that still changes core.bare is named on stderr and in its ledger row, then undone (#48). |
 | `bin/tier_guard.sh` | `<tier> --budget <s> [--floor <runner>=<min>]... -- <cmd...>`: one test tier under a wall-clock budget (the whole command's wall time; it fails over budget even when every test passed, `TIER_BUDGET_ENFORCE=0` only reports) and per-runner floors on the tests that RAN (skipped ones do not count), read from the runner's own summary line: `pytest`, `vitest`, `playwright`, `cargo`. Streams the command's output, exits with its code, prints `TIER <tier>: …` / `FAIL` / `FLOOR` / `OVERBUDGET` lines and writes `build/metrics/tier-<tier>.json` at the git top level (`tier.<tier>.seconds`, `tests.<tier>.<runner>`). Every `devkit new` stack's test tiers run through it. |
 | `bin/metrics_collect.sh` | `<snapshot\|check\|tighten\|rebaseline>`: the `ci-metrics` mechanism. Reads `scripts/ci/metrics.conf` (`<name> <area> <command...>`), runs each collector from the repo root into `build/metrics/<name>.json`, skips those whose area no changed path touched (in the gate; `tooling`/`other` and `repo` collectors run regardless), merges with the gate's and tiers' files, then runs the ratchet. A repo's Makefile holds three one-line targets and nothing else. "Metrics ratchet" below. |
 | `metrics/` | The shared collectors a `metrics.conf` line calls, one per stack, each `--scope <name> [--out FILE]`, deterministic, exit 2 naming a missing dev dependency: `python.py --root <dir> --src <subdir|module.py>... [--python <interp>] [--mccabe] [--cognitive] [--vulture [--vulture-ignore-declarative] [--vulture-base <set,...>]] [--cycles]` (ruff C901, complexipy, vulture, AST import cycles; run under the repo's interpreter, `uv run --frozen --project backend python devkit/metrics/python.py …`, so the tools resolve); `ts.mjs --root <dir> --src <subdir> [--tsconfig F] [--test-glob G]... [--cyclomatic] [--cognitive] [--knip [--knip-base]] [--cycles] [--bundle [--bundle-entry index.html]]` (eslint `complexity`, sonarjs cognitive, knip, dependency-cruiser cycles, vite bundle KiB; tools from `<root>/node_modules/.bin`); `rust.py --root <workspace> [--cognitive] [--dead]` (clippy `cognitive_complexity` scoring every function, rustc's unused-code warnings; one `cargo clippy`/`check --workspace --locked` on PATH's cargo, which the gate provisions from `rust-toolchain.toml`); `jscpd.mjs --scope repo [--min-tokens 50] [--min-lines 5] [--bin <jscpd>] [--base] <paths...>`; `coverage.py --scope <s> (--coverage-json F \| --istanbul-summary F)` (the tier writes the report; "run make ci-unit-<s> first" when it is missing). Keys per collector: `docs/metrics-keys.md`. The `--*base` flags merge `lint/`'s knip, jscpd and vulture bases under the repo's own config (`lint/README.md`). |
@@ -56,7 +56,7 @@ What each path is; [AGENTS.md](AGENTS.md) holds the invariants that tie them tog
 | `lint/ruff.toml` | Shared ruff base (py313, 100 cols, E F I N W UP T20 PLC0415); consumers `extend` it. |
 | `lint/eslint.base.mjs` | Import-free flat-config array of core rules (no-console, no-eval, no-implied-eval, HTML-sink properties); consumers spread it first. |
 | `lint/swift-format.json` | The swift-format config; a repo's `.swift-format` is a byte copy that `devkit-check` holds. |
-| `metrics/size.py` | File-size collector for any language: `size.<scope>.max_lines` and `size.<scope>.over_600` over the production files (tests, fixtures, generated paths excluded). A file that keeps growing is the first symptom of a missing abstraction (scorecard T2). One conf line per area. |
+| `metrics/size.py` | File-size collector for any language: `size.<scope>.max_lines` and `size.<scope>.over_600` over the production files (tests, fixtures, generated paths excluded). The ratchet holds them never-worse; the scorecard prints them on its T2 complexity line, never as a check (size alone never justifies a split). One conf line per area. |
 | `bin/secrets_check.sh` | Guard for `ci-quick` (scorecard T11): no credential in the tracked files (~1 s per 1,000 files; `--staged` scans only the staged paths, for pre-commit). gitleaks' high-confidence shapes (private keys, AWS, GitHub, Slack, Google, Stripe, Anthropic/OpenAI, age) everywhere, and long literals assigned to secret-named variables outside tests and placeholders; `scripts/ci/secrets_allow.txt` names a fixture's fake key with its reason. The matched text is never printed. |
 | `bin/migration_check.py` | Guard for `ci-quick` (scorecard T5, data.md 12 and 14): no shipped migration is modified or deleted (the `migration-contract` label, or `--allow-shipped-edits`, makes a deliberate one pass), and no alembic `downgrade()` is a `pass` body (write it, or raise with the reason; merge revisions are exempt). `--versions <dir>` per migrations directory; drizzle dirs get the edit check only, and a `meta/_journal.json` change that only appends entries (every other key and every shipped entry unchanged) is not an edit: each new migration appends one. |
 | `metrics/vuln.py` | Vulnerability collector for any stack (scorecard T11): the locked production dependencies (`uv export`, package-lock.json, pnpm-lock.yaml, Cargo.lock) asked of OSV in one batch, each hit fetched once for severity; `vuln.<scope>.critical|high|total`, report-only (a new advisory is not a code regression, so the ratchet never tracks it). No audit tool needs installing. |
@@ -78,17 +78,18 @@ provisions the pinned toolchain itself; for `swift-app`, Xcode, plus `xcodegen` 
 `ci-swift` on) on PATH, and makes `<cwd>/<name>` (`--dir` chooses the parent) as a git repo with one commit holding: the vendored `devkit/` +
 `.devkit-rev`; a Makefile with the full standard target set (tiers the stack lacks are
 `exit 2` stubs that say so); `scripts/ci/gate_plan.sh`; `.githooks/` + `scripts/ci/hooks.conf`
-(pre-commit `ci-quick`, pre-push `ci-unit`; `ci-lint-swift` for swift-app, whose tests take
-minutes); `.github/workflows/quick-check.yml` calling the reusable workflow (swift-app's runs
+(the split in "Git hooks" below; swift-app's pre-commit is `ci-quick` and its pre-push
+`ci-lint-swift`, since its tests take minutes); `.github/workflows/quick-check.yml` calling the reusable workflow (swift-app's runs
 the `ci-guards` target, the only tier that runs off a Mac), and for image stacks `publish.yml`
 (build, `ci-smoke`, push `sha-<7>` + `latest`, ship tag, never cancelled) with a Dockerfile carrying the `APP_VERSION` trio;
 `renovate.json` on the shared preset; `.claude/settings.json` (claude-kit plugins); `AGENTS.md`
 (the project delta only: Stack + `Conventions:`, Architecture placeholder, Convention deltas,
 Commands, Workflow) with `CLAUDE.md` symlinked; `docs/decisions.md` with its first entry; the
 toolchain pin; the stack's lockfile; the smallest app that serves `/health/live` and
-`/health/ready` (swift-app: shows its build identity), with a test per tier. The first commit runs through pre-commit, so
-`make ci-quick` (devkit-check, toolchain-check, docs-check, release-check, workflows-check,
-layer-check and guard-check outside rust and swift-app, own-commit-check for Python, then lint/format/typecheck) has passed on it before you see it.
+`/health/ready` (swift-app: shows its build identity), with a test per tier. The first commit runs through pre-commit, so `ci-guards`
+(devkit-check, toolchain-check, docs-check, release-check, workflows-check, layer-check and
+guard-check outside rust and swift-app, own-commit-check for Python), the staged secrets scan
+and lint/format have passed on it before you see it.
 `tests/new_contract.bats` holds every stack to this.
 
 ### Browser logger
@@ -99,12 +100,17 @@ warn a breadcrumb, error a capture tagged with `logger` and `request_id`, throug
 `setErrorSdk`; console fallback without the SDK) and its contract test `log.contract.test.ts`,
 plus `server-log.ts` for server code (JSON lines carrying `ts`, `level`, `logger`, `msg` and
 `version`, the string `/health` reports from `version.ts`). Those two modules are the only
-console callers (guards.conf, the eslint override). A React repo copies `log.ts` and the
-contract test, wires its SDK loader, its `beforeSend` (`recentLogs()` as `contexts.logs`) and
-its API client (`setLastRequestId`), and keeps the test green.
+console callers (guards.conf, the eslint override). A React repo copies `log.ts`,
+`error-fields.ts`, `redact.ts` and the contract test, wires its SDK loader, its `beforeSend`
+(`recentLogs()` as `contexts.logs`) and its API client (`setLastRequestId`), and keeps the test
+green. A browser-only copy (no `server-log.ts`) leaves no unused export: `redact` sits in its
+own module because `errorFields` reaches it in both sets, and template-tests run knip over
+both. A service worker loads no SDK and nothing reads its buffer, so worker code logs warn and
+error only: those reach the console, and nothing else of a prod worker is seen.
 
-A caught error is logged as `...errorFields(err)`, never its text: `src/lib/error-fields.ts`,
-re-exported by both loggers and copied with `log.ts`, returns flat `error_class`,
+A caught error is logged as `errorFields(err)`, whole as a level's fields or spread beside the
+caller's, never its text: `src/lib/error-fields.ts`, re-exported by both loggers and copied
+with `log.ts`, returns flat `error_class`,
 `error_message` (query strings, URL credentials, `Bearer` values and secret-named `key=value`
 pairs redacted, cut at 200), `error_status` and `error_code` when the error has them, and
 `error_cause` in the same shape, three deep. A network error (a Node system error, an undici
@@ -112,12 +118,26 @@ pairs redacted, cut at 200), `error_status` and `error_code` when the error has 
 browser `error()` puts these fields on the buffered entry and the capture's `extra`, and the
 server line formatter runs the same `redact` over `msg` and any `stack` or `*_traceback` field,
 so a call site that splices `err.message` in still writes no query string. The scaffold's
-guards.conf holds call sites to it (`no-raw-error-text`); the contract test pins the shape.
+guards.conf holds call sites to it (`no-raw-error-text`), seeing each logger by the name it is
+bound to: bind every one `const log = logger("domain")`. The contract test pins the shape, and
+template-tests' tsc holds `ErrorFields` to a type a logger's fields accept whole.
 
 `error()` takes `unknown`, as a strict catch clause and a rejection reason are: a string is the
 message, an Error a capture, any other value a message naming its type. A failed request goes
 through `logFailure(log, err, fields)`, whose `failureLevel(status)` is the policy: a 4xx is a
 warn (a breadcrumb; a wrong password opens no issue), a 5xx, the network or no status an error.
+Both spread errorFields first and the caller's fields after, so a caller's key wins: one whose
+error text carries detail it must not log passes a replacement (`{ error_message: "HTTP 403" }`),
+which is also the entry's message.
+
+The API client's one failure hook is `src/lib/api-failure.ts`: `logRequestFailure(log, err,
+failure, fields)`, called once for every failed request (TanStack Query's `QueryCache` and
+`MutationCache` `onError`; the module header has the two lines), never at call sites. The app
+maps its client's error onto `failure` (`cancelled`, `offline`, `status`), since only its
+client knows which is which: a cancelled request logs nothing, offline is a warn carrying the
+error's class, a status replaces the error's text (`HTTP 404`) and picks the level through
+`logFailure`, and no status is an error. The client records `X-Request-ID` before it throws, so
+the entry names the failed request. Its test is `api-failure.test.ts`.
 
 A Python repo keeps the same shape in its logging module (orbit's `utils/logging.py` is the
 reference): `error_fields(err: BaseException) -> dict` with the keys above (status from
@@ -130,8 +150,10 @@ python-fastapi scaffold has no logging module yet; the first one it ships carrie
 The file names are the app's; the exported API and the contract test are the contract. An app
 whose server logger already owns `log.ts` names the browser module otherwise (rollcall:
 `src/lib/browser-log.ts`), and a repo that keeps tests under `tests/` moves the test there. Either
-way the app edits one line of the test, the `BROWSER_LOGGER` path at its top, and names its
-chosen files in the guards.conf `only-call console.*` lines and the eslint override.
+way the app edits one line of the test, the literal `import("./log")` in `load()`, and names its
+chosen files in the guards.conf `only-call console.*` lines and the eslint override. It stays a
+literal: knip follows no constant specifier and counts the whole API as unused exports
+(devkit's template-tests run knip over the scaffold to hold it).
 
 A Vite app changes two lines, because Vite replaces `import.meta.env.DEV` where Next inlines
 `NODE_ENV` (vitest's `stubEnv` sets `DEV` as a boolean):
@@ -148,7 +170,8 @@ A Vite app changes two lines, because Vite replaces `import.meta.env.DEV` where 
 The contract is `standardization/browser-logger-design.md`. There is no `devkit-check` byte
 comparison, by design: apps differ in how the SDK loads, and the test holds what must not.
 `make ci-quick` runs the scaffold's hermetic tests, the contract test and `tests/unit`
-(`template-tests`, under the vitest pinned in `tests/templates/`).
+(`template-tests`, under the vitest pinned in `tests/templates/`), then knip over the logger
+modules (`tests/templates/knip.jsonc`).
 
 Then, by hand, in this order:
 
@@ -163,6 +186,27 @@ Then, by hand, in this order:
 5. When it deploys: a homelab `stacks/<name>/` compose stack (healthcheck on `/health/ready`,
    memory limit, `logging: "true"`, never `APP_VERSION` in `environment:`), and the
    `latest`-mover documented in AGENTS.md.
+
+## Git hooks
+
+`templates/githooks/` run `bin/hook_steps.sh` over the repo's `scripts/ci/hooks.conf` (format,
+path scoping and the ledger: its header). What goes in which hook follows the scorecard's T8
+budgets, read from the hooks ledger: pre-commit p90 at most 30 s, pre-push at most 60 s.
+
+- **pre-commit** runs the parts of ci-quick that take seconds: `ci-guards` (the stdlib guards),
+  `secrets-staged` (`secrets_check.sh --staged`; the full-tree scan stays in ci-quick),
+  `ci-lint` (cached eslint, then `prettier --check`; ruff; rustfmt) and `ci-drift` where the
+  stack has migrations.
+- **pre-push** runs `ci-typecheck` (tsc, clippy) and `ci-unit`.
+- **ci-quick is the union of its parts**, so the gate and Actions still run all of it. A new
+  quick check goes into a part, and a new part into ci-quick and one hook.
+- **hooks_check.sh warns** when a pre-commit step's target names typecheck or unit.
+
+Why: closet and rollcall ran all of ci-quick at pre-commit (tsc, the full secrets scan, an
+uncached eslint), so every commit by every lane paid p90 33 s and 51 s. After the split
+closet's warm pre-commit is 3 s (closet #407, rollcall #56). Caches stay per checkout under
+`node_modules/.cache/`: a location shared by a repo's worktrees never hits (lint/README
+"Caches").
 
 ## Vendor into a repo (once)
 
@@ -487,7 +531,9 @@ erased) and the AST; the semantic rules resolve a callee through the file's impo
 the lexer `layer_check.py` shares (comments, strings, templates and regex literals skipped;
 type-only imports erased; aliases and relative specifiers resolved to root-relative paths),
 and scoped-exports reads its top-level functions with the walker lifted from rollcall's
-`tests/invariants/ast.ts`. A rule glob that matches no scanned file is exit 2 (vacuous), as is
+`tests/invariants/ast.ts`. Single-file components (`.vue`, `.svelte`): their script blocks are
+scanned, lines as in the file; templates are not, so a template `@click="client.get()"` is not
+seen. A rule glob that matches no scanned file is exit 2 (vacuous), as is
 a file that does not parse. A sanctioned site (an only-*/single-writer glob, an `except` glob)
 under which nothing fires any more fails, as does a stale `known` line.
 
@@ -561,7 +607,9 @@ PR's committed file and that file to main's; the `metrics-rebaseline` label admi
 share lower than main's (`--mode rebaseline`, commit it), never a share below the committed
 file, and deleting the file lowers every track. T7, T8, T9, T11 and T15
 move without a code change (live metrics, seconds, the ledger, new advisories, devkit itself) and
-stay graded, not gated.
+stay graded, not gated. T15's `kit.devkit_rev` passes while `.devkit-rev`'s commit is at most
+`kit_devkit_days_max` days older than devkit's tip (commit dates, so a quiet devkit ages nobody);
+the commits-behind count is printed only.
 
 ## Deploy
 

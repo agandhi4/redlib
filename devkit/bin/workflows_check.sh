@@ -16,6 +16,10 @@
 #   4. A job that pushes an image on a push to main runs under `cancel-in-progress: false`: a run
 #      cancelled mid-push leaves a half-tagged image. Push steps come from _workflows_lib.sh,
 #      shared with release_check.sh.
+#   5. Every `runs-on:` names a versioned runner image (`ubuntu-24.04`, `macos-15`), never a
+#      `*-latest` label. GitHub moves `-latest` to a new OS on its own date (ubuntu-latest to 26
+#      from 2026-10-19), so an unpinned fleet changes toolchains with no PR to bisect to. An
+#      expression (`${{ matrix.os }}`) is not resolved; the matrix it names is not read.
 # Which jobs "can run" on an event is read from the job-level `if:`: no `github.event_name` in it
 # means every event; otherwise the event must be named (and not as `!= '<event>'`). A
 # cancel-in-progress expression is understood only as `${{ github.event_name == 'pull_request' }}`
@@ -60,6 +64,22 @@ check_pins() { # <workflow>
       fail "$wf:$n: ${target%@*} SHA pin needs a '# vX.Y.Z' comment (got '${comment:-none}')"
     fi
   done < <(grep -nE '^[[:space:]]*(-[[:space:]]+)?uses:' "$wf" || true)
+}
+
+# Rule 5. Scalar, flow (`[self-hosted, ubuntu-latest]`) and block (`- ubuntu-latest`, `labels:`)
+# forms alike: every line of the runs-on value, i.e. the key line and the lines indented under it.
+check_runners() { # <workflow>
+  awk '
+    function indent(s) { match(s, /^[[:space:]]*/); return RLENGTH }
+    function judge(s, n) {
+      sub(/[[:space:]]+#.*$/, "", s)
+      if (match(s, /[A-Za-z0-9_.-]+-latest/)) printf "%d\t%s\n", n, substr(s, RSTART, RLENGTH)
+    }
+    /^[[:space:]]*(#|$)/ { next }
+    in_runs && indent($0) > runs_ind { judge($0, NR); next }
+    { in_runs = 0 }
+    /^[[:space:]]*runs-on:/ { in_runs = 1; runs_ind = indent($0); v = $0; sub(/^[^:]*:/, "", v); judge(v, NR) }
+  ' "$1"
 }
 
 # Rules 2-4. Reads the workflow's shape (triggers and their filters, workflow and job concurrency,
@@ -226,6 +246,9 @@ fi
 
 for wf in "${files[@]}"; do
   check_pins "$wf"
+  while IFS=$'\t' read -r n label; do
+    fail "$wf:$n: runs-on $label moves to a new OS on GitHub's schedule; pin the image (ubuntu-24.04, macos-15)"
+  done < <(check_runners "$wf")
   push_lines=$(image_push_steps "$wf" | awk '{ printf "%s%s", sep, $1; sep = " " }')
   while IFS=$'\t' read -r kind n reason; do
     case "$kind" in
