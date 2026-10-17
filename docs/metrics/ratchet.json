@@ -1,4 +1,19 @@
 {
+  "complexity.app.cognitive_max": {
+    "bound": 23,
+    "direction": "lower",
+    "source": "rust-app"
+  },
+  "complexity.app.cognitive_over_15": {
+    "bound": 4,
+    "direction": "lower",
+    "source": "rust-app"
+  },
+  "dead.app.rustc": {
+    "bound": 0,
+    "direction": "lower",
+    "source": "rust-app"
+  },
   "size.app.max_lines": {
     "bound": 1775,
     "direction": "lower",

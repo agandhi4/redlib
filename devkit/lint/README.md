@@ -1,6 +1,6 @@
 # lint
 
-`ruff.toml` is the shared ruff base (target py313, 100 columns, rules `E F I N W UP`). A consumer
+`ruff.toml` is the shared ruff base (target py313, 100 columns, rules `E F I N W UP T20 PLC0415`). A consumer
 replaces its own copies of those keys with one `extend` line, whose path is relative to the file
 that contains it, and keeps only what names its own code: `src`, `exclude` and isort's
 `known-first-party`. In locus (`pyproject.toml` at the root) that is
@@ -8,6 +8,71 @@ that contains it, and keeps only what names its own code: `src`, `exclude` and i
 `known-first-party = ["server"]`; finplat's `backend/pyproject.toml` sits one level down, so it
 uses `extend = "../devkit/lint/ruff.toml"`. A key the consumer sets wins over the base, so
 widening `select` locally is a visible diff, not a fork of the shared list.
+
+`T20` (no `print`, observability.md) and `PLC0415` (imports at module top, backend.md) replace
+guard tests: PLC0415 retires orbit's `test_no_deferred_imports.py`, T20 the print half of the
+logger guards. The repo keeps its own `per-file-ignores` for code where printing is the
+interface, since only it knows those paths:
+
+```toml
+[tool.ruff.lint.per-file-ignores]
+"scripts/**" = ["T20"]
+```
+
+A deliberate deferred import (an app factory registering routers) is a `# noqa: PLC0415` with
+the reason on the line, never a file-wide ignore.
+
+## ESLint
+
+`eslint.base.mjs` is a flat-config array of core ESLint rules: `no-console`, `no-eval`,
+`no-implied-eval`, and `no-restricted-properties` on `innerHTML`, `outerHTML` and
+`insertAdjacentHTML` (frontend.md Security; reads are flagged too, since the rule is per
+property). A repo spreads it first, then its own recommended and framework layers, so a later
+layer can relax a rule for one glob (a logger module's `no-console: off`).
+
+The base imports nothing. It is vendored at `<repo>/devkit/lint/`, and Node resolves imports
+from the importing file's ancestors, so in a repo whose `package.json` is in a subdirectory
+(locus `web/`, finplat and orbit `frontend/`, instalite `web/`) an import of `typescript-eslint`
+fails with `ERR_MODULE_NOT_FOUND`. Recommended configs stay in the repo, which already has them.
+
+locus `web/eslint.config.js`, the `tseslint.config(...)` shape:
+
+```js
+import base from "../devkit/lint/eslint.base.mjs"
+
+export default tseslint.config(
+  { ignores: ["dist", "src/api/schema.d.ts"] },
+  ...base,
+  {
+    extends: [js.configs.recommended, ...tseslint.configs.recommended],
+    files: ["**/*.{ts,tsx}"],
+    // languageOptions, plugins and rules as today
+  },
+)
+```
+
+rollcall `eslint.config.mjs`, the `eslint/config` `defineConfig` shape:
+
+```js
+import base from "./devkit/lint/eslint.base.mjs";
+
+const eslintConfig = defineConfig([
+  ...base,
+  ...nextVitals,
+  ...nextTs,
+  globalIgnores([/* as today */]),
+]);
+```
+
+## swift-format
+
+swift-format has no `extends`, so `swift-format.json` cannot be referenced; the repo's
+`.swift-format` (at the root, or beside the sources, e.g. locus `ios/`) is a byte copy:
+`cp devkit/lint/swift-format.json .swift-format`. `devkit-check` fails `ci-quick` when any
+tracked `.swift-format` differs from the vendored base, naming the file and the restore. A rule
+change is a devkit PR; each repo's `devkit-sync` then refreshes every tracked copy in its own
+commit (it never creates one), so that commit passes its devkit-check. The base is
+instalite's config as of 2026-10-16.
 
 ## Bases the collectors merge
 

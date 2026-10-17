@@ -5,8 +5,10 @@
 # Actions runs only a cheap quick-check per PR (owner CI policy, 2026-09-28); this script
 # decides whether a PR is mergeable.
 #
-# Usage: devkit/bin/local_gate.sh <pr> [--no-post]      (or: make gate PR=<pr>)
-#   --no-post  run everything, post no commit status
+# Usage: devkit/bin/local_gate.sh <pr> [--no-post] [--expect-head <sha>]   (or: make gate PR=<pr>)
+#   --no-post            run everything, post no commit status
+#   --expect-head <sha>  the full SHA the caller means to gate; gate.sh passes this checkout's
+#                        tip when it is on the PR's branch ("Expected head" below)
 #
 # What is shared vs per-repo:
 #   This file owns the mechanics: Node and Rust from their pin files (toolchain_path.sh), lock,
@@ -80,6 +82,15 @@
 #   only: GATE_LOADAVG_CMD (a command printing "<1m> <5m> ...") and GATE_LOAD_POLL_SECONDS
 #   (default 60).
 #
+# Expected head: GitHub moves refs/pull/<n>/head a few seconds after a push, so a gate started
+#   right after `git push` gated the previous head and posted its verdict there (Orbit #80,
+#   finplat #657). With --expect-head, before taking a slot the gate reads the pull ref
+#   (`git ls-remote`, read-only) and, while it names another commit, prints one
+#   `GATE waiting: ...` line and re-polls every GATE_HEAD_POLL_SECONDS (default 5) for up to
+#   GATE_HEAD_WAIT_SECONDS (default 60). After the fetch a head that is still not the expected
+#   one is `GATE head FAIL` with no status posted: a verdict on a commit the caller did not mean
+#   is worse than none. Both settings are environment-only test hooks.
+#
 # Per-machine defaults: ${XDG_CONFIG_HOME:-$HOME/.config}/devkit/gate.env, if present, holds
 #   GATE_SLOTS, GATE_SILENT_MINUTES, GATE_JOB_BUDGET_MINUTES, GATE_BUDGET_MINUTES,
 #   GATE_BUDGET_ENFORCE, GATE_LOAD_MAX and GATE_LOAD_WAIT_MINUTES `KEY=value` lines (blank lines and full-line `#` comments
@@ -112,17 +123,24 @@ readonly STATUS_CONTEXT=local-gate
 # time. GATE_SLOTS widens that deliberately (header, "Concurrency").
 readonly LOCK=${GATE_LOCK:-/tmp/linux-box-local-gate.lock}
 
-usage() { echo "usage: $0 <pr-number> [--no-post]"; }
+usage() { echo "usage: $0 <pr-number> [--no-post] [--expect-head <sha>]"; }
 
 PR=""
 POST=1
-for arg in "$@"; do
-  case "$arg" in
+EXPECT_HEAD=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     --no-post) POST=0 ;;
+    --expect-head)
+      [[ "${2:-}" =~ ^[0-9a-f]{40}$ ]] \
+        || { echo "local_gate: --expect-head needs a full 40-hex commit SHA (got '${2:-}')" >&2; exit 2; }
+      EXPECT_HEAD=$2
+      shift ;;
     -h|--help) usage; exit 0 ;;
     ''|*[!0-9]*) usage >&2; exit 2 ;;
-    *) PR=$arg ;;
+    *) PR=$1 ;;
   esac
+  shift
 done
 [ -n "$PR" ] || { usage >&2; exit 2; }
 
@@ -161,6 +179,12 @@ readonly LOAD_WAIT_SECS
 readonly LOAD_POLL_SECS=${GATE_LOAD_POLL_SECONDS:-60}
 [[ "$LOAD_POLL_SECS" =~ ^[1-9][0-9]*$ ]] \
   || { echo "local_gate: GATE_LOAD_POLL_SECONDS must be an integer >= 1 (got '$LOAD_POLL_SECS')" >&2; exit 2; }
+readonly HEAD_WAIT_SECS=${GATE_HEAD_WAIT_SECONDS:-60}
+[[ "$HEAD_WAIT_SECS" =~ ^[0-9]+$ ]] \
+  || { echo "local_gate: GATE_HEAD_WAIT_SECONDS must be an integer >= 0 (got '$HEAD_WAIT_SECS')" >&2; exit 2; }
+readonly HEAD_POLL_SECS=${GATE_HEAD_POLL_SECONDS:-5}
+[[ "$HEAD_POLL_SECS" =~ ^[1-9][0-9]*$ ]] \
+  || { echo "local_gate: GATE_HEAD_POLL_SECONDS must be an integer >= 1 (got '$HEAD_POLL_SECS')" >&2; exit 2; }
 
 ROOT=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel) || exit 2
 # shellcheck source=/dev/null  # bin/toolchain_path.sh: toolchain_path, shared with the hooks
@@ -246,6 +270,24 @@ wait_for_load() {
     sleep "$LOAD_POLL_SECS"
   done
 }
+# wait_for_head: header, "Expected head". Returns once the pull ref names EXPECT_HEAD, or
+# after HEAD_WAIT_SECS, or at once when there is no pull ref to read (the missing-pull-ref
+# fallback below asks gh instead); the comparison after the fetch is what fails the gate.
+wait_for_head() {
+  [ -n "$EXPECT_HEAD" ] || return 0
+  local t0=$SECONDS seen said=0
+  while :; do
+    seen=$(git -C "$ROOT" ls-remote origin "refs/pull/$PR/head" 2>/dev/null | cut -f1)
+    [ -n "$seen" ] && [ "$seen" != "$EXPECT_HEAD" ] || return 0
+    [ $((SECONDS - t0)) -lt "$HEAD_WAIT_SECS" ] || return 0
+    if [ "$said" = 0 ]; then
+      echo "GATE waiting: GitHub has PR #$PR at ${seen:0:12}, expected ${EXPECT_HEAD:0:12}; re-polling for up to ${HEAD_WAIT_SECS}s"
+      said=1
+    fi
+    sleep "$HEAD_POLL_SECS"
+  done
+}
+wait_for_head
 wait_for_load
 
 SLOT=""
@@ -420,6 +462,11 @@ if ! git -C "$ROOT" fetch -q origin main "+pull/$PR/head:$GATE_REF"; then
   note "pull/$PR/head missing; fetched branch $PR_BRANCH @ $PR_OID"
 fi
 HEAD_SHA=$(git -C "$ROOT" rev-parse "$GATE_REF")
+if [ -n "$EXPECT_HEAD" ] && [ "$HEAD_SHA" != "$EXPECT_HEAD" ]; then
+  echo "GATE head FAIL (GitHub has PR #$PR at $HEAD_SHA, not the expected $EXPECT_HEAD after ${HEAD_WAIT_SECS}s; push it, or rerun once GitHub shows it)"
+  echo "VERDICT FAIL head= main="
+  exit 1
+fi
 MAIN_SHA=$(git -C "$ROOT" rev-parse origin/main)
 echo "GATE pr=$PR head=$HEAD_SHA main=$MAIN_SHA"
 post_status pending "Local gate running on main ${MAIN_SHA:0:7}"
