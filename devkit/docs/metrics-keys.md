@@ -112,6 +112,15 @@ per cycle, its files space-separated, largest first. `fan_in_max`, `fan_out_max`
 branches depending on worker order, which the ratchet reads as a regression. Set it (or use
 the istanbul provider) before tracking `coverage.<s>.branches` from vitest.
 
+**A key held by a lint rule** (lint/README.md, "Graduating a ratchet key to a lint rule") may
+leave the bounds: with ruff C901 or eslint `complexity` on at 10, `mccabe_over_10` stays 0 and
+`cyclomatic_max` stays at 10 or less by construction. Drop the collector flag from
+`scripts/ci/metrics.conf` (`--mccabe`, `--cyclomatic`) and its keys from `ratchet.json` in the
+PR that turns the rule on, under the `metrics-rebaseline` label (a removed bound is REMOVED).
+Deleting only the key does not stick: `rebaseline` seeds every snapshot key back. Keep
+`--cognitive` running even where sonarjs holds it: the scorecard's T2 reads the
+`complexity.*` keys, and a repo with none is unmeasured.
+
 A repo-specific collector (finplat's reinvention registry, closet's `audit-pages`) uses its
 own domain name and states the direction in `ratchet.json`.
 
