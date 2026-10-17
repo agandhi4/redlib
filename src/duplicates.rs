@@ -57,167 +57,124 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 	let sub = req.param("sub").unwrap_or_default();
 	let quarantined = can_access_quarantine(&req, &sub);
 
-	// Log the request in debugging mode
-	#[cfg(debug_assertions)]
-	req.param("id").unwrap_or_default();
+	let response = match json(path, quarantined).await {
+		Ok(response) => response,
+		Err(msg) if msg == "quarantined" || msg == "gated" => return Ok(quarantine(&req, sub, &msg)),
+		Err(msg) => return error(req, &msg).await,
+	};
 
-	// Send the GET, and await JSON.
-	match json(path, quarantined).await {
-		// Process response JSON.
-		Ok(response) => {
-			let post = parse_post(&response[0]["data"]["children"][0]).await;
+	let post = parse_post(&response[0]["data"]["children"][0]).await;
 
-			let req_url = req.uri().to_string();
-			// Return landing page if this post if this Reddit deems this post
-			// NSFW, but we have also disabled the display of NSFW content
-			// or if the instance is SFW-only
-			if post.nsfw && crate::utils::should_be_nsfw_gated(&req, &req_url) {
-				return Ok(nsfw_landing(req, req_url).await.unwrap_or_default());
-			}
+	let req_url = req.uri().to_string();
+	// Return landing page if this post if this Reddit deems this post
+	// NSFW, but we have also disabled the display of NSFW content
+	// or if the instance is SFW-only
+	if post.nsfw && crate::utils::should_be_nsfw_gated(&req, &req_url) {
+		return Ok(nsfw_landing(req, req_url).await.unwrap_or_default());
+	}
 
-			let filters = get_filters(&req);
-			let (duplicates, num_posts_filtered, all_posts_filtered) = parse_duplicates(&response[1], &filters).await;
+	let filters = get_filters(&req);
+	let (duplicates, num_posts_filtered, all_posts_filtered) = parse_duplicates(&response[1], &filters).await;
 
-			// These are the values for the "before=", "after=", and "sort="
-			// query params, respectively.
-			let mut before: String = String::new();
-			let mut after: String = String::new();
-			let mut sort: String = String::new();
+	let params = match paging_params(&req, &duplicates, &response[1]).await {
+		Ok(params) => params,
+		// Abort entirely if we couldn't get the previous batch.
+		Err(msg) => return error(req, &msg).await,
+	};
 
-			// FIXME: We have to perform a kludge to work around a Reddit API
-			// bug.
-			//
-			// The JSON object in "data" will never contain a "before" value so
-			// it is impossible to use it to determine our position in a
-			// listing. We'll make do by getting the ID of the first post in
-			// the listing, setting that as our "before" value, and ask Reddit
-			// to give us a batch of duplicate posts up to that post.
-			//
-			// Likewise, if we provide a "before" request in the GET, the
-			// result won't have an "after" in the JSON, in addition to missing
-			// the "before." So we will have to use the final post in the list
-			// of duplicates.
-			//
-			// That being said, we'll also need to capture the value of the
-			// "sort=" parameter as well, so we will need to inspect the
-			// query key-value pairs anyway.
-			let l = duplicates.len();
-			if l > 0 {
-				// This gets set to true if "before=" is one of the GET params.
-				let mut have_before: bool = false;
+	Ok(template(&DuplicatesTemplate {
+		params,
+		post,
+		duplicates,
+		prefs: Preferences::new(&req),
+		url: req_url,
+		num_posts_filtered,
+		all_posts_filtered,
+	}))
+}
 
-				// This gets set to true if "after=" is one of the GET params.
-				let mut have_after: bool = false;
+/// The duplicates query string's paging state. Only the presence of `before=`/`after=`
+/// matters (see `paging_params`); `sort=` is kept when it is `new` or `num_comments`, the
+/// sorts the duplicates listing has. In practice there is only ever one of before/after.
+#[derive(Debug, Default, PartialEq)]
+struct QueryCursor {
+	have_before: bool,
+	have_after: bool,
+	sort: String,
+}
 
-				// Inspect the query key-value pairs. We will need to record
-				// the value of "sort=", along with checking to see if either
-				// one of "before=" or "after=" are given.
-				//
-				// If we're in the middle of the batch (evidenced by the
-				// presence of a "before=" or "after=" parameter in the GET),
-				// then use the first post as the "before" reference.
-				//
-				// We'll do this iteratively. Better than with .map_or()
-				// since a closure will continue to operate on remaining
-				// elements even after we've determined one of "before=" or
-				// "after=" (or both) are in the GET request.
-				//
-				// In practice, here should only ever be one of "before=" or
-				// "after=" and never both.
-				let query_str = req.uri().query().unwrap_or_default().to_string();
-
-				if !query_str.is_empty() {
-					for param in query_str.split('&') {
-						let kv: Vec<&str> = param.split('=').collect();
-						if kv.len() < 2 {
-							// Reject invalid query parameter.
-							continue;
-						}
-
-						let key: &str = kv[0];
-						match key {
-							"before" => have_before = true,
-							"after" => have_after = true,
-							"sort" => {
-								let val: &str = kv[1];
-								match val {
-									"new" | "num_comments" => sort = val.to_string(),
-									_ => {}
-								}
-							}
-							_ => {}
-						}
-					}
-				}
-
-				if have_after {
-					"t3_".clone_into(&mut before);
-					before.push_str(&duplicates[0].id);
-				}
-
-				// Address potentially missing "after". If "before=" is in the
-				// GET, then "after" will be null in the JSON (see FIXME
-				// above).
-				if have_before {
-					// The next batch will need to start from one after the
-					// last post in the current batch.
-					"t3_".clone_into(&mut after);
-					after.push_str(&duplicates[l - 1].id);
-
-					// Here is where things get terrible. Notice that we
-					// haven't set `before`. In order to do so, we will
-					// need to know if there is a batch that exists before
-					// this one, and doing so requires actually fetching the
-					// previous batch. In other words, we have to do yet one
-					// more GET to Reddit. There is no other way to determine
-					// whether or not to define `before`.
-					//
-					// We'll mitigate that by requesting at most one duplicate.
-					let new_path: String = format!(
-						"{}.json?before=t3_{}&sort={}&limit=1&raw_json=1",
-						req.uri().path(),
-						duplicates[0].id,
-						if sort.is_empty() { "num_comments".to_string() } else { sort.clone() }
-					);
-					match json(new_path, true).await {
-						Ok(response) => {
-							if !response[1]["data"]["children"].as_array().unwrap_or(&Vec::new()).is_empty() {
-								"t3_".clone_into(&mut before);
-								before.push_str(&duplicates[0].id);
-							}
-						}
-						Err(msg) => {
-							// Abort entirely if we couldn't get the previous
-							// batch.
-							return error(req, &msg).await;
-						}
-					}
-				} else {
-					after = response[1]["data"]["after"].as_str().unwrap_or_default().to_string();
-				}
-			}
-
-			Ok(template(&DuplicatesTemplate {
-				params: DuplicatesParams { before, after, sort },
-				post,
-				duplicates,
-				prefs: Preferences::new(&req),
-				url: req_url,
-				num_posts_filtered,
-				all_posts_filtered,
-			}))
-		}
-
-		// Process error.
-		Err(msg) => {
-			if msg == "quarantined" || msg == "gated" {
-				let sub = req.param("sub").unwrap_or_default();
-				Ok(quarantine(&req, sub, &msg))
-			} else {
-				error(req, &msg).await
-			}
+fn parse_cursor(query: &str) -> QueryCursor {
+	let mut cursor = QueryCursor::default();
+	for param in query.split('&') {
+		let mut kv = param.split('=');
+		// A parameter without `=` is ignored.
+		let (Some(key), Some(value)) = (kv.next(), kv.next()) else {
+			continue;
+		};
+		match (key, value) {
+			("before", _) => cursor.have_before = true,
+			("after", _) => cursor.have_after = true,
+			("sort", "new" | "num_comments") => value.clone_into(&mut cursor.sort),
+			_ => {}
 		}
 	}
+	cursor
+}
+
+/// The "before=", "after=" and "sort=" values for the page's links. Err is a failed request
+/// for the previous batch, which the caller renders as the error page.
+///
+/// FIXME: We have to perform a kludge to work around a Reddit API bug.
+///
+/// The JSON object in "data" will never contain a "before" value so it is impossible to use
+/// it to determine our position in a listing. We'll make do by getting the ID of the first
+/// post in the listing, setting that as our "before" value, and ask Reddit to give us a batch
+/// of duplicate posts up to that post.
+///
+/// Likewise, if we provide a "before" request in the GET, the result won't have an "after"
+/// in the JSON, in addition to missing the "before." So we will have to use the final post in
+/// the list of duplicates.
+///
+/// With no duplicates all three stay empty, even when the query names a sort.
+async fn paging_params(req: &Request<Body>, duplicates: &[Post], listing: &Value) -> Result<DuplicatesParams, String> {
+	let (Some(first), Some(last)) = (duplicates.first(), duplicates.last()) else {
+		return Ok(DuplicatesParams {
+			before: String::new(),
+			after: String::new(),
+			sort: String::new(),
+		});
+	};
+
+	let cursor = parse_cursor(req.uri().query().unwrap_or_default());
+	// If we're in the middle of the batch (evidenced by an "after=" in the GET), then use the
+	// first post as the "before" reference.
+	let first_ref = format!("t3_{}", first.id);
+	let mut before = if cursor.have_after { first_ref.clone() } else { String::new() };
+
+	if !cursor.have_before {
+		let after = listing["data"]["after"].as_str().unwrap_or_default().to_string();
+		return Ok(DuplicatesParams { before, after, sort: cursor.sort });
+	}
+
+	// "before=" in the GET means "after" is null in the JSON: the next batch starts from one
+	// after the last post in this one.
+	let after = format!("t3_{}", last.id);
+
+	// Here is where things get terrible. Notice that we haven't set `before`. In order to do
+	// so, we will need to know if there is a batch that exists before this one, and doing so
+	// requires actually fetching the previous batch. In other words, we have to do yet one
+	// more GET to Reddit. There is no other way to determine whether or not to define
+	// `before`.
+	//
+	// We'll mitigate that by requesting at most one duplicate.
+	let probe_sort = if cursor.sort.is_empty() { "num_comments" } else { cursor.sort.as_str() };
+	let probe_path = format!("{}.json?before=t3_{}&sort={probe_sort}&limit=1&raw_json=1", req.uri().path(), first.id);
+	let previous = json(probe_path, true).await?;
+	if !previous[1]["data"]["children"].as_array().unwrap_or(&Vec::new()).is_empty() {
+		before = first_ref;
+	}
+
+	Ok(DuplicatesParams { before, after, sort: cursor.sort })
 }
 
 // DUPLICATES
@@ -233,4 +190,32 @@ async fn parse_duplicates(json: &Value, filters: &HashSet<String>) -> (Vec<Post>
 
 	let (num_posts_filtered, all_posts_filtered) = filter_posts(&mut duplicates, filters);
 	(duplicates, num_posts_filtered, all_posts_filtered)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn cursor(have_before: bool, have_after: bool, sort: &str) -> QueryCursor {
+		QueryCursor {
+			have_before,
+			have_after,
+			sort: sort.to_string(),
+		}
+	}
+
+	#[test]
+	fn parse_cursor_reads_presence_and_known_sorts() {
+		assert_eq!(parse_cursor(""), cursor(false, false, ""));
+		assert_eq!(parse_cursor("after=t3_abc&sort=new"), cursor(false, true, "new"));
+		assert_eq!(parse_cursor("before=&sort=num_comments"), cursor(true, false, "num_comments"));
+	}
+
+	#[test]
+	fn parse_cursor_ignores_bare_keys_and_other_sorts() {
+		// A bare key has no `=`; an unknown sort leaves an earlier known one in place.
+		assert_eq!(parse_cursor("before&after"), cursor(false, false, ""));
+		assert_eq!(parse_cursor("sort=new&sort=top"), cursor(false, false, "new"));
+		assert_eq!(parse_cursor("sort=new=x"), cursor(false, false, "new"));
+	}
 }

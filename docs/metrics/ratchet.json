@@ -1,11 +1,11 @@
 {
   "complexity.app.cognitive_max": {
-    "bound": 23,
+    "bound": 15,
     "direction": "lower",
     "source": "rust-app"
   },
   "complexity.app.cognitive_over_15": {
-    "bound": 4,
+    "bound": 0,
     "direction": "lower",
     "source": "rust-app"
   },
