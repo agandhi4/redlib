@@ -11,7 +11,10 @@
 Shipped-edit check (every kind): a file under a --versions directory that exists on --base
 (default origin/main, or $MIGRATION_BASE) and is modified, deleted or renamed in the working
 tree fails, naming it. A migration that has not shipped (added in this branch) may change
-freely. The escape hatch is explicit: --allow-shipped-edits, which the gate plan passes when the
+freely. Drizzle's `meta/_journal.json` is shipped and yet every new migration appends its
+entry there, so (--kind drizzle) a journal whose shipped entries are a prefix of the new
+`entries` array, every other key unchanged, is not an edit; a changed or removed entry, or a
+journal that does not parse, still is. The snapshots beside it are files like any other. The escape hatch is explicit: --allow-shipped-edits, which the gate plan passes when the
 PR carries the `migration-contract` label (pr_has_label, fail-closed), and an author passes by
 hand for a never-deployed branch; the output says which. When --base cannot be resolved (a
 shallow Actions checkout without origin/main) the check prints one SKIP line and judges nothing:
@@ -33,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import os
 import subprocess
 import sys
@@ -46,7 +50,36 @@ def git(root: Path, *args: str) -> tuple[int, str]:
     return proc.returncode, proc.stdout
 
 
-def shipped_edits(root: Path, base: str, dirs: list[str]) -> tuple[list[str], int] | None:
+def journal_appended(root: Path, base: str, path: str) -> bool:
+    """Whether a drizzle journal's change only appends entries: drizzle-kit generate adds one
+    per migration, so the file a shipped migration needs changes in every migration PR."""
+    code, before = git(root, "show", f"{base}:{path}")
+    try:
+        old = json.loads(before) if code == 0 else None
+        new = json.loads((root / path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not (isinstance(old, dict) and isinstance(new, dict)):
+        return False
+    shipped, entries = old.get("entries"), new.get("entries")
+    if not (isinstance(shipped, list) and isinstance(entries, list)):
+        return False
+    rest = {k: v for k, v in old.items() if k != "entries"}
+    return rest == {k: v for k, v in new.items() if k != "entries"} and entries[: len(shipped)] == shipped
+
+
+def is_drizzle_journal(path: str) -> bool:
+    parts = path.split("/")
+    return parts[-2:] == ["meta", "_journal.json"]
+
+
+# git diff --name-status letters that change a file the base already has. T (type change: a
+# file turned symlink or submodule) rewrites its content as surely as M does; A, C and U name
+# a path the base does not hold, so they are never a shipped edit.
+SHIPPED_EDITS = {"M": "modified", "T": "modified", "D": "deleted", "R": "renamed"}
+
+
+def shipped_edits(root: Path, base: str, dirs: list[str], kind: str) -> tuple[list[str], int] | None:
     """(changed shipped files, shipped count), or None when the base cannot be resolved."""
     code, _ = git(root, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
     if code != 0:
@@ -60,9 +93,12 @@ def shipped_edits(root: Path, base: str, dirs: list[str]) -> tuple[list[str], in
     hits = []
     for line in out.splitlines():
         parts = line.split("\t")
-        status, path = parts[0], parts[1]
-        if status[0] in "MDR" and path in shipped:
-            hits.append(f"{path}: shipped migration {'deleted' if status[0] == 'D' else 'renamed' if status[0] == 'R' else 'modified'} (data.md 12: fix forward in a new migration; a never-deployed branch passes --allow-shipped-edits, a PR gets the migration-contract label)")
+        edit, path = SHIPPED_EDITS.get(parts[0][0]), parts[1]
+        if edit is None or path not in shipped:
+            continue
+        if edit == "modified" and kind == "drizzle" and is_drizzle_journal(path) and journal_appended(root, base, path):
+            continue
+        hits.append(f"{path}: shipped migration {edit} (data.md 12: fix forward in a new migration; a never-deployed branch passes --allow-shipped-edits, a PR gets the migration-contract label)")
     return hits, len(shipped)
 
 
@@ -120,7 +156,7 @@ def main() -> int:
     kind = args.kind or ("alembic" if any("alembic" in d or "migrations" in d for d in args.versions) else "drizzle")
     hits: list[str] = []
     shipped_n = 0
-    result = shipped_edits(root, args.base, args.versions)
+    result = shipped_edits(root, args.base, args.versions, kind)
     if result is None:
         print(f"migration-check: SKIP shipped-edit check: base {args.base} is not resolvable here (fetch it; the gate and the hooks have it)")
     else:

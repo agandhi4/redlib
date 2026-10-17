@@ -6,6 +6,8 @@
 # Also: a tree that matches .devkit-rev but holds paths outside its own VENDOR_PATHS was vendored
 # whole by a devkit-sync older than the manifest (the first `make devkit-sync` after 2026-10-13
 # runs the old script). Rerunning make devkit-sync, now the new script, slims it.
+#
+# Also: every tracked .swift-format must equal devkit/lint/swift-format.json byte for byte.
 set -euo pipefail
 # shellcheck source=bin/_vendor_paths.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_vendor_paths.sh"
@@ -39,4 +41,24 @@ if manifest=$(git show :devkit/VENDOR_PATHS 2>/dev/null); then
     exit 1
   fi
 fi
+# swift-format has no `extends`, so a repo's .swift-format (root or nested, e.g. ios/) is a copy of
+# devkit/lint/swift-format.json and this is what keeps the copies one base. Index blobs, like the
+# tree check: equal blob ids are equal bytes.
+base_blob=
+copies=0
+while IFS= read -r copy; do
+  [ -n "$copy" ] || continue
+  if [ -z "$base_blob" ]; then
+    base_blob=$(git rev-parse -q --verify ":devkit/lint/swift-format.json" 2>/dev/null) || {
+      echo "devkit-check: $copy exists but devkit/lint/swift-format.json does not; run make devkit-sync" >&2
+      exit 1
+    }
+  fi
+  if [ "$(git rev-parse ":$copy")" != "$base_blob" ]; then
+    echo "devkit-check: $copy differs from devkit/lint/swift-format.json (swift-format has no extends; the repo file is a copy)." >&2
+    echo "  Restore it: cp devkit/lint/swift-format.json $copy   A rule change goes upstream in agandhi4/devkit." >&2
+    copies=$((copies + 1))
+  fi
+done <<<"$(swift_format_copies)"
+[ "$copies" -eq 0 ] || exit 1
 echo "devkit-check: ok (${_commit:0:7})"

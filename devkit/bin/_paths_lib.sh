@@ -41,12 +41,14 @@ DEVKIT_TOOLING_BIN="local_gate.sh gate.sh remote_gate.sh _gate_env.sh _paths_lib
 # to one runs the image group even when nothing else would.
 DEVKIT_IMAGE_BIN="boot_image.sh contract_probe.sh"
 # Executed by unit/db/e2e/build/metrics jobs (tier budgets, throwaway Postgres for db tiers
-# and smokes, Playwright browsers, toolchains a Makefile or cargo.sh provisions; layer_check.py,
-# a ci-quick guard that is also the metrics job's `layers` collector): other. Only
+# and smokes, Playwright browsers, toolchains a Makefile or cargo.sh provisions; layer_check.py
+# and guard_check.py, ci-quick guards that are also the metrics job's `layers` and `guards`
+# collectors, and the modules they load, _source_tree.py, _ts_lex.py and _guard_rules.py): other. Only
 # a record of the decision; the classification needs no lookup for other.
 # shellcheck disable=SC2034  # read by tests/gate_contract.bats (every bin/ file listed once)
 DEVKIT_JOB_BIN="tier_guard.sh throwaway_pg.sh playwright_browsers.sh node_toolchain.sh
-  rust_toolchain.sh toolchain_path.sh metrics_ratchet.py metrics_collect.sh layer_check.py"
+  rust_toolchain.sh toolchain_path.sh metrics_ratchet.py metrics_collect.sh layer_check.py
+  guard_check.py _source_tree.py _ts_lex.py _guard_rules.py"
 
 # <path>: set DEVKIT_AREA (no subshell; devkit_areas calls it once per changed path).
 _devkit_area() {
@@ -58,6 +60,10 @@ _devkit_area() {
     # scorecard.json before it was listed) and the collectors file. Other, which runs every
     # group: the collectors need the tiers' output.
     docs/metrics/ratchet.json|docs/metrics/scorecard.json|scripts/ci/metrics.conf) DEVKIT_AREA=other ;;
+    # The rule files of the two structure guards: ci-quick reads them, and so do the metrics
+    # job's `layers` and `guards` collectors (a new `known` line moves a ratcheted key). Other,
+    # never tooling, so the METRICS group runs and faces the label.
+    scripts/ci/layers.conf|scripts/ci/guards.conf) DEVKIT_AREA=other ;;
     # Fixtures under docs/ that tests read (locus): rule-fixtures by pytest and vitest,
     # sync-wire-fixtures by pytest. Above docs/* so they are not mistaken for prose.
     docs/rule-fixtures/*.md|docs/sync-wire-fixtures/*.md) DEVKIT_AREA=docs ;;

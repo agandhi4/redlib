@@ -11,6 +11,13 @@
 #   - GATE_REMOTE=0 (environment or gate.env): this run, or this machine, stays local.
 #   - GATE_PLAN is set: a plan file outside the repo exists only on this machine.
 # GATE_REMOTE=1 with no host is a usage error, never a silent local run.
+#
+# Expected head: when this checkout is on the PR's branch (gh's headRefName), its tip is the
+# commit the caller means, so it is passed on as `--expect-head <sha>` and the gate waits for
+# GitHub to show it (local_gate.sh header, "Expected head"). Decided here, on the invoking
+# machine, because the remote host's checkout is always on main. An explicit --expect-head in
+# GATE_ARGS wins; another branch, a detached HEAD, no literal GATE_SLUG or a gh error means no
+# expectation, the old behaviour.
 # Exit codes are those of the gate that runs (0 pass, 1 fail, 2 usage or environment).
 set -uo pipefail
 
@@ -38,5 +45,27 @@ elif [ "${GATE_REMOTE:-}" = 1 ]; then
   exit 2
 fi
 
-if [ "$where" = remote ]; then exec "$HERE/remote_gate.sh" "$@"; fi
-exec "$HERE/local_gate.sh" "$@"
+# expect_head_args <args...>: sets EXPECT_ARGS to `--expect-head <tip>` or nothing (header).
+EXPECT_ARGS=()
+expect_head_args() {
+  local arg pr="" branch slug head_ref
+  for arg in "$@"; do
+    case "$arg" in
+      --expect-head) return 0 ;;
+      ''|*[!0-9]*) ;;
+      *) pr=$arg ;;
+    esac
+  done
+  [ -n "$pr" ] || return 0
+  branch=$(git -C "$ROOT" symbolic-ref -q --short HEAD) || return 0
+  [ -f "${GATE_PLAN:-$PLAN}" ] || return 0
+  slug=$(gate_plan_literal "${GATE_PLAN:-$PLAN}" GATE_SLUG)
+  [ -n "$slug" ] || return 0
+  head_ref=$(gh pr view "$pr" --repo "$slug" --json headRefName --jq .headRefName 2>/dev/null) || return 0
+  [ "$head_ref" = "$branch" ] || return 0
+  EXPECT_ARGS=(--expect-head "$(git -C "$ROOT" rev-parse HEAD)")
+}
+expect_head_args "$@"
+
+if [ "$where" = remote ]; then exec "$HERE/remote_gate.sh" "$@" ${EXPECT_ARGS[@]+"${EXPECT_ARGS[@]}"}; fi
+exec "$HERE/local_gate.sh" "$@" ${EXPECT_ARGS[@]+"${EXPECT_ARGS[@]}"}

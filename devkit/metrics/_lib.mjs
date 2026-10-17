@@ -70,6 +70,18 @@ export function writeOutput(doc, out) {
   writeFileSync(out, text);
 }
 
+// writeFindings: --list-out's bytes, the same as metrics/python.py findings_text: `# <key>`
+// then its lines, keys sorted, keys without findings left out, so a tree with nothing over any
+// threshold writes an empty file.
+export function writeFindings(findings, out) {
+  const lines = Object.keys(findings)
+    .sort()
+    .filter((key) => findings[key].length > 0)
+    .flatMap((key) => [`# ${key}`, ...findings[key]]);
+  mkdirSync(dirname(out), { recursive: true });
+  writeFileSync(out, lines.map((line) => `${line}\n`).join(""));
+}
+
 // LINT_DIR: devkit/lint beside devkit/metrics (VENDOR_PATHS vendors both), where the base
 // configs live.
 export const LINT_DIR = fileURLToPath(new URL("../lint/", import.meta.url));
