@@ -102,3 +102,8 @@ Consequence: an app PR's gate pays the release build. The four still over 600 ha
 Why: size.app.over_600 was 4 (server.rs 888, subreddit.rs 783, client.rs 918, utils.rs 1775); the lane before named the seams. The PR line budget counts a moved line once, so the four files split over four PRs, about 2,300 moved lines in all.
 Decision: pure moves, no logic edits. `src/compression.rs` takes Accept-Encoding negotiation, `compress_response` and the cached `compress_body` with their tests (server.rs 888 to 378). `src/cookie_chain.rs` takes `join_until_size_limit` and `set_cookie_chain`, which settings.rs also calls, so the chain was never subreddit's. Bound over_600 4 to 3.
 Consequence: server.rs is routing, request/response extensions and the listener. subreddit.rs (671) still waits on its RSS split, next PR.
+
+## 2026-10-17 — RSS, the SWR cache, the media proxy and response classification leave subreddit.rs and client.rs
+Why: subreddit.rs (671 after the cookie chain) and client.rs (918) were the next two files over 600.
+Decision: pure moves. `src/subreddit_rss.rs` takes `/r/:sub.rss` (subreddit.rs to 554). client.rs (to 471) loses three seams it only hosted: `src/swr_cache.rs` (`SwrCache` and its paused-clock tests; client.rs keeps `JSON_CACHE` and its windows), `src/media_proxy.rs` (`proxy` for the media routes, `IntoHyperResponse`) and `src/reddit_response.rs` (`TokenAction`, `interpret_response` and their tests). The SWR cache alone left client.rs at 718, the proxy at 604. Bound over_600 3 to 1.
+Consequence: AGENTS.md test seams now name `swr_cache::SwrCache` and `reddit_response::interpret_response`. client.rs is the Reddit HTTP client: OAuth session, requests, canonical paths, `json()`. utils.rs (1775) is the last file over 600.
