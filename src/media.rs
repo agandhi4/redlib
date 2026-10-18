@@ -1,7 +1,8 @@
 //! A post's media: type detection (image, video, HLS, gallery, link) from Reddit's JSON, and
 //! gallery items. Used by `model::Post`.
 
-use crate::utils::{format_url, url_path_basename};
+use crate::rewrite::format_url;
+use crate::utils::url_path_basename;
 use serde::Serialize;
 use serde_json::Value;
 

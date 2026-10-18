@@ -3,7 +3,8 @@
 use crate::cookie_chain::set_cookie_chain;
 use crate::model::{filter_posts, Post, Subreddit};
 use crate::preferences::{get_filters, setting, Preferences};
-use crate::utils::{catch_random, error, format_num, format_url, info, nsfw_landing, param, redirect, rewrite_urls, template, val, FEEDS};
+use crate::rewrite::{format_url, rewrite_urls};
+use crate::utils::{catch_random, error, format_num, info, nsfw_landing, param, redirect, template, val, FEEDS};
 use crate::{client::json, server::RequestExt, server::ResponseExt};
 use askama::Template;
 use cookie::Cookie;

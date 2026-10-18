@@ -117,3 +117,8 @@ Consequence: utils.rs is still over 600; the next PRs take post media plus prefe
 Why: utils.rs was 1221 after the model split; post media and preferences are its next two self-contained groups.
 Decision: pure moves. `src/media.rs` takes `Media` (type detection from a post's JSON) and `GalleryMedia`. `src/preferences.rs` takes `Preferences`, `ThemeAssets`, the deflate codecs, `get_filters` and `setting`/`setting_list`/`setting_or_default` (the read side of the cookie chains) with the serialization tests. No cycles: model uses media and preferences, utils uses preferences, media uses two utils URL helpers, and utils imports neither model nor media. max_lines 1221 to 753.
 Consequence: URL and body rewriting (`format_url`, `rewrite_urls`, `rewrite_emotes`, `render_bullet_lists`) is the last group to move.
+
+## 2026-10-17 — URL rewriting leaves utils.rs; no file over 600
+Why: utils.rs (753) was the last file over 600; its biggest remaining group was the Reddit-URL and body-HTML rewriting with its regexes.
+Decision: pure move. `src/rewrite.rs` takes `format_url`, `rewrite_urls`, `rewrite_emotes`, `render_bullet_lists`, their regexes and tests; importers name `crate::rewrite`. utils.rs (408) keeps page responses, instance flags, formatting and feeds, the parts templates call as `crate::utils::*`. AGENTS.md and fork.md point at preferences.rs where they named utils for the layout default and `setting_list`. Bounds over_600 1 to 0, max_lines 753 to 572.
+Consequence: every production file is at most 600 lines and the ratchet fails a PR that grows one past it. Five PRs (#24 to #28) did it under the line budget, all moves.
