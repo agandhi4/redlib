@@ -1,11 +1,13 @@
 //! The Reddit things redlib renders (posts, comments, flair, polls, awards, users, subreddits)
-//! and their parsing from Reddit's JSON. Post media (`Media`, `GalleryMedia`) is parsed in utils.
+//! and their parsing from Reddit's JSON. Post media is `media::Media`.
 
 #![allow(clippy::cmp_owned)]
 
 use crate::client::json;
 use crate::config::get_setting;
-use crate::utils::{format_num, format_url, rewrite_urls, time, to_absolute_url, val, GalleryMedia, Media, Preferences};
+use crate::media::{GalleryMedia, Media};
+use crate::preferences::Preferences;
+use crate::utils::{format_num, format_url, rewrite_urls, time, to_absolute_url, val};
 use askama::Template;
 use serde::Serialize;
 use serde_json::Value;

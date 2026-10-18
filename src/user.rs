@@ -1,8 +1,9 @@
 #![allow(clippy::cmp_owned)]
 use crate::client::json;
 use crate::model::{filter_posts, get_post_url, Post, User};
+use crate::preferences::{get_filters, setting, Preferences};
 use crate::server::RequestExt;
-use crate::utils::{error, format_url, get_filters, nsfw_landing, param, setting, template, Preferences};
+use crate::utils::{error, format_url, nsfw_landing, param, template};
 use crate::{config, utils};
 use askama::Template;
 use chrono::DateTime;
