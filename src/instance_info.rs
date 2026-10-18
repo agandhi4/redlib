@@ -1,7 +1,8 @@
 use crate::{
 	config::{Config, CONFIG},
+	preferences::Preferences,
 	server::RequestExt,
-	utils::{ErrorTemplate, Preferences},
+	utils::ErrorTemplate,
 };
 use askama::Template;
 use build_html::{Container, Html, HtmlContainer, Table};

@@ -1,5 +1,5 @@
 //! The `subscriptions`/`filters` cookie chains: a list too long for one 4096-byte cookie is
-//! written as `name`, `name1`, `name2`, … and read back by `utils::Preferences::new`.
+//! written as `name`, `name1`, `name2`, … and read back by `preferences::setting`.
 
 use crate::server::ResponseExt;
 use hyper::{Body, Response};

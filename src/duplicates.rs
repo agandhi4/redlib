@@ -2,9 +2,10 @@
 
 use crate::client::json;
 use crate::model::{filter_posts, parse_post, Post};
+use crate::preferences::{get_filters, Preferences};
 use crate::server::RequestExt;
 use crate::subreddit::{can_access_quarantine, quarantine};
-use crate::utils::{error, get_filters, nsfw_landing, template, Preferences};
+use crate::utils::{error, nsfw_landing, template};
 
 use askama::Template;
 use hyper::{Body, Request, Response};

@@ -2,21 +2,16 @@
 #![allow(clippy::cmp_owned)]
 
 use crate::config::{self, get_setting};
+use crate::preferences::{setting, Preferences};
 use crate::{client::json, server::RequestExt};
 use askama::Template;
-use cookie::Cookie;
 use hyper::{Body, Request, Response};
-use libflate::deflate::{Decoder, Encoder};
 use log::{error, warn};
 use regex::Regex;
-use revision::revisioned;
-use rust_embed::RustEmbed;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use serde_json_path::{JsonPath, JsonPathExt};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
-use std::io::{Read, Write};
 use std::string::ToString;
 use std::sync::LazyLock;
 use time::{macros::format_description, Duration, OffsetDateTime};
@@ -45,154 +40,6 @@ pub enum ResourceType {
 	Subreddit,
 	User,
 	Post,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Media {
-	pub url: String,
-	pub alt_url: String,
-	pub width: i64,
-	pub height: i64,
-	pub poster: String,
-	pub download_name: String,
-}
-
-impl Media {
-	pub async fn parse(data: &Value) -> (String, Self, Vec<GalleryMedia>) {
-		let mut gallery = Vec::new();
-
-		// Define the various known places that Reddit might put video URLs.
-		let data_preview = &data["preview"]["reddit_video_preview"];
-		let secure_media = &data["secure_media"]["reddit_video"];
-		let crosspost_parent_media = &data["crosspost_parent_list"][0]["secure_media"]["reddit_video"];
-
-		// If post is a video, return the video
-		let (post_type, url_val, alt_url_val) = if data_preview["fallback_url"].is_string() {
-			(
-				if data_preview["is_gif"].as_bool().unwrap_or(false) { "gif" } else { "video" },
-				&data_preview["fallback_url"],
-				Some(&data_preview["hls_url"]),
-			)
-		} else if secure_media["fallback_url"].is_string() {
-			(
-				if secure_media["is_gif"].as_bool().unwrap_or(false) { "gif" } else { "video" },
-				&secure_media["fallback_url"],
-				Some(&secure_media["hls_url"]),
-			)
-		} else if crosspost_parent_media["fallback_url"].is_string() {
-			(
-				if crosspost_parent_media["is_gif"].as_bool().unwrap_or(false) { "gif" } else { "video" },
-				&crosspost_parent_media["fallback_url"],
-				Some(&crosspost_parent_media["hls_url"]),
-			)
-		} else if data["post_hint"].as_str().unwrap_or("") == "image" {
-			// Handle images, whether GIFs or pics
-			let preview = &data["preview"]["images"][0];
-			let mp4 = &preview["variants"]["mp4"];
-
-			if mp4.is_object() {
-				// Return the mp4 if the media is a gif
-				("gif", &mp4["source"]["url"], None)
-			} else {
-				// Return the picture if the media is an image
-				if data["domain"] == "i.redd.it" {
-					("image", &data["url"], None)
-				} else {
-					("image", &preview["source"]["url"], None)
-				}
-			}
-		} else if data["is_self"].as_bool().unwrap_or_default() {
-			// If type is self, return permalink
-			("self", &data["permalink"], None)
-		} else if data["is_gallery"].as_bool().unwrap_or_default() {
-			// If this post contains a gallery of images
-			gallery = GalleryMedia::parse(&data["gallery_data"]["items"], &data["media_metadata"]);
-
-			("gallery", &data["url"], None)
-		} else if data["crosspost_parent_list"][0]["is_gallery"].as_bool().unwrap_or_default() {
-			// If this post contains a gallery of images
-			gallery = GalleryMedia::parse(
-				&data["crosspost_parent_list"][0]["gallery_data"]["items"],
-				&data["crosspost_parent_list"][0]["media_metadata"],
-			);
-
-			("gallery", &data["url"], None)
-		} else if data["is_reddit_media_domain"].as_bool().unwrap_or_default() && data["domain"] == "i.redd.it" {
-			// If this post contains a reddit media (image) URL.
-			("image", &data["url"], None)
-		} else {
-			// If type can't be determined, return url
-			("link", &data["url"], None)
-		};
-
-		let source = &data["preview"]["images"][0]["source"];
-
-		let alt_url = alt_url_val.map_or(String::new(), |val| format_url(val.as_str().unwrap_or_default()));
-
-		let download_name = if post_type == "image" || post_type == "gif" || post_type == "video" {
-			let permalink_base = url_path_basename(data["permalink"].as_str().unwrap_or_default());
-			let media_url_base = url_path_basename(url_val.as_str().unwrap_or_default());
-
-			format!("redlib_{permalink_base}_{media_url_base}")
-		} else {
-			String::new()
-		};
-
-		(
-			post_type.to_string(),
-			Self {
-				url: format_url(url_val.as_str().unwrap_or_default()),
-				alt_url,
-				// Note: in the data["is_reddit_media_domain"] path above
-				// width and height will be 0.
-				width: source["width"].as_i64().unwrap_or_default(),
-				height: source["height"].as_i64().unwrap_or_default(),
-				poster: format_url(source["url"].as_str().unwrap_or_default()),
-				download_name,
-			},
-			gallery,
-		)
-	}
-}
-
-#[derive(Serialize)]
-pub struct GalleryMedia {
-	pub url: String,
-	pub width: i64,
-	pub height: i64,
-	pub caption: String,
-	pub outbound_url: String,
-}
-
-impl GalleryMedia {
-	fn parse(items: &Value, metadata: &Value) -> Vec<Self> {
-		items
-			.as_array()
-			.unwrap_or(&Vec::new())
-			.iter()
-			.map(|item| {
-				// For each image in gallery
-				let media_id = item["media_id"].as_str().unwrap_or_default();
-				let image = &metadata[media_id]["s"];
-				let image_type = &metadata[media_id]["m"];
-
-				let url = if image_type == "image/gif" {
-					image["gif"].as_str().unwrap_or_default()
-				} else {
-					image["u"].as_str().unwrap_or_default()
-				};
-
-				// Construct gallery items
-				Self {
-					url: format_url(url),
-					width: image["x"].as_i64().unwrap_or_default(),
-					height: image["y"].as_i64().unwrap_or_default(),
-					caption: item["caption"].as_str().unwrap_or_default().to_string(),
-					outbound_url: item["outbound_url"].as_str().unwrap_or_default().to_string(),
-				}
-			})
-			.collect::<Vec<Self>>()
-	}
 }
 
 #[derive(Template)]
@@ -242,151 +89,6 @@ pub struct Params {
 	pub before: Option<String>,
 }
 
-#[derive(Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
-#[revisioned(revision = 1)]
-pub struct Preferences {
-	#[revision(start = 1)]
-	#[serde(skip_serializing, skip_deserializing)]
-	pub available_themes: Vec<String>,
-	#[revision(start = 1)]
-	pub theme: String,
-	#[revision(start = 1)]
-	pub front_page: String,
-	#[revision(start = 1)]
-	pub layout: String,
-	#[revision(start = 1)]
-	pub wide: String,
-	#[revision(start = 1)]
-	pub blur_spoiler: String,
-	#[revision(start = 1)]
-	pub show_nsfw: String,
-	#[revision(start = 1)]
-	pub blur_nsfw: String,
-	#[revision(start = 1)]
-	pub hide_hls_notification: String,
-	#[revision(start = 1)]
-	pub video_quality: String,
-	#[revision(start = 1)]
-	pub hide_sidebar_and_summary: String,
-	#[revision(start = 1)]
-	pub use_hls: String,
-	#[revision(start = 1)]
-	pub autoplay_videos: String,
-	#[revision(start = 1)]
-	pub fixed_navbar: String,
-	#[revision(start = 1)]
-	pub disable_visit_reddit_confirmation: String,
-	#[revision(start = 1)]
-	pub comment_sort: String,
-	#[revision(start = 1)]
-	pub post_sort: String,
-	#[revision(start = 1)]
-	#[serde(serialize_with = "serialize_vec_with_plus", deserialize_with = "deserialize_vec_with_plus")]
-	pub subscriptions: Vec<String>,
-	#[revision(start = 1)]
-	#[serde(serialize_with = "serialize_vec_with_plus", deserialize_with = "deserialize_vec_with_plus")]
-	pub filters: Vec<String>,
-	#[revision(start = 1)]
-	pub hide_awards: String,
-	#[revision(start = 1)]
-	pub hide_score: String,
-	#[revision(start = 1)]
-	pub remove_default_feeds: String,
-}
-
-fn serialize_vec_with_plus<S>(vec: &[String], serializer: S) -> Result<S::Ok, S::Error>
-where
-	S: Serializer,
-{
-	serializer.serialize_str(&vec.join("+"))
-}
-
-fn deserialize_vec_with_plus<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-	D: Deserializer<'de>,
-{
-	let string = String::deserialize(deserializer)?;
-	if string.is_empty() {
-		return Ok(Vec::new());
-	}
-	Ok(string.split('+').map(|s| s.to_string()).collect())
-}
-
-#[derive(RustEmbed)]
-#[folder = "static/themes/"]
-#[include = "*.css"]
-pub struct ThemeAssets;
-
-impl Preferences {
-	/// Build preferences from cookies
-	pub fn new(req: &Request<Body>) -> Self {
-		// Read available theme names from embedded css files.
-		// Always make the default "system" theme available.
-		let mut themes = vec!["system".to_string()];
-		for file in ThemeAssets::iter() {
-			let chunks: Vec<&str> = file.as_ref().split(".css").collect();
-			themes.push(chunks[0].to_owned());
-		}
-		Self {
-			available_themes: themes,
-			theme: setting(req, "theme"),
-			front_page: setting(req, "front_page"),
-			// oldreddit is the only maintained layout; cookie/env can still override
-			layout: setting_or_default(req, "layout", "oldreddit".to_string()),
-			wide: setting(req, "wide"),
-			blur_spoiler: setting(req, "blur_spoiler"),
-			show_nsfw: setting(req, "show_nsfw"),
-			hide_sidebar_and_summary: setting(req, "hide_sidebar_and_summary"),
-			blur_nsfw: setting(req, "blur_nsfw"),
-			use_hls: setting(req, "use_hls"),
-			hide_hls_notification: setting(req, "hide_hls_notification"),
-			video_quality: setting(req, "video_quality"),
-			autoplay_videos: setting(req, "autoplay_videos"),
-			fixed_navbar: setting_or_default(req, "fixed_navbar", "on".to_string()),
-			disable_visit_reddit_confirmation: setting(req, "disable_visit_reddit_confirmation"),
-			comment_sort: setting(req, "comment_sort"),
-			post_sort: setting(req, "post_sort"),
-			subscriptions: setting_list(req, "subscriptions"),
-			filters: setting_list(req, "filters"),
-			hide_awards: setting(req, "hide_awards"),
-			hide_score: setting(req, "hide_score"),
-			remove_default_feeds: setting(req, "remove_default_feeds"),
-		}
-	}
-
-	pub fn to_urlencoded(&self) -> Result<String, String> {
-		serde_urlencoded::to_string(self).map_err(|e| e.to_string())
-	}
-
-	pub fn to_bincode(&self) -> Result<Vec<u8>, String> {
-		bincode::serialize(self).map_err(|e| e.to_string())
-	}
-	pub fn to_compressed_bincode(&self) -> Result<Vec<u8>, String> {
-		deflate_compress(self.to_bincode()?)
-	}
-	pub fn to_bincode_str(&self) -> Result<String, String> {
-		Ok(base2048::encode(&self.to_compressed_bincode()?))
-	}
-}
-
-pub fn deflate_compress(i: Vec<u8>) -> Result<Vec<u8>, String> {
-	let mut e = Encoder::new(Vec::new());
-	e.write_all(&i).map_err(|e| e.to_string())?;
-	e.finish().into_result().map_err(|e| e.to_string())
-}
-
-pub fn deflate_decompress(i: Vec<u8>) -> Result<Vec<u8>, String> {
-	let mut decoder = Decoder::new(&i[..]);
-	let mut out = Vec::new();
-	decoder.read_to_end(&mut out).map_err(|e| format!("Failed to read from gzip decoder: {e}"))?;
-	Ok(out)
-}
-
-/// Gets a `HashSet` of filters from the cookie in the given `Request`.
-pub fn get_filters(req: &Request<Body>) -> HashSet<String> {
-	setting(req, "filters").split('+').map(String::from).filter(|s| !s.is_empty()).collect::<HashSet<String>>()
-}
-
 //
 // FORMATTING
 //
@@ -402,77 +104,6 @@ pub fn param(path: &str, value: &str) -> Option<String> {
 			.get(value)?
 			.clone(),
 	)
-}
-
-/// Retrieve the value of a setting by name
-pub fn setting(req: &Request<Body>, name: &str) -> String {
-	// Parse a cookie value from request
-
-	// If this was called with "subscriptions" and the "subscriptions" cookie has a value
-	if name == "subscriptions" && req.cookie("subscriptions").is_some() {
-		// Create subscriptions string
-		let mut subscriptions = String::new();
-
-		// Default subscriptions cookie
-		if req.cookie("subscriptions").is_some() {
-			subscriptions.push_str(req.cookie("subscriptions").unwrap().value());
-		}
-
-		// Start with first numbered subscription cookie
-		let mut subscriptions_number = 1;
-
-		// While whatever subscriptionsNUMBER cookie we're looking at has a value
-		while req.cookie(&format!("subscriptions{subscriptions_number}")).is_some() {
-			// Push whatever subscriptionsNUMBER cookie we're looking at into the subscriptions string
-			subscriptions.push_str(req.cookie(&format!("subscriptions{subscriptions_number}")).unwrap().value());
-
-			// Increment subscription cookie number
-			subscriptions_number += 1;
-		}
-
-		// Return the subscriptions cookies as one large string
-		subscriptions
-	}
-	// If this was called with "filters" and the "filters" cookie has a value
-	else if name == "filters" && req.cookie("filters").is_some() {
-		// Create filters string
-		let mut filters = String::new();
-
-		// Default filters cookie
-		if req.cookie("filters").is_some() {
-			filters.push_str(req.cookie("filters").unwrap().value());
-		}
-
-		// Start with first numbered filters cookie
-		let mut filters_number = 1;
-
-		// While whatever filtersNUMBER cookie we're looking at has a value
-		while req.cookie(&format!("filters{filters_number}")).is_some() {
-			// Push whatever filtersNUMBER cookie we're looking at into the filters string
-			filters.push_str(req.cookie(&format!("filters{filters_number}")).unwrap().value());
-
-			// Increment filters cookie number
-			filters_number += 1;
-		}
-
-		// Return the filters cookies as one large string
-		filters
-	}
-	// The above two still come to this if there was no existing value
-	else {
-		req
-			.cookie(name)
-			.unwrap_or_else(|| {
-				// If there is no cookie for this setting, try receiving a default from the config
-				if let Some(default) = get_setting(&format!("REDLIB_DEFAULT_{}", name.to_uppercase())) {
-					Cookie::new(name, default)
-				} else {
-					Cookie::from(name)
-				}
-			})
-			.value()
-			.to_string()
-	}
 }
 
 /// Instance-defined named feeds (`REDLIB_DEFAULT_FEEDS`), parsed once at startup.
@@ -508,25 +139,6 @@ fn parse_feeds(raw: &str) -> Vec<(String, String)> {
 /// Template helper: the instance's named feeds (askama can't reference statics directly).
 pub fn feeds() -> &'static Vec<(String, String)> {
 	&FEEDS
-}
-
-/// Retrieve a `+`-delimited list setting (subscriptions, filters), sorted case-insensitively.
-/// Sorting here (not just at subscribe time) covers cookies written before sorting existed
-/// or restored from a settings link — display order everywhere derives from this.
-pub fn setting_list(req: &Request<Body>, name: &str) -> Vec<String> {
-	let mut list: Vec<String> = setting(req, name).split('+').map(String::from).filter(|s| !s.is_empty()).collect();
-	list.sort_by_key(|s| s.to_lowercase());
-	list
-}
-
-/// Retrieve the value of a setting by name or the default value
-pub fn setting_or_default(req: &Request<Body>, name: &str, default: String) -> String {
-	let value = setting(req, name);
-	if value.is_empty() {
-		default
-	} else {
-		value
-	}
 }
 
 /// Detect and redirect in the event of a random subreddit
@@ -980,7 +592,7 @@ pub fn to_absolute_url(relative_path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-	use super::{deflate_compress, deflate_decompress, format_num, format_url, parse_feeds, render_bullet_lists, rewrite_emotes, rewrite_urls, url_path_basename, Preferences};
+	use super::{format_num, format_url, parse_feeds, render_bullet_lists, rewrite_emotes, rewrite_urls, url_path_basename};
 
 	fn feeds(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 		pairs.iter().map(|(name, subs)| ((*name).to_owned(), (*subs).to_owned())).collect()
@@ -1076,37 +688,6 @@ mod tests {
 		assert_eq!(format_url("spoiler"), "");
 	}
 	#[test]
-	fn serialize_prefs() {
-		let prefs = Preferences {
-			available_themes: vec![],
-			theme: "laserwave".to_owned(),
-			front_page: "default".to_owned(),
-			layout: "compact".to_owned(),
-			wide: "on".to_owned(),
-			blur_spoiler: "on".to_owned(),
-			show_nsfw: "off".to_owned(),
-			blur_nsfw: "on".to_owned(),
-			hide_hls_notification: "off".to_owned(),
-			video_quality: "best".to_owned(),
-			hide_sidebar_and_summary: "off".to_owned(),
-			use_hls: "on".to_owned(),
-			autoplay_videos: "on".to_owned(),
-			fixed_navbar: "on".to_owned(),
-			disable_visit_reddit_confirmation: "on".to_owned(),
-			comment_sort: "confidence".to_owned(),
-			post_sort: "top".to_owned(),
-			subscriptions: vec!["memes".to_owned(), "mildlyinteresting".to_owned()],
-			filters: vec![],
-			hide_awards: "off".to_owned(),
-			hide_score: "off".to_owned(),
-			remove_default_feeds: "off".to_owned(),
-		};
-		let urlencoded = serde_urlencoded::to_string(prefs).expect("Failed to serialize Prefs");
-
-		assert_eq!(urlencoded, "theme=laserwave&front_page=default&layout=compact&wide=on&blur_spoiler=on&show_nsfw=off&blur_nsfw=on&hide_hls_notification=off&video_quality=best&hide_sidebar_and_summary=off&use_hls=on&autoplay_videos=on&fixed_navbar=on&disable_visit_reddit_confirmation=on&comment_sort=confidence&post_sort=top&subscriptions=memes%2Bmildlyinteresting&filters=&hide_awards=off&hide_score=off&remove_default_feeds=off");
-	}
-
-	#[test]
 	fn test_rewriting_emoji() {
 		let input = r#"<div class="md"><p>How can you have such hard feelings towards a license? <img src="https://www.redditstatic.com/marketplace-assets/v1/core/emotes/snoomoji_emotes/free_emotes_pack/shrug.gif" width="20" height="20" style="vertical-align:middle"> Let people use what license they want, and BSD is one of the least restrictive ones AFAIK.</p>"#;
 		let output = r#"<div class="md"><p>How can you have such hard feelings towards a license? <img src="/static/marketplace-assets/v1/core/emotes/snoomoji_emotes/free_emotes_pack/shrug.gif" width="20" height="20" style="vertical-align:middle"> Let people use what license they want, and BSD is one of the least restrictive ones AFAIK.</p>"#;
@@ -1168,54 +749,5 @@ How`s your monitor by the way? Any IPS bleed whatsoever? I either got lucky or t
 </div>"#;
 
 		assert_eq!(render_bullet_lists(input), output);
-	}
-
-	#[test]
-	fn test_default_prefs_serialization_loop_json() {
-		let prefs = Preferences::default();
-		let serialized = serde_json::to_string(&prefs).unwrap();
-		let deserialized: Preferences = serde_json::from_str(&serialized).unwrap();
-		assert_eq!(prefs, deserialized);
-	}
-
-	#[test]
-	fn test_default_prefs_serialization_loop_bincode() {
-		let prefs = Preferences::default();
-		test_round_trip(&prefs, false);
-		test_round_trip(&prefs, true);
-	}
-
-	static KNOWN_GOOD_CONFIGS: &[&str] = &[
-		"ఴӅβØØҞÉဏႢձĬ༧ȒʯऌԔӵ୮༏",
-		"ਧՊΥÀÃǎƱГ۸ඣമĖฤ႙ʟาúໜϾௐɥঀĜໃહཞઠѫҲɂఙ࿔ǲઉƲӟӻĻฅΜδ໖ԜǗဖငƦơ৶Ą௩ԹʛใЛʃශаΏ",
-		"ਧԩΥÀÃÎŠ౭൩ඔႠϼҭöҪƸռઇԾॐნɔາǒՍҰच௨ಖມŃЉŐདƦ๙ϩএఠȝഽйʮჯඒϰळՋ௮ສ৵ऎΦѧਹಧଟƙŃ३î༦ŌပղयƟแҜ།",
-	];
-
-	#[test]
-	fn test_known_good_configs_deserialization() {
-		for config in KNOWN_GOOD_CONFIGS {
-			let bytes = base2048::decode(config).unwrap();
-			let decompressed = deflate_decompress(bytes).unwrap();
-			assert!(bincode::deserialize::<Preferences>(&decompressed).is_ok());
-		}
-	}
-
-	#[test]
-	fn test_known_good_configs_full_round_trip() {
-		for config in KNOWN_GOOD_CONFIGS {
-			let bytes = base2048::decode(config).unwrap();
-			let decompressed = deflate_decompress(bytes).unwrap();
-			let prefs: Preferences = bincode::deserialize(&decompressed).unwrap();
-			test_round_trip(&prefs, false);
-			test_round_trip(&prefs, true);
-		}
-	}
-
-	fn test_round_trip(input: &Preferences, compression: bool) {
-		let serialized = bincode::serialize(input).unwrap();
-		let compressed = if compression { deflate_compress(serialized).unwrap() } else { serialized };
-		let decompressed = if compression { deflate_decompress(compressed).unwrap() } else { compressed };
-		let deserialized: Preferences = bincode::deserialize(&decompressed).unwrap();
-		assert_eq!(*input, deserialized);
 	}
 }

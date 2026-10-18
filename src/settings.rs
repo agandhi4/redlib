@@ -4,8 +4,9 @@ use std::collections::HashMap;
 
 // CRATES
 use crate::cookie_chain::set_cookie_chain;
+use crate::preferences::{deflate_decompress, Preferences};
 use crate::server::ResponseExt;
-use crate::utils::{deflate_decompress, redirect, template, Preferences};
+use crate::utils::{redirect, template};
 use askama::Template;
 use futures_lite::StreamExt;
 use hyper::{Body, Request, Response};

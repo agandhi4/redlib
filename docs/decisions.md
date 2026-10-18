@@ -112,3 +112,8 @@ Consequence: AGENTS.md test seams now name `swr_cache::SwrCache` and `reddit_res
 Why: utils.rs (1775) held unrelated groups: the post/comment model, preferences, URL rewriting, formatting, page responses. It needs three PRs under the line budget.
 Decision: pure moves. `src/model.rs` takes Flair, Author, Poll, Flags, Post (with `Post::fetch`), Comment, Awards, User, Subreddit, `parse_post`, `filter_posts`, `get_post_url` and the live `Post::fetch` tests; importers name `crate::model`. `filter_posts` and `get_post_url` came along so utils does not import model back (model uses utils, never the reverse). It keeps utils' `allow(clippy::cmp_owned)` for the moved code. `Media`/`GalleryMedia` and everything templates call as `crate::utils::*` stay for now. max_lines 1775 to 1221.
 Consequence: utils.rs is still over 600; the next PRs take post media plus preferences, then URL rewriting.
+
+## 2026-10-17 — Post media and preferences leave utils.rs
+Why: utils.rs was 1221 after the model split; post media and preferences are its next two self-contained groups.
+Decision: pure moves. `src/media.rs` takes `Media` (type detection from a post's JSON) and `GalleryMedia`. `src/preferences.rs` takes `Preferences`, `ThemeAssets`, the deflate codecs, `get_filters` and `setting`/`setting_list`/`setting_or_default` (the read side of the cookie chains) with the serialization tests. No cycles: model uses media and preferences, utils uses preferences, media uses two utils URL helpers, and utils imports neither model nor media. max_lines 1221 to 753.
+Consequence: URL and body rewriting (`format_url`, `rewrite_urls`, `rewrite_emotes`, `render_bullet_lists`) is the last group to move.
