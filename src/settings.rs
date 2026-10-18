@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 // CRATES
+use crate::cookie_chain::set_cookie_chain;
 use crate::server::ResponseExt;
-use crate::subreddit::set_cookie_chain;
 use crate::utils::{deflate_decompress, redirect, template, Preferences};
 use askama::Template;
 use futures_lite::StreamExt;

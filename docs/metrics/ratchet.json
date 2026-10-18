@@ -20,7 +20,7 @@
     "source": "size-app"
   },
   "size.app.over_600": {
-    "bound": 4,
+    "bound": 3,
     "direction": "lower",
     "source": "size-app"
   }

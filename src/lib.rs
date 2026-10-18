@@ -1,5 +1,7 @@
 pub mod client;
+pub mod compression;
 pub mod config;
+pub mod cookie_chain;
 pub mod db;
 pub mod duplicates;
 pub mod instance_info;
