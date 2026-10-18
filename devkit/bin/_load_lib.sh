@@ -8,7 +8,8 @@
 # at a load average of ~13 on 8 cores, while parallel lanes gated other repos. A budget is a
 # regression signal for the suite, and a box running twice its cores is not the suite's cost.
 # Scale = min(1-minute load / cores, 2), one decimal, applied only above 1.0: a solo run keeps
-# its exact budget, and the cap means a real doubling still fails on the busiest box.
+# its exact budget, and the cap means a real doubling still fails on the busiest box. A budget
+# checked after its command uses the larger of the start and end samples.
 #
 #   devkit_loadavg                 "<1m> <5m>", or nothing when the load cannot be read
 #   devkit_ncpu                    the online core count, or nothing
@@ -17,6 +18,9 @@
 #                                  else `budget 110 s ×1.6 (load 13.1 on 8 cpus) → 176 s`, the
 #                                  text printed on the status line so the number is explainable)
 #                                  and LOAD_LEDGER ("" or `load=13.1/8 scale=1.6`)
+#   devkit_load_rescale            after the command: samples again and keeps the larger stretch,
+#                                  its LOAD_NOTE naming both samples (tier_guard.sh, local_gate.sh
+#                                  jobs; a hook's ledger note keeps the start sample)
 # Test hooks, environment only: DEVKIT_LOADAVG_CMD (a command printing "<1m> <5m> ...") and
 # DEVKIT_NCPU (a core count).
 
@@ -37,23 +41,49 @@ devkit_ncpu() {
   [[ "$n" =~ ^[1-9][0-9]*$ ]] && echo "$n"
 }
 
-# shellcheck disable=SC2034  # LOAD_* are this function's output, read by the caller
-devkit_load_scale() {
-  local budget=$1 l1 ncpu out
-  LOAD_SCALE=1 LOAD_BUDGET=$budget LOAD_NOTE="" LOAD_LEDGER=""
-  read -r l1 _ <<<"$(devkit_loadavg)"
-  ncpu=$(devkit_ncpu)
-  [ -n "$l1" ] && [ -n "$ncpu" ] && [ "$budget" -gt 0 ] || return 0
-  # The scale is rounded to one decimal before it multiplies, so the printed factor and the
-  # printed budget agree (×1.6 of 110 is 176, not the 180 an unrounded 1.6375 gives).
-  out=$(awk -v l="$l1" -v n="$ncpu" -v b="$budget" 'BEGIN {
+# _devkit_stretch <budget> <1m load> <ncpu>: "<scale> <stretched budget>", or nothing when
+# unscaled. The scale is rounded to one decimal before it multiplies, so the printed factor and
+# the printed budget agree (×1.6 of 110 is 176, not the 180 an unrounded 1.6375 gives).
+_devkit_stretch() {
+  [ -n "$2" ] && [ -n "$3" ] && [ "$1" -gt 0 ] || return 0
+  awk -v b="$1" -v l="$2" -v n="$3" 'BEGIN {
     s = l / n; if (s > 2) s = 2
     s = sprintf("%.1f", s)
     if (s + 0 <= 1) exit
     print s, int(b * s + 0.5)
-  }')
+  }'
+}
+
+# shellcheck disable=SC2034  # LOAD_* are this function's output, read by the caller
+devkit_load_scale() {
+  local budget=$1 out
+  LOAD_SCALE=1 LOAD_BUDGET=$budget LOAD_NOTE="" LOAD_LEDGER="" LOAD_BASE=$budget
+  read -r LOAD_START _ <<<"$(devkit_loadavg)"
+  LOAD_NCPU=$(devkit_ncpu)
+  out=$(_devkit_stretch "$budget" "$LOAD_START" "$LOAD_NCPU")
   [ -n "$out" ] || return 0
   read -r LOAD_SCALE LOAD_BUDGET <<<"$out"
-  LOAD_NOTE="budget $budget s ×$LOAD_SCALE (load $l1 on $ncpu cpus) → $LOAD_BUDGET s"
-  LOAD_LEDGER="load=$l1/$ncpu scale=$LOAD_SCALE"
+  LOAD_NOTE="budget $budget s ×$LOAD_SCALE (load $LOAD_START on $LOAD_NCPU cpus) → $LOAD_BUDGET s"
+  LOAD_LEDGER="load=$LOAD_START/$LOAD_NCPU scale=$LOAD_SCALE"
+}
+
+# devkit_load_rescale: after the measured command, after devkit_load_scale. Samples the load
+# again and keeps the larger of the two stretches; when either stretched, LOAD_NOTE names both
+# samples: `budget 110 s ×1.6 (load 2.0 at start, 13.1 at end on 8 cpus) → 176 s`. Why (closet
+# db tier, 2026-10-18): a start-only sample read a quiet box, neighbours' gates then pushed the
+# load up mid-run, and the tier failed 124 s against an unstretched 110 s.
+# shellcheck disable=SC2034  # LOAD_* are this function's output, read by the caller
+devkit_load_rescale() {
+  local end out scale budget
+  read -r end _ <<<"$(devkit_loadavg)"
+  out=$(_devkit_stretch "$LOAD_BASE" "$end" "$LOAD_NCPU")
+  if [ -n "$out" ]; then
+    read -r scale budget <<<"$out"
+    if [ "$budget" -gt "$LOAD_BUDGET" ]; then
+      LOAD_SCALE=$scale LOAD_BUDGET=$budget
+      LOAD_LEDGER="load=$end/$LOAD_NCPU scale=$LOAD_SCALE"
+    fi
+  fi
+  [ -n "$out" ] || [ -n "$LOAD_NOTE" ] || return 0
+  LOAD_NOTE="budget $LOAD_BASE s ×$LOAD_SCALE (load ${LOAD_START:-?} at start, ${end:-?} at end on $LOAD_NCPU cpus) → $LOAD_BUDGET s"
 }
