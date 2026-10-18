@@ -64,6 +64,15 @@ const eslintConfig = defineConfig([
 ]);
 ```
 
+### TypeScript configs
+
+`eslint.base.d.mts` declares the module's exports, so an `eslint.config.ts` imports the base
+with no declaration of its own (orbit's `frontend/eslint-base.d.ts` goes at its next sync):
+`default` is the configs, a subset of `Linter.Config[]`, and `sonarjsRules` and
+`sonarjsTestRules` are `Linter.RulesRecord`. It imports nothing either, for the same reason, so it
+spells eslint's shapes out. template-tests holds them assignable to eslint's own types, and
+`tests/lint_contract.bats` holds its export list to the module's.
+
 ### sonarjs
 
 The base also exports two rule maps for eslint-plugin-sonarjs. `sonarjsRules` turns on
@@ -139,6 +148,7 @@ threshold the collector uses, so the next function over it fails in the editor a
 | `complexity.<s>.mccabe_over_10` (python.py `--mccabe`) | ruff `C901`, `max-complexity = 10` | the repo's ruff block |
 | `complexity.<s>.cyclomatic_max` at 10 or less (ts.mjs `--cyclomatic`; no over-10 key exists) | eslint `complexity` 10 | the repo's eslint config |
 | `complexity.<s>.cognitive_over_15` (ts.mjs `--cognitive`) | `sonarjs/cognitive-complexity` 15, where eslint-plugin-sonarjs is installed | the repo's eslint config |
+| `complexity.<s>.cognitive_over_15` (python.py `--cognitive`) | none: `bin/py_cognitive_lint.py` graduates itself (below) | the repo's `ci-lint` recipe, once |
 | `complexity.<s>.cognitive_over_15` (rust.py `--cognitive`) | clippy `cognitive_complexity`: `cognitive-complexity-threshold = 15` in clippy.toml, `-D clippy::cognitive_complexity` on the clippy command (redlib #21) | the repo's clippy.toml and ci-quick recipe |
 
 In Rust, `#[allow(clippy::cognitive_complexity)]` is forbidden: it is the same lint rust.py runs, so it also hides the function from the collector.
@@ -169,8 +179,20 @@ flat config have no conditional select, so a base `C901` would fail every repo s
 When the last one graduates, the rule moves into `ruff.toml` or `eslint.base.mjs` and the repo
 lines go. A `# noqa: C901` or `eslint-disable-next-line complexity` carries its reason on the
 line, as PLC0415 does: once the key retires (docs/metrics-keys.md), nothing else counts them.
-Python cognitive complexity (complexipy) has no ruff rule, so `cognitive_over_15` stays a
-ratchet key in every Python repo.
+Python cognitive complexity (complexipy) has no ruff rule, so a Python repo adds
+`bin/py_cognitive_lint.py` to its `ci-lint` recipe instead, at any count (the python-fastapi
+scaffold has it). Before graduation it fails any function over 15 in the `.py` files changed
+since origin/main, committed or not, so the file a lane edits leaves at 15 or under. finplat
+#670's sweep named the same helper-extraction shape three times, and ruff's PLR0912/PLR0915
+caught only 4 of its 16 functions. Once the ratchet's `cognitive_over_15` bound is 0, the same
+line lints the whole tree with no edit, because it reads the bound. An ignore comment does not
+count: complexipy runs with `--no-ignore`, as the collector does.
+
+```make
+ci-lint: ci-deps
+	uv run ruff check server tests
+	uv run python devkit/bin/py_cognitive_lint.py --root . --src server --scope backend
+```
 
 ## swift-format
 

@@ -116,10 +116,16 @@ Matching, for the import and call rules (the semantic rules' shapes are bin/_gua
     f-string `{err}` (python), `err.message`, `err.stack` and bare `err`, a whole argument that
     is the name alone (both; python: positional only). One violation per call.
 
-Every glob of a rule, `except` globs included, must match a scanned file: a glob that matches
-nothing makes the rule vacuous (a renamed directory would silently switch it off), so it is
-exit 2, and so is a calls-one-of or decorated-with whose filter (`server-only`, `when`,
-`functions-only`) leaves no function to judge in any file. Every scanned file must parse
+A rule with no candidates is inert, not an error: when none of a ban's globs matches a scanned
+file, or a calls-one-of or decorated-with filter (`server-only`, `when`, `functions-only`)
+leaves no function to judge in any file, it passes with one `<conf>:<line>: <rule>: inert: no
+files match <glob>` (or `inert: no <unit> under <glob>`) line on every run, so a scaffold can
+ship a rule live before the app has its first server action (devkit #121 shipped
+`@action-request-id` commented out because this was exit 2). A `known` line for an inert rule is
+still stale. What stays exit 2 is a rule that is wrong rather than early: one of a ban's
+several globs matching nothing while another matches (a renamed directory), and a sanctioned
+site (an only-*/single-writer glob, an `except` glob) of a rule with candidates that matches no
+scanned file. Every scanned file must parse
 (python: ast; ts: the lexer ends where it started), and scoped-exports and calls-one-of cannot
 judge a TS file in their scope that re-exports (`export * from`, `export { f } from`, an
 imported name exported): exit 2, as rollcall's walker failed loudly.
@@ -140,10 +146,11 @@ tolerance 0), so a new or raised `known` line needs the metrics-rebaseline label
 
 Output (an API): one `<root>/<path>:<line>: <rule>: ...` or `<conf>:<line>: ...` line per
 problem, then per section one `GUARD <section> <rule> ok|FAIL <n> known=<k>` line per rule
-(n = violations that fire, k = its known COUNTs) and one `guards <section> files=<n>
+(n = violations that fire, k = its known COUNTs; an inert rule is `ok 0`, after its inert line)
+and one `guards <section> files=<n>
 violations=<n> known=<k>` line, then `guard_violations=<n>` (all sections). Exit: 0 ok,
 1 violations, stale known lines or stale sites, 2 a bad call, a malformed conf, a file that does
-not parse or cannot be judged, or a vacuous rule.
+not parse or cannot be judged, or a rule with a vacuous glob.
 """
 
 from __future__ import annotations
@@ -779,6 +786,7 @@ class Result:
     files: int = 0
     fired: dict[str, dict[str, list]] = field(default_factory=dict)  # rule id -> path -> hits
     problems: list[str] = field(default_factory=list)
+    inert: list[str] = field(default_factory=list)  # one note per rule with no candidates
     failed: set[str] = field(default_factory=set)  # rule ids
 
 
@@ -806,9 +814,8 @@ def _judge(rule: Rule, section: Section, files: list[str], parsed: dict, conf: P
     live: set[tuple[Site, str]] = set()
     violations: dict[str, list] = {}
     units = 0
-    for rel in files:
-        if not rule.scopes(rel):
-            continue
+    scoped = [rel for rel in files if rule.scopes(rel)]
+    for rel in scoped:
         try:
             judged = fires(rule, targets, section, parsed[rel])
         except rules.Unjudgeable as exc:
@@ -817,13 +824,17 @@ def _judge(rule: Rule, section: Section, files: list[str], parsed: dict, conf: P
         left = _apply_sites(rule, rel, judged.hits, live)
         if left:
             violations[rel] = left
-    if rule.spec.units and units == 0:
-        raise ConfError(
-            f"{conf}:{rule.line}: {rule.id}: no {rule.unit} under {' '.join(rule.globs)}, so the "
-            "rule checks nothing; fix the glob or the filter, or delete the rule"
-        )
     result.fired[rule.id] = violations
     listed = {k.path: k for k in section.known if k.rule == rule.id}
+    inert = ""
+    if not scoped:
+        inert = f"no files match {' '.join(rule.globs)}"
+    elif rule.spec.units and units == 0:
+        inert = f"no {rule.unit} under {' '.join(rule.globs)}"
+    if inert:
+        result.inert.append(f"{conf}:{rule.line}: {rule.id}: inert: {inert}")
+        _stale_known(rule, listed, violations, conf, result)
+        return
     tail = _sanctioned_by(rule)
     for rel, hits in sorted(violations.items()):
         known = listed.get(rel)
@@ -847,6 +858,10 @@ def _judge(rule: Rule, section: Section, files: list[str], parsed: dict, conf: P
             f"the exception is stale; delete {fix} from the rule"
         )
         result.failed.add(rule.id)
+    _stale_known(rule, listed, violations, conf, result)
+
+
+def _stale_known(rule: Rule, listed: dict, violations: dict[str, list], conf: Path, result: Result) -> None:
     for rel, known in sorted(listed.items()):
         now = len(violations.get(rel, []))
         if now >= known.count:
@@ -863,8 +878,12 @@ def check_section(section: Section, repo: Path, conf: Path) -> Result:
     walk = tree.python_files if section.lang == "python" else tree.ts_files
     files = walk(section, root)
     for rule in section.rules:
+        scope = () if rule.spec.sited else rule.globs
+        hit = {glob for glob in scope if any(tree.matches(f, glob) for f in files)}
+        if scope and not hit:
+            continue  # inert: no candidates, so no site to hold either (_judge notes it)
         for glob in (*rule.globs, *(s.glob for s in rule.excepts)):
-            if not any(tree.matches(f, glob) for f in files):
+            if glob not in hit and not any(tree.matches(f, glob) for f in files):
                 raise ConfError(
                     f"{conf}:{rule.line}: {rule.id}: {glob} matches no scanned file of "
                     f"[{section.name}], so the rule checks nothing; fix the glob or delete it"
@@ -889,9 +908,11 @@ def run(args: argparse.Namespace) -> int:
     problems: list[str] = []
     summaries: list[str] = []
     metrics: dict[str, int] = {}
+    inert: list[str] = []
     for section in chosen:
         result = check_section(section, Path.cwd(), conf)
         problems.extend(result.problems)
+        inert.extend(result.inert)
         section_fired = 0
         for rule in section.rules:
             verdict = "FAIL" if rule.id in result.failed else "ok"
@@ -905,7 +926,7 @@ def run(args: argparse.Namespace) -> int:
             f"guards {section.name} files={result.files} violations={section_fired} "
             f"known={sum(k.count for k in section.known)}"
         )
-    for line in problems:
+    for line in (*problems, *inert):
         print(line)
     for line in summaries:
         print(line)
