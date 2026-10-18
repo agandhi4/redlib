@@ -59,8 +59,9 @@
 #   description, unless GATE_BUDGET_ENFORCE=0 (default 1), which keeps the lines and the verdict
 #   PASS: for a queue adopting budgets before its suites fit.
 #   Under load a JOB's budget stretches (bin/_load_lib.sh: min(1-minute load / cores, 2), sampled
-#   when the job starts, only above 1.0), and its PASS|FAIL and OVERBUDGET lines then carry
-#   `; budget 300 s ×1.6 (load 13.1 on 8 cpus) → 480 s` inside their parentheses. closet's db
+#   when the job starts and when it ends, the larger kept, only above 1.0), and its PASS|FAIL and
+#   OVERBUDGET lines then carry `; budget 300 s ×1.6 (load 2.0 at start, 13.1 at end on 8 cpus)
+#   → 480 s` inside their parentheses. closet's db
 #   tier ran 61-65 s alone and failed 110 s twice at load ~13 on 8 cores (closet #410). The
 #   whole-gate budget is not scaled: it is the owner's wall-clock promise, load or not.
 #
@@ -459,7 +460,7 @@ write_gate_metrics() {
 job() { # <name> <make target> [VAR=val...]
   local name=$1 t0=$SECONDS log=$LOGDIR/$1.log rc secs
   devkit_load_scale "$JOB_BUDGET_SECS"
-  local budget=$LOAD_BUDGET load_note=$LOAD_NOTE
+  local budget load_note
   shift
   if [[ ! "$name" =~ ^[A-Za-z0-9_-]+$ ]] || [ "$name" = total ]; then
     echo "local_gate: job name '$name' must match [A-Za-z0-9_-]+ and not be 'total' (it becomes the key gate.<name>.seconds)" >&2
@@ -487,6 +488,8 @@ job() { # <name> <make target> [VAR=val...]
   rc=$?
   JOB_PGID=""
   secs=$((SECONDS - t0))
+  devkit_load_rescale
+  budget=$LOAD_BUDGET load_note=$LOAD_NOTE
   local verdict=fail
   if [ "$rc" = 0 ]; then
     verdict=pass
