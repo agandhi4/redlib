@@ -6,7 +6,6 @@
 # Actions installs it with setup-rust-toolchain. On a machine without Rust:
 #   PATH="$(devkit/bin/rust_toolchain.sh .):$PATH" make ci-quick
 CARGO ?= cargo
-DOCKER ?= docker
 CI_IMAGE ?= redlib:ci
 # The image's APP_VERSION, and what ci-image then asserts its ENV and OCI label carry: the bare
 # 7-char sha, as ghcr.yml passes it; the gate passes gate-<pr> (scripts/ci/gate_plan.sh) because
@@ -14,7 +13,7 @@ CI_IMAGE ?= redlib:ci
 CI_BUILD_VERSION ?= $(shell git rev-parse --short=7 HEAD)
 
 .DEFAULT_GOAL := help
-.PHONY: help ci-quick ci-guards ci-lint ci-typecheck ci-unit test-live ci-image gate install hooks-check devkit-sync devkit-check toolchain-check workflows-check docs-check release-check secrets-check secrets-staged ci-metrics metrics-snapshot metrics-tighten metrics-rebaseline
+.PHONY: help ci-quick ci-guards ci-lint ci-typecheck ci-unit test-live ci-image gate merge install hooks-check devkit-sync devkit-check toolchain-check workflows-check docs-check release-check secrets-check secrets-staged ci-metrics metrics-snapshot metrics-tighten metrics-rebaseline
 
 help: ## list targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
@@ -66,9 +65,9 @@ test-live: ## the #[ignore]d tests that call live Reddit (needs outbound network
 # order"), so devkit's boot_image.sh BOOT_EXPECT_VERSION cannot run here. The build arg is checked
 # where it lands instead: the image's ENV (what the app reads) and its OCI version label.
 ci-image: ## build Dockerfile as $(CI_IMAGE) with APP_VERSION=$(CI_BUILD_VERSION), then assert ENV + label carry it
-	$(DOCKER) build --build-arg APP_VERSION="$(CI_BUILD_VERSION)" -t $(CI_IMAGE) .
-	@env=$$($(DOCKER) image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $(CI_IMAGE) | sed -n 's/^APP_VERSION=//p'); \
-	label=$$($(DOCKER) image inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' $(CI_IMAGE)); \
+	DOCKER_CALL_TIMEOUT=900 devkit/bin/docker_bounded.sh build --build-arg APP_VERSION="$(CI_BUILD_VERSION)" -t $(CI_IMAGE) .
+	@env=$$(devkit/bin/docker_bounded.sh image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $(CI_IMAGE) | sed -n 's/^APP_VERSION=//p'); \
+	label=$$(devkit/bin/docker_bounded.sh image inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' $(CI_IMAGE)); \
 	if [ "$$env" = "$(CI_BUILD_VERSION)" ] && [ "$$label" = "$(CI_BUILD_VERSION)" ]; then \
 	  echo "ci-image: APP_VERSION and image.version label are $(CI_BUILD_VERSION)"; \
 	else \
@@ -93,6 +92,10 @@ metrics-rebaseline: ## collect, then overwrite every bound, or only KEYS=a,b (la
 gate: ## make gate PR=<n> [GATE_ARGS=--no-post]
 	@test -n "$(PR)" || { echo "usage: make gate PR=<number> [GATE_ARGS=--no-post]" >&2; exit 2; }
 	devkit/bin/gate.sh "$(PR)" $(GATE_ARGS)
+
+merge: ## make merge PR=<n>; refused unless the head has local-gate success
+	@test -n "$(PR)" || { echo "usage: make merge PR=<number>" >&2; exit 2; }
+	devkit/bin/pr_merge.sh "$(PR)"
 
 # --fix rewrites core.hooksPath, so a tool that repointed it is undone by the next install.
 install: devkit-check ## one-time per checkout/worktree: install the git hooks (.githooks, steps in scripts/ci/hooks.conf)

@@ -78,6 +78,9 @@ DEVKIT_ROOT=${DEVKIT_ROOT:-$(cd "$HERE/.." && pwd)}
 DATA=${DEVKIT_GITHUB_DATA:-$DEVKIT_ROOT/github}
 REPOS_FILE=$DATA/repos.json
 MONTH=${AUDIT_MONTH:-$(date +%Y-%m)}
+# 45 days: the scorecard's longest TREND window (30) plus the commit before it. python3 because
+# BSD and GNU date disagree on relative dates.
+CLONE_SINCE=$(python3 -I -c 'import datetime; print(datetime.date.today() - datetime.timedelta(days=45))') || die "python3 is required"
 case "$MONTH" in [0-9][0-9][0-9][0-9]-[0-1][0-9]) ;; *) log "AUDIT_MONTH must be YYYY-MM: $MONTH"; usage ;; esac
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}/devkit/audit
 RUNS_FILE=$STATE/runs
@@ -348,14 +351,14 @@ docs_report() { # <repo> <dir>
   fi
 }
 
-# The fleet scorecard (bin/scorecard.py, standardization/scorecard-design.md): one INFO row with
-# the repo's grade line, the per-repo JSON kept in raw/ for the fleet table write_report renders.
-# Unmeasured checks name devkit mechanisms, so the table is devkit's ranked backlog.
+# The fleet scorecard (bin/scorecard.py v2, standardization/scorecard-design.md §5): one INFO row
+# with the repo's `scorecard` line, the per-repo JSON kept in raw/ for the fleet report
+# write_report renders. Its devkit backlog names unmeasured mechanisms.
 scorecard_repo() { # <repo> <dir>
   local repo=$1 dir=$2 out=$RAW/$1.scorecard.txt
   if (cd "$dir" && python3 -I "$DEVKIT_ROOT/bin/scorecard.py" . --json "$RAW/$repo.scorecard.json" \
       ${AUDIT_HOMELAB_DIR:+--homelab "$AUDIT_HOMELAB_DIR"}) >"$out" 2>&1; then
-    record "$repo" scorecard INFO "$(grep '^grade ' "$out" | tail -1); $(grep -c ' UNMEASURED ' "$out") unmeasured"
+    record "$repo" scorecard INFO "$(grep '^scorecard ' "$out" | tail -1); $(jq '.backlog | length' "$RAW/$repo.scorecard.json") unmeasured"
   else
     record "$repo" scorecard ERROR "exit $?: $(first_lines "$out")"
   fi
@@ -401,7 +404,8 @@ check_ratchet() { # <repo> <dir>
 audit_repo() { # <repo>
   local repo=$1 dir=$WORK/$1
   log "$repo: cloning $OWNER/$repo"
-  if ! gh repo clone "$OWNER/$repo" "$dir" -- --depth 1 --quiet >"$RAW/$repo.clone.txt" 2>&1; then
+  # History back past the scorecard's 30-day TREND window: a depth-1 clone reads every key flat.
+  if ! gh repo clone "$OWNER/$repo" "$dir" -- --shallow-since="$CLONE_SINCE" --quiet >"$RAW/$repo.clone.txt" 2>&1; then
     record "$repo" clone ERROR "$(first_lines "$RAW/$repo.clone.txt")"
     return
   fi
