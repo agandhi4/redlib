@@ -46,6 +46,13 @@ def plan_literal(root: Path, name: str) -> str:
     return m.group(1) if m else ""
 
 
+def plan_declares(root: Path, name: str) -> bool:
+    """The plan assigns `NAME=` a non-empty value, quoted or not (a GATE_JOBS_* list is quoted,
+    so plan_literal's bare-word form never reads it)."""
+    plan = root / PLAN
+    return plan.is_file() and bool(re.search(rf"^{re.escape(name)}=(?!\s|$|\"\"|'')", plan.read_text(errors="replace"), re.M))
+
+
 def gate_state_name(root: Path) -> str:
     return plan_literal(root, "GATE_STATE_NAME")
 

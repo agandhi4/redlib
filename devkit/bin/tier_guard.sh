@@ -20,8 +20,9 @@
 #   TIER <tier> OVERBUDGET <s>s (budget <b>s)            exit 1, unless TIER_BUDGET_ENFORCE=0
 #   TIER <tier>: <s>s (budget <b>s) <runner>=<n>...      every check held: exit 0
 # Under load the budget stretches (bin/_load_lib.sh: min(1-minute load / cores, 2), sampled when
-# the command starts, only above 1.0) and both budget lines then read
-# `(budget 110 s ×1.6 (load 13.1 on 8 cpus) → 176 s)`; unloaded, they are exactly as above.
+# the command starts and when it ends, the larger stretch kept, only above 1.0) and both budget
+# lines then read `(budget 110 s ×1.6 (load 2.0 at start, 13.1 at end on 8 cpus) → 176 s)`;
+# unloaded at both, they are exactly as above.
 # A bad invocation exits 2 before the command runs. TIER_BUDGET_ENFORCE=0 (default 1) keeps
 # the OVERBUDGET line but not the failure, for a repo or box adopting budgets, exactly as
 # GATE_BUDGET_ENFORCE does for local_gate's job budgets. Floors have no such switch: a count
@@ -148,12 +149,13 @@ LOG=$(mktemp "${tmp%/}/tier-$TIER.XXXXXX") || die "mktemp failed"
 trap 'rm -f "$LOG"' EXIT
 
 devkit_load_scale "$BUDGET"
-budget_text="budget ${BUDGET}s"
-[ -z "$LOAD_NOTE" ] || budget_text=$LOAD_NOTE
 start=$SECONDS
 "$@" 2>&1 | tee "$LOG"
 rc=${PIPESTATUS[0]}
 secs=$((SECONDS - start))
+devkit_load_rescale
+budget_text="budget ${BUDGET}s"
+[ -z "$LOAD_NOTE" ] || budget_text=$LOAD_NOTE
 
 if [ "$rc" -ne 0 ]; then
   echo "TIER $TIER FAIL (exit $rc, ${secs}s)"

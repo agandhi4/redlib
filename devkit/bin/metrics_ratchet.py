@@ -13,7 +13,9 @@ after a merge. Gains lock in (2026-10-18): `check` FAILS on a BETTER key, printi
 <value> vs <bound> BETTER — run make metrics-tighten and commit <bounds>`, because a hint was
 ignored: a gain left unlocked is headroom the next PR spends unseen. Integer keys get no
 tolerance; a float key (coverage, bundle KiB) better by at most LOCK_IN_TOLERANCE is printed
-`BETTER (within tolerance ...)` and passes, so run-to-run noise never costs a commit. The
+`BETTER (within tolerance ...)` and passes, so run-to-run noise never costs a commit, and
+`tighten` leaves that bound where it is: both read gain_to_lock_in, so a noise gain is never
+committed and then read WORSE by the next run (closet coverage 92.47 -> 92.48 -> 92.47). The
 `metrics-rebaseline` label does not exempt it. `tighten` also prints every WORSE and MISSING
 key with check's line and exits 1 after writing the BETTER bounds: it is the command an author
 runs before the gate, so it must show what the gate will refuse (finplat #660 learned of a
@@ -497,7 +499,7 @@ def _status_line(metric: str, bound: Bound, snapshot: Snapshot, bounds_path: Pat
         raise InputError(f"bounds {bounds_path}: {metric} unset")
     status = classify(value, bound.bound, bound.direction)
     note = ""
-    if status == "BETTER":  # only check reaches here with BETTER; tighten moves the bound first
+    if status == "BETTER":  # tighten reaches here only with a gain within the tolerance
         note = (
             f" — run make metrics-tighten and commit {bounds_path}"
             if gain_to_lock_in(value, bound.bound)
@@ -620,12 +622,17 @@ def cmd_tighten(args: argparse.Namespace) -> int:
             dropped += 1
             _drop_report_only(metric, bound)
             continue
-        if metric in snapshot.values and (
-            bound.bound is None or is_better(snapshot.values[metric], bound.bound, bound.direction)
+        value = snapshot.values.get(metric)
+        # gain_to_lock_in, the predicate check fails on: a float gain within the tolerance stays
+        # at the old bound, or noise locked in (closet coverage 92.47 -> 92.48) reads WORSE at
+        # the next gate's 92.47.
+        if value is not None and (
+            bound.bound is None
+            or (is_better(value, bound.bound, bound.direction) and gain_to_lock_in(value, bound.bound))
         ):
             tightened[metric] = _with_value(metric, bound, snapshot)
             changed += 1
-            print(f"ratchet {metric} {_fmt(bound.bound)} -> {_fmt(snapshot.values[metric])}")
+            print(f"ratchet {metric} {_fmt(bound.bound)} -> {_fmt(value)}")
             continue
         status = _status_line(metric, bound, snapshot, bounds_path)
         if status in failing:

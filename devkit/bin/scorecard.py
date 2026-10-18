@@ -36,7 +36,9 @@ the committed bounds, then docs/metrics/report-only.json, then a fresh build/met
 The ratchet holds one number, `{"wired": <share>}`: the WIRED share of the repo-scoped checks.
 Machine-scoped checks (hooks ledger live, gh shim) and fleet-scoped ones (devkit-rev age, the
 repos.json listing) are printed in n/m but never ratcheted: they change without a code change,
-and a gate on another host would fail on them. `check` holds the share to the PR's file and that
+and a gate on another host would fail on them, so `--mode` does not run the fleet ones. Run from
+a consumer's vendored devkit/, those two read GitHub through `gh api` (repos.json cached 7 days
+in <state>/devkit/scorecard/), so they measure there too. `check` holds the share to the PR's file and that
 file to main's copy (the metrics ratchet's semantics: the metrics-rebaseline label admits a
 lower committed share, never a share below the committed one), and, as the metrics ratchet
 does since gains lock in, fails a share ABOVE the committed one until `make metrics-tighten`
@@ -247,16 +249,36 @@ def load_declarations(repo: Repo) -> None:
             repo.excepted[cid] = line.strip()[:160]
 
 
-def makefile_targets(root: Path) -> set[str]:
+def makefile_rules(root: Path) -> dict[str, list[str]]:
+    """The root Makefile's targets, each with its own recipe lines (tab-led lines after the rule,
+    and an inline `target: ; recipe`). A target named on several rule lines gathers them all; a
+    target whose rules carry no recipe line is an aggregate of its prerequisites."""
     mk = root / "Makefile"
     if not mk.is_file():
-        return set()
-    targets: set[str] = set()
+        return {}
+    rules: dict[str, list[str]] = {}
+    current: list[str] = []
     for line in mk.read_text(errors="replace").splitlines():
-        m = re.match(r"^([A-Za-z0-9_./%-]+(?:\s+[A-Za-z0-9_./%-]+)*)\s*:(?!=)", line)
-        if m and not line.startswith(("\t", ".")):
-            targets.update(m.group(1).split())
-    return targets
+        if line.startswith("\t"):
+            if line.strip() and not line.strip().startswith("#"):
+                for target in current:
+                    rules[target].append(line.strip())
+            continue
+        m = re.match(r"^([A-Za-z0-9_./%-]+(?:\s+[A-Za-z0-9_./%-]+)*)\s*:(?!=)[^;]*(?:;(.*))?", line)
+        if not m or line.startswith("."):
+            if line.strip() and not line.startswith("#"):
+                current = []  # a variable or directive ends the previous rule's recipe
+            continue
+        current = m.group(1).split()
+        for target in current:
+            rules.setdefault(target, [])
+            if (m.group(2) or "").strip():
+                rules[target].append(m.group(2).strip())
+    return rules
+
+
+def makefile_targets(root: Path) -> set[str]:
+    return set(makefile_rules(root))
 
 
 def makefiles_text(repo: Repo) -> str:
@@ -350,11 +372,17 @@ def wired_ratchet(repo: Repo, stack: set[str]) -> None:
     else:
         repo.na("ratchet.bundle", "no frontend")
     locks = [f for f in repo.tracked if Path(f).name in ("uv.lock", "package-lock.json", "pnpm-lock.yaml", "Cargo.lock")]
-    if locks:
-        vuln = [k for k in repo.metrics if k.startswith("vuln.")]
-        repo.add("ratchet.vuln", bool(vuln), f"{len(vuln)} vuln.* key(s) (report-only)" if vuln else f"no vuln.* keys; wire metrics/vuln.py, then `make metrics-tighten` commits {REPORT_ONLY_FILE}")
-    else:
+    if not locks:
         repo.na("ratchet.vuln", "no lockfile")
+        return
+    vuln = [k for k in repo.metrics if k.startswith("vuln.")]
+    # vuln.py's own count of what it queried: every scope at 0 is a dev-only lockfile, nothing to
+    # expose. A snapshot from before the key existed lacks it and reads as measured.
+    packages = [repo.metrics[k] for k in vuln if k.endswith(".packages")]
+    if packages and not any(packages):
+        repo.na("ratchet.vuln", f"0 locked production packages in {len(packages)} vuln scope(s) (dev-only lockfiles)")
+    else:
+        repo.add("ratchet.vuln", bool(vuln), f"{len(vuln)} vuln.* key(s) (report-only)" if vuln else f"no vuln.* keys; wire metrics/vuln.py, then `make metrics-tighten` commits {REPORT_ONLY_FILE}")
 
 
 def wired_guards(repo: Repo, stack: set[str]) -> None:
@@ -370,15 +398,53 @@ def wired_guards(repo: Repo, stack: set[str]) -> None:
     repo.add("layers", layers and bool(lv), f"layers.conf {'yes' if layers else 'no'}, {len(lv)} layer_violations key(s)")
 
 
+TIER_TARGET = re.compile(r"ci-(unit|db|e2e|smoke|swift|build)(-|$)")
+# `tier_guard.sh <tier> --budget`, directly or through a make variable ($(TIER_GUARD), $(TIER)).
+TIER_GUARD_CALL = re.compile(r"(?:tier_guard\.sh\)?|\$\([A-Z_]*TIER[A-Z_]*\))\s+([a-z0-9-]+)\s+--budget")
+BOOT_TARGET = re.compile(r"ci-smoke(-|$)")
+
+
+def boots_under_cap(repo: Repo, recipe: list[str]) -> bool:
+    """The recipe runs devkit's boot_image.sh, itself or through a tracked script it names (one
+    level: the fleet's smokes are `scripts/ci/image_smoke.sh boot` and the like)."""
+    if any("boot_image.sh" in line for line in recipe):
+        return True
+    words = {w.strip("'\"").removeprefix("$(CURDIR)/") for line in recipe for w in line.split()}
+    return any("boot_image.sh" in (repo.root / w).read_text(errors="replace") for w in sorted(words & repo.tracked))
+
+
 def wired_tiers(repo: Repo) -> None:
-    makes = makefiles_text(repo)
-    tiers = set(re.findall(r"tier_guard\.sh\)?\s+([a-z0-9-]+)\s+--budget", makes)) | set(re.findall(r"\$\([A-Z_]*TIER[A-Z_]*\)\s+([a-z0-9-]+)\s+--budget", makes))
-    tier_targets = {t for t in makefile_targets(repo.root) if re.match(r"ci-(unit|db|e2e|smoke|swift|build)(-|$)", t)}
-    if not tier_targets and not tiers:
+    """Every test tier target runs under a budget. A target with no recipe of its own is an
+    aggregate (finplat's `ci-unit: ci-unit-backend ci-unit-frontend`): its prerequisites are
+    judged, never it. A boot-only smoke counts as budgeted when it boots through boot_image.sh,
+    whose BOOT_TIMEOUT and per-call docker bounds already cap it, and a tier_guard floor has no
+    test count to hold there. A target that runs a suite after the boot (an e2e) needs tier_guard."""
+    rules = makefile_rules(repo.root)
+    tier_targets = sorted(t for t in rules if TIER_TARGET.match(t))
+    if not tier_targets:
         repo.na("tiers", "no test tier targets")
         return
-    unguarded = sorted(t for t in tier_targets if not any(t.endswith(x) or x in t for x in tiers)) if tiers else sorted(tier_targets)
-    repo.add("tiers", bool(tiers) and not unguarded, f"under tier_guard: {', '.join(sorted(tiers)) or 'none'}; unbudgeted: {', '.join(unguarded) or 'none'}")
+    guarded: set[str] = set()
+    capped: list[str] = []
+    aggregates: list[str] = []
+    unbudgeted: list[str] = []
+    for target in tier_targets:
+        recipe = rules[target]
+        tiers = {t for line in recipe for t in TIER_GUARD_CALL.findall(line)}
+        if not recipe:
+            aggregates.append(target)
+        elif tiers:
+            guarded |= tiers
+        elif BOOT_TARGET.match(target) and boots_under_cap(repo, recipe):
+            capped.append(target)
+        else:
+            unbudgeted.append(target)
+    evidence = f"under tier_guard: {', '.join(sorted(guarded)) or 'none'}"
+    if capped:
+        evidence += f"; boot-capped by boot_image.sh: {', '.join(capped)}"
+    if aggregates:
+        evidence += f"; aggregates: {', '.join(aggregates)}"
+    repo.add("tiers", not unbudgeted, f"{evidence}; unbudgeted: {', '.join(unbudgeted) or 'none'}")
 
 
 def wired_process(repo: Repo, state_home: Path, conf: dict[str, float]) -> None:
@@ -413,12 +479,18 @@ def wired_process(repo: Repo, state_home: Path, conf: dict[str, float]) -> None:
         repo.add("migration_check", mig, "a recipe runs migration_check.py" if mig else "no recipe runs devkit/bin/migration_check.py")
     else:
         repo.na("migration_check", "no database tier")
-    if dockerfiles(repo):
+    images = dockerfiles(repo)
+    if not images:
+        repo.na("contract_probe", "no image")
+    elif (repo.root / identity.PLAN).is_file() and not identity.plan_declares(repo.root, "GATE_JOBS_IMAGE"):
+        # A Dockerfile the gate never builds is not an app image the gate boots (homelab's Caddy
+        # builds, made by the hosts at deploy time).
+        names = ", ".join(str(p.relative_to(repo.root)) for p in images)
+        repo.na("contract_probe", f"the gate plan builds no image (no GATE_JOBS_IMAGE); not app images: {names}")
+    else:
         sources = [f for f in repo.tracked if Path(f).name == "Makefile" or f.endswith(".sh")]
         probe = any("contract_probe" in (repo.root / f).read_text(errors="replace") for f in sources)
-        repo.add("contract_probe", probe, "smoke runs contract_probe.sh" if probe else "smoke does not run devkit/bin/contract_probe.sh")
-    else:
-        repo.na("contract_probe", "no image")
+        repo.add("contract_probe", probe, "smoke runs contract_probe.sh" if probe else "smoke does not run devkit/bin/contract_probe.sh (or declare `scorecard: contract_probe` under Convention deltas)")
 
 
 def _ledger_day(line: str) -> date:
@@ -434,20 +506,56 @@ def is_devkit_checkout(devkit: Path) -> bool:
     return git(devkit, "rev-parse", "--show-toplevel") == str(devkit) and (devkit / "VENDOR_PATHS").is_file()
 
 
-def devkit_distance(devkit: Path, commit: str) -> tuple[float, int] | None:
-    """(days, commits) from `commit` to the devkit checkout's HEAD; None when unmeasurable.
-    Days are the commit dates' difference, not the wall clock, so a quiet devkit never ages a
-    repo at its tip (decisions 2026-10-17)."""
-    if not is_devkit_checkout(devkit):
-        return None
+# The upstream every .devkit-rev names (devkit-sync.sh's DEVKIT_URL). It is private, so its
+# files come through `gh api` (authenticated), never raw.githubusercontent.com.
+DEVKIT_SLUG = "agandhi4/devkit"
+GH_API_TIMEOUT = 30  # seconds; a hung gh is UNMEASURED, never a hung scorecard
+REPOS_JSON_CACHE_DAYS = 7
+
+
+def gh_api(path: str, *args: str) -> tuple[str | None, str]:
+    """(stdout, "") from `gh api <path> <args>`, or (None, why)."""
+    try:
+        proc = subprocess.run(["gh", "api", path, *args], capture_output=True, text=True, check=False, timeout=GH_API_TIMEOUT)
+    except FileNotFoundError:
+        return None, "gh: not found"
+    except subprocess.TimeoutExpired:
+        return None, f"gh api {path}: no answer in {GH_API_TIMEOUT} s"
+    if proc.returncode != 0:
+        return None, f"gh api {path}: {(proc.stderr.strip().splitlines() or [f'exit {proc.returncode}'])[-1]}"
+    return proc.stdout.strip(), ""
+
+
+def _epoch(iso: str) -> int:
+    return int(datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp())
+
+
+def checkout_distance(devkit: Path, commit: str) -> tuple[tuple[int, int, int] | None, str]:
     vendored, tip = git(devkit, "log", "-1", "--format=%ct", commit), git(devkit, "log", "-1", "--format=%ct", "HEAD")
     behind = git(devkit, "rev-list", "--count", f"{commit}..HEAD")
     if not (vendored and tip and behind):
-        return None
-    return max(0, int(tip) - int(vendored)) / 86400, int(behind)
+        return None, "not in this devkit checkout (fetch it?)"
+    return (int(vendored), int(tip), int(behind)), ""
+
+
+def github_distance(commit: str) -> tuple[tuple[int, int, int] | None, str]:
+    """The same three numbers from GitHub, for a run from a consumer's vendored devkit/: compare's
+    base is the vendored commit and its ahead_by the commits main has past it."""
+    compare, why = gh_api(f"repos/{DEVKIT_SLUG}/compare/{commit}...main", "--jq", "[.ahead_by, .base_commit.commit.committer.date] | @tsv")
+    tip, why_tip = gh_api(f"repos/{DEVKIT_SLUG}/commits/main", "--jq", ".commit.committer.date")
+    if compare is None or tip is None:
+        return None, why or why_tip
+    try:
+        behind, vendored = compare.split("\t")
+        return (_epoch(vendored), _epoch(tip), int(behind)), ""
+    except ValueError:
+        return None, f"gh api compare: unreadable answer {compare[:80]!r}"
 
 
 def wired_currency(repo: Repo, conf: dict[str, float], devkit: Path = DEVKIT) -> None:
+    """Days are the commit dates' difference, not the wall clock, so a quiet devkit never ages a
+    repo at its tip (decisions 2026-10-17). Read from the devkit checkout when the scorecard runs
+    from one, else from GitHub."""
     rev = repo.root / ".devkit-rev"
     if not rev.is_file():
         if repo.name == "devkit":
@@ -456,14 +564,16 @@ def wired_currency(repo: Repo, conf: dict[str, float], devkit: Path = DEVKIT) ->
             repo.add("devkit_rev", False, "no .devkit-rev: devkit not vendored", scope="fleet")
         return
     commit = rev.read_text().split()[0]
-    distance = devkit_distance(devkit, commit)
+    local = is_devkit_checkout(devkit)
+    distance, why = checkout_distance(devkit, commit) if local else github_distance(commit)
     if distance is None:
-        where = "not in this devkit checkout (fetch it?)" if is_devkit_checkout(devkit) else "distance needs a devkit checkout"
-        repo.add("devkit_rev", None, f"vendored {commit[:7]}; {where}", scope="fleet", mechanism="running scorecard.py from a devkit checkout")
+        repo.add("devkit_rev", None, f"vendored {commit[:7]}; {why}", scope="fleet",
+                 mechanism="a devkit checkout that has the commit" if local else f"gh api access to {DEVKIT_SLUG}")
         return
-    days, behind = distance
-    limit = conf["kit_devkit_days_max"]
-    repo.add("devkit_rev", days <= limit, f"vendored {commit[:7]}, {days:.1f} d older than devkit's tip (max {limit:g}), {behind} commits behind", scope="fleet")
+    vendored, tip, behind = distance
+    days, limit = max(0, tip - vendored) / 86400, conf["kit_devkit_days_max"]
+    where = "" if local else " on GitHub"
+    repo.add("devkit_rev", days <= limit, f"vendored {commit[:7]}, {days:.1f} d older than devkit's tip{where} (max {limit:g}), {behind} commits behind", scope="fleet")
 
 
 def wired_gh_shim(repo: Repo) -> None:
@@ -471,25 +581,40 @@ def wired_gh_shim(repo: Repo) -> None:
     repo.add("gh_shim", code == 0, out.splitlines()[-1] if out else f"install_gh_shim.sh --check exit {code}", scope="machine")
 
 
-def fleet_repos(devkit: Path = DEVKIT) -> tuple[str, list[str]] | None:
-    """(owner, repo names) from github/repos.json, the one fleet list; None outside a devkit
-    checkout (github/ is never vendored)."""
+def fleet_repos(devkit: Path, state_home: Path) -> tuple[tuple[str, list[str]] | None, str]:
+    """((owner, repo names), source) from github/repos.json, the one fleet list, or (None, why).
+    github/ is never vendored, so outside a devkit checkout it is GitHub's copy, cached
+    REPOS_JSON_CACHE_DAYS in the state dir: a fleet scorecard asks once, not once per repo."""
     path = devkit / "github" / "repos.json"
+    source = "github/repos.json"
     if not path.is_file():
-        return None
-    doc = json.loads(path.read_text())
-    return doc["owner"], list(doc["repos"])
+        path = state_home / "devkit" / "scorecard" / "repos.json"
+        age = (datetime.now().timestamp() - path.stat().st_mtime) / 86400 if path.is_file() else None
+        if age is not None and age <= REPOS_JSON_CACHE_DAYS:
+            source = f"GitHub's github/repos.json, cached {age:.1f} d"
+        else:
+            text, why = gh_api(f"repos/{DEVKIT_SLUG}/contents/github/repos.json", "-H", "Accept: application/vnd.github.raw")
+            if text is None:
+                return None, why
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text + "\n")
+            source = "GitHub's github/repos.json"
+    try:
+        doc = json.loads(path.read_text())
+        return (doc["owner"], list(doc["repos"])), source
+    except (ValueError, KeyError, TypeError) as e:
+        return None, f"{path}: unreadable ({e})"
 
 
-def wired_listed(repo: Repo, devkit: Path = DEVKIT) -> None:
+def wired_listed(repo: Repo, state_home: Path, devkit: Path = DEVKIT) -> None:
     """A repo missing from repos.json is unmeasured by the fleet scorecard and the monthly audit,
     and gets no settings or labels: a fleet failure, never the repo's (scorecard-design.md §5)."""
-    fleet = fleet_repos(devkit)
+    fleet, source = fleet_repos(devkit, state_home)
     if fleet is None:
-        repo.add("repos_json", None, "github/repos.json is not vendored", scope="fleet", mechanism="running scorecard.py from a devkit checkout")
+        repo.add("repos_json", None, source, scope="fleet", mechanism=f"a devkit checkout or gh api access to {DEVKIT_SLUG}")
         return
     listed = repo.name in {n.lower() for n in fleet[1]}
-    repo.add("repos_json", listed, "listed in github/repos.json" if listed else "not in github/repos.json (devkit new adds it; add the entry by hand for an older repo)", scope="fleet")
+    repo.add("repos_json", listed, f"listed in {source}" if listed else f"not in {source} (devkit new adds it; add the entry by hand for an older repo)", scope="fleet")
 
 
 def owner_items(repo: Repo, stack: set[str]) -> None:
@@ -521,7 +646,9 @@ def wired_share(checks: list[Check], scope: str | None = None) -> tuple[int, int
     return sum(1 for c in measured if c.status in ("PASS", "D")), len(measured)
 
 
-def score_wired(root: Path, conf: dict[str, float], state_home: Path) -> Repo:
+def score_wired(root: Path, conf: dict[str, float], state_home: Path, *, fleet: bool = True) -> Repo:
+    """fleet=False leaves out the fleet-scoped checks: the ratchet never reads them, and from a
+    vendored copy they ask GitHub, which a gate's ci-metrics need not wait on."""
     root = root.resolve()
     if not (root / ".git").exists() and not git(root, "rev-parse", "--show-toplevel"):
         sys.exit(f"scorecard: {root} is not a git repository")
@@ -534,9 +661,10 @@ def score_wired(root: Path, conf: dict[str, float], state_home: Path) -> Repo:
     wired_guards(repo, stack)
     wired_tiers(repo)
     wired_process(repo, state_home, conf)
-    wired_currency(repo, conf)
     wired_gh_shim(repo)
-    wired_listed(repo)
+    if fleet:
+        wired_currency(repo, conf)
+        wired_listed(repo, state_home)
     owner_items(repo, stack)
     return repo
 
@@ -914,13 +1042,13 @@ def ratchet(repo: Repo, bounds_file: Path, mode: str, rebaseline_ok: bool, *, ba
 # ---- fleet ----------------------------------------------------------------------------------
 
 
-def clone_fleet(scratch: Path) -> list[Path]:
+def clone_fleet(scratch: Path, state_home: Path) -> list[Path]:
     """A clone per repos.json entry into `scratch`, history back past the longest TREND window
     (a depth-1 clone has no ratchet.json history, so TREND would read all flat). A failed clone
     is one stderr line; the rest of the fleet is still read."""
-    fleet = fleet_repos()
+    fleet, why = fleet_repos(DEVKIT, state_home)
     if fleet is None:
-        sys.exit("scorecard: --fleet without paths needs a devkit checkout (github/repos.json)")
+        sys.exit(f"scorecard: --fleet without paths needs github/repos.json: {why}")
     owner, names = fleet
     since = (date.today() - timedelta(days=max(TREND_WINDOWS) + 15)).isoformat()
     roots = []
@@ -965,14 +1093,14 @@ def main() -> int:
     if args.mode:
         if args.fleet or len(args.roots) != 1:
             ap.error("--mode takes one repo root")
-        repo = score_wired(Path(args.roots[0]).expanduser(), conf, state_home)
+        repo = score_wired(Path(args.roots[0]).expanduser(), conf, state_home, fleet=False)
         return ratchet(repo, repo.root / args.bounds_file, args.mode, args.rebaseline_ok or os.environ.get("METRICS_REBASELINE") == "1",
                        base_ref=args.base_ref, base_file=Path(args.base_bounds) if args.base_bounds else None)
     if not args.fleet and len(args.roots) != 1:
         ap.error("one repo root without --fleet")
     now = datetime.now(timezone.utc)
     with tempfile.TemporaryDirectory(prefix="scorecard-fleet.") as scratch:
-        roots = [Path(r).expanduser() for r in args.roots] or clone_fleet(Path(scratch))
+        roots = [Path(r).expanduser() for r in args.roots] or clone_fleet(Path(scratch), state_home)
         docs = [repo_doc(score_wired(r, conf, state_home), conf, state_home, now) for r in roots]
     if args.json:
         Path(args.json).write_text(json.dumps(docs if args.fleet else docs[0], indent=2, ensure_ascii=False) + "\n")

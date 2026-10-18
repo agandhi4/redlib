@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Shared TypeScript/JavaScript metrics collector: cyclomatic and cognitive complexity, dead
-// code (knip), import cycles (dependency-cruiser) and bundle size (vite), as ratchet keys.
+// code (knip), import cycles (dependency-cruiser) and bundle size (vite, or a Next build), as ratchet keys.
 //
 // One line in scripts/ci/metrics.conf, run from the repo root, for example:
 //   ts-frontend frontend node devkit/metrics/ts.mjs --root frontend --src src --scope frontend \
@@ -55,6 +55,10 @@
 //                                                     and excluded. The build runs with a clean
 //                                                     environment (PATH, HOME only), so values a
 //                                                     vite `define` bakes in do not vary per machine
+//                A Next app (a .next/ dir or a next.config.*) is read, not built: kb_total is
+//                .next/static, kb_entry build-manifest.json's rootMainFiles, polyfillFiles and
+//                pages/_app (the shared first load). `next build` (the repo's build tier) must
+//                have run; a missing manifest is exit 2 saying so (bundleNext)
 //
 // --list-out FILE: the findings behind the counts (metrics/python.py's format, written by
 // _lib.mjs writeFindings): `# <key>`, then one line per finding; empty when there are none.
@@ -405,7 +409,22 @@ function kib(bytes) {
   return Number((bytes / 1024).toFixed(1));
 }
 
-function collectBundle(opts) {
+// dirBytes: every file's size under `dir`, recursively, less the paths in `skip`.
+function dirBytes(dir, skip = new Set()) {
+  let total = 0;
+  for (const name of readdirSync(dir)) {
+    const path = join(dir, name);
+    if (skip.has(path)) continue;
+    total += statSync(path).isDirectory() ? dirBytes(path, skip) : statSync(path).size;
+  }
+  return total;
+}
+
+function bundleKeys(scope, totalBytes, entryBytes) {
+  return { keys: { [`bundle.${scope}.kb_total`]: kib(totalBytes), [`bundle.${scope}.kb_entry`]: kib(entryBytes) }, findings: {} };
+}
+
+function bundleVite(opts) {
   const vite = requireBin(opts.root, "vite", "vite");
   const dist = mkdtempSync(join(tmpdir(), "devkit-vite-"));
   try {
@@ -440,24 +459,45 @@ function collectBundle(opts) {
       entryFiles.add(manifest[key].file);
       for (const css of manifest[key].css ?? []) entryFiles.add(css);
     }
-    let total = 0;
-    const walk = (dir) => {
-      for (const name of readdirSync(dir)) {
-        const path = join(dir, name);
-        if (statSync(path).isDirectory()) {
-          if (path !== join(dist, ".vite")) walk(path);
-        } else total += statSync(path).size;
-      }
-    };
-    walk(dist);
     const entryBytes = [...entryFiles].reduce((n, f) => n + statSync(join(dist, f)).size, 0);
-    return {
-      keys: { [`bundle.${opts.scope}.kb_total`]: kib(total), [`bundle.${opts.scope}.kb_entry`]: kib(entryBytes) },
-      findings: {},
-    };
+    return bundleKeys(opts.scope, dirBytes(dist, new Set([join(dist, ".vite")])), entryBytes);
   } finally {
     rmSync(dist, { recursive: true, force: true });
   }
+}
+
+// bundleNext: the build `next build` already wrote, never a build of its own: Next's build needs
+// the app's env (a placeholder DATABASE_URL, secrets) that the repo's build tier sets, and takes
+// that tier's minutes. Total is .next/static, everything a browser can fetch; entry is
+// build-manifest.json's shared first load (rootMainFiles, polyfillFiles, pages/_app), which every
+// route loads. Next 16 (Turbopack) writes no per-route client manifest beside it, so route
+// chunks are in the total only.
+function bundleNext(opts, nextDir) {
+  const manifestPath = join(nextDir, "build-manifest.json");
+  if (!existsSync(manifestPath)) {
+    throw new CollectorError(
+      `${manifestPath} is missing: --bundle reads a Next app's \`next build\` output; run the repo's build tier (make ci-build) first`,
+    );
+  }
+  const manifest = parseJson(readFileSync(manifestPath, "utf8"), "next build-manifest.json");
+  const entryFiles = new Set([...(manifest.rootMainFiles ?? []), ...(manifest.polyfillFiles ?? []), ...(manifest.pages?.["/_app"] ?? [])]);
+  if (entryFiles.size === 0) throw new CollectorError(`${manifestPath} names no rootMainFiles, polyfillFiles or pages/_app files`);
+  const entryBytes = [...entryFiles].reduce((n, f) => {
+    const path = join(nextDir, f);
+    if (!existsSync(path)) throw new CollectorError(`${manifestPath} names ${f}, which is not under ${nextDir}: a partial or stale build`);
+    return n + statSync(path).size;
+  }, 0);
+  return bundleKeys(opts.scope, dirBytes(join(nextDir, "static")), entryBytes);
+}
+
+const NEXT_CONFIGS = ["next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs"];
+
+// collectBundle: a Next app (a .next/ build or a next.config.*) is read from its build; any
+// other package is built by vite here.
+function collectBundle(opts) {
+  const nextDir = join(opts.root, ".next");
+  const isNext = existsSync(nextDir) || NEXT_CONFIGS.some((f) => existsSync(join(opts.root, f)));
+  return isNext ? bundleNext(opts, nextDir) : bundleVite(opts);
 }
 
 // collect: every requested collector's { keys, findings } merged: keys are the JSON, findings

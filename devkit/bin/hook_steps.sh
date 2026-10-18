@@ -202,7 +202,7 @@ run_hook_steps() {
 
   _hook_drop_git_dir "$root"
   # shellcheck disable=SC2034  # LOAD_* are devkit_load_scale's outputs, local so they do not leak
-  local i=0 hook_start step_start bare_before HOOK_LOAD_NOTE LOAD_SCALE LOAD_BUDGET LOAD_NOTE LOAD_LEDGER
+  local i=0 hook_start step_start bare_before HOOK_LOAD_NOTE LOAD_SCALE LOAD_BUDGET LOAD_NOTE LOAD_LEDGER LOAD_BASE LOAD_START LOAD_NCPU
   bare_before=$(_hook_bare_state "$root")
   hook_start=$(date +%s)
   # Any positive budget: only the factor is recorded, as the ledger note (header: Timings).

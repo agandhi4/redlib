@@ -12,7 +12,7 @@ Rust + hyper + Askama (server-rendered HTML), vanilla CSS/JS. No frontend framew
 
 - **One Rust version string: `rust-toolchain.toml`** (exact `channel`). rustup, the gate (`devkit/bin/rust_toolchain.sh`), Actions (`setup-rust-toolchain` with no `toolchain:` input) and the image builder all read it. `make toolchain-check` fails if anything else names a version: a `FROM rust:` tag, a `Cargo.toml` `rust-version` above it, an inline `toolchain:` or `dtolnay/rust-toolchain`. To upgrade Rust, change the channel and fix what clippy then reports, in one PR.
 - `Cargo.toml` `rust-version` is the floor the locked dependencies declare, not a tested MSRV.
-- The Mac has no system Rust. `PATH="$(devkit/bin/rust_toolchain.sh .):$PATH" make ci-quick` installs the pinned toolchain once into a private rustup under `~/.local/share/devkit/rust` and uses it.
+- The Mac has no system Rust. Plain `make ci-quick` works: the Makefile runs cargo through `devkit/bin/toolchain_exec.sh`, which installs the pinned toolchain once into a private rustup under `~/.local/share/devkit/rust` and uses it. Run a hand-typed cargo command through the same script.
 
 ## Architecture
 
@@ -50,7 +50,7 @@ Rust + hyper + Askama (server-rendered HTML), vanilla CSS/JS. No frontend framew
 
 ## Convention deltas
 
-- No image smoke and no `/health/live` or `/health/ready` (delivery.md, observability.md): the listener opens only after Reddit OAuth bootstrap, so nothing answers without live Reddit; the compose healthcheck probes `/settings`. See `docs/decisions.md` 2026-10-13 "devkit vendored; Rust pinned in rust-toolchain.toml; PR gate". Scope reaffirmed in `docs/decisions.md` 2026-10-16 "Convention deltas declared (decision F scope)".
+- No image smoke and no `/health/live` or `/health/ready` (delivery.md, observability.md), so no contract probe either (`scorecard: contract_probe`): the listener opens only after Reddit OAuth bootstrap, so nothing answers without live Reddit; the compose healthcheck probes `/settings`. See `docs/decisions.md` 2026-10-13 "devkit vendored; Rust pinned in rust-toolchain.toml; PR gate". Scope reaffirmed in `docs/decisions.md` 2026-10-16 "Convention deltas declared (decision F scope)"; the probe is declared in 2026-10-18 "contract_probe declared; cargo through toolchain_exec.sh".
 - No JSON logs contract and no 12-hex request id (observability.md): logs are `pretty_env_logger` text; the compose `logging` label still ships them to Loki. See `docs/decisions.md` 2026-10-16 "Convention deltas declared (decision F scope)".
 - No Bugsink error tracking (observability.md): a single-user fork; panics and errors are read from the container log. See `docs/decisions.md` 2026-10-16 "Convention deltas declared (decision F scope)".
 - No `/metrics` endpoint, no homelab scrape and no Alertmanager route (observability.md): no app metrics in a fork; uptime is the compose healthcheck plus autoheal. See `docs/decisions.md` 2026-10-16 "Convention deltas declared (decision F scope)".

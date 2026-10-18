@@ -4,6 +4,7 @@
     "size.app.over_600": 0,
     "vuln.app.critical": 0,
     "vuln.app.high": 0,
+    "vuln.app.packages": 327,
     "vuln.app.total": 6
   },
   "schema_version": 2,
@@ -13,6 +14,7 @@
     "size.app.over_600": "size-app",
     "vuln.app.critical": "vuln-app",
     "vuln.app.high": "vuln-app",
+    "vuln.app.packages": "vuln-app",
     "vuln.app.total": "vuln-app"
   }
 }

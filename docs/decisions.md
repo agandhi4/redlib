@@ -127,3 +127,8 @@ Consequence: every production file is at most 600 lines and the ratchet fails a 
 Why: devkit 7ed3645 (#143) carries the owner's 2026-10-18 enforcement decisions. redlib has no branch protection, so nothing on GitHub requires the gate; PR #3 merged without one.
 Decision: `make merge PR=<n>` (devkit pr_merge.sh) is the only merge path: it refuses unless `local-gate` succeeded on the exact head and main has not moved. ci-image's docker calls go through docker_bounded.sh. The metrics job now fails a BETTER that the PR did not tighten. size.app.* is report-only (docs/metrics/report-only.json), a signal and not a bound. docs/metrics/scorecard.json holds only the WIRED share (12/15).
 Consequence: WIRED still misses jscpd duplication (no Rust key yet), contract_probe (the listener needs live Reddit OAuth, so smoke cannot boot) and the per-machine gh shim (install_gh_shim.sh).
+
+## 2026-10-18 — contract_probe declared; cargo through toolchain_exec.sh
+Why: devkit 86c0f93 (#147). A hand-run `make ci-quick` failed "cargo: No such file or directory" on the Mac, which has no Rust, while the gate and hooks passed. WIRED counted contract_probe as a miss though the image-smoke delta already rules it out.
+Decision: `CARGO ?= devkit/bin/toolchain_exec.sh cargo`, the same pinned PATH the gate and hooks build. The "No image smoke" delta now carries `scorecard: contract_probe`: no listener answers without live Reddit OAuth, so there is nothing to probe. WIRED share 0.833 to 0.917.
+Consequence: WIRED misses only duplication, which stays unwired because jscpd would bring npm tooling into a Rust repo (owner delta 2026-10-17).

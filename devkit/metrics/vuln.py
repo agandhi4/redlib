@@ -29,6 +29,9 @@ PR for it, and the scorecard reads the snapshot instead):
   vuln.<scope>.critical   vulnerabilities whose severity is CRITICAL
   vuln.<scope>.high       HIGH
   vuln.<scope>.total      every known vulnerability affecting a locked production package
+  vuln.<scope>.packages   the locked production packages queried; 0 is a dev-only lockfile
+                          (instalite's web/), which the scorecard reads as `ratchet.vuln` NA:
+                          there is no production exposure to measure
 and one `vuln: <severity> <package>@<version> <id>` line per hit on stderr, worst first.
 
 Severity: OSV `database_specific.severity` when present, else the CVSS v3/v4 base score
@@ -254,7 +257,12 @@ def main() -> int:
     for sev, vid in sorted(rows, key=lambda r: (ORDER.index(r[0]), r[1])):
         pk = ", ".join(f"{n}@{v}" for n, v in sorted(hits[vid]))
         print(f"vuln: {sev} {pk} {vid}", file=sys.stderr)
-    out = {f"vuln.{args.scope}.critical": counts["CRITICAL"], f"vuln.{args.scope}.high": counts["HIGH"], f"vuln.{args.scope}.total": len(rows)}
+    out = {
+        f"vuln.{args.scope}.critical": counts["CRITICAL"],
+        f"vuln.{args.scope}.high": counts["HIGH"],
+        f"vuln.{args.scope}.total": len(rows),
+        f"vuln.{args.scope}.packages": len(packages),
+    }
     print(f"vuln: {len(packages)} locked production packages, {len(rows)} vulnerabilities ({counts['CRITICAL']} critical, {counts['HIGH']} high)", file=sys.stderr)
     text = json.dumps(out, indent=2) + "\n"
     if args.out:
