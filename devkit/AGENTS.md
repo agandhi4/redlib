@@ -23,7 +23,8 @@ is README.md "Architecture". Invariants of the design:
 - Output contracts are APIs. `bin/local_gate.sh` prints `GATE <job> PASS|FAIL|SKIPPED|WATCHDOG|OVERBUDGET …` and
   `VERDICT PASS|FAIL head=<sha> main=<sha>`; `finplat_merge_queue.sh`, `mac_merge_queue.sh`
   and `worker.py` parse them. `bin/tier_guard.sh` prints `TIER <tier>: …|FAIL|FLOOR|OVERBUDGET …`
-  and exits with the command's code, 1 for its own verdict, 2 for a bad call. `.devkit-rev` is `<upstream commit> <tree sha>`,
+  and exits with the command's code, 1 for its own verdict, 2 for a bad call. The gate's outcome
+  record (`logs/<pr>/gate.json`, `runs.tsv`; README "Gate record") is an API too. `.devkit-rev` is `<upstream commit> <tree sha>`,
   the tree filtered to `VENDOR_PATHS`. A new file consumers run must sit under a listed path.
 - The skeleton owns mechanics; the repo's `scripts/ci/gate_plan.sh` declares its jobs. Which
   paths run which group is devkit's (`bin/_paths_lib.sh`: one table for hooks and gate,
@@ -48,15 +49,17 @@ is README.md "Architecture". Invariants of the design:
 make ci-quick                  # shellcheck, python + template unit tests (npm), devkit's own guards on itself
 make ci-unit                   # bats tests/ (~2 min)
 make gate PR=<n>               # both, on the PR merged into origin/main; posts `local-gate`
+make merge PR=<n>              # squash-merge, refused unless the current head has local-gate success
 bin/docs_check.sh --report .   # the docs numbers behind the diet rules; --fix does the mechanical moves
+python3 -I bin/gate_bite.py --days 30 <repo>   # BITE: gate fails by rule, hook fails, unguarded merges
 make scorecard REPOS='~/projects/solo/finplat …'   # the fleet scorecard (bin/scorecard.py)
 make agent-cost                # append this project's merged-PR costs to docs/agent-cost.tsv (bin/agent_cost.py)
 ```
 
 ## Workflow
 - Branch, PR, `make gate PR=<n>` green (the `local-gate` status is the merge signal; Actions is
-  a second opinion and has been billing-blocked), squash-merge with a descriptive sentence
-  title. Consumers pick it up with
+  a second opinion and has been billing-blocked), `make merge PR=<n>` with a descriptive
+  sentence title. Consumers pick it up with
   their `devkit-sync` target; a devkit change that needs plan changes ships as devkit PR first, then
   one PR per consumer.
 - Record decisions in `docs/decisions.md` in the same PR (`## YYYY-MM-DD — title`, Why /

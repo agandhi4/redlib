@@ -30,10 +30,15 @@
 # this a base change made every consumer's sync commit fail its own devkit-check (or the audit's
 # hook-differs) until someone copied the file by hand. It also runs when devkit/ is already
 # current, because the first sync to a new base runs the previous, vendored copy of this script.
+#
+# Trailer: both commits end with DEVKIT_COMMIT_TRAILER (env, set even empty wins: empty means
+# none), else `git config devkit.trailer`, else the fleet's agent trailer. Agents run every sync
+# and the repos' commit rules require the trailer, so every lane amended it in by hand.
 set -euo pipefail
 # shellcheck source=bin/_vendor_paths.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_vendor_paths.sh"
 readonly DEVKIT_URL=${DEVKIT_URL:-https://github.com/agandhi4/devkit.git}
+readonly DEFAULT_TRAILER="Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 STAGE=0
 REF=
 for arg in "$@"; do
@@ -52,6 +57,18 @@ OWN=(-- . ':(exclude)devkit' ':(exclude).devkit-rev')
 if [ "$STAGE" = 0 ] && { ! git diff --quiet "${OWN[@]}" || ! git diff --cached --quiet "${OWN[@]}"; }; then
   echo "devkit-sync: commit or stash first; the sync makes its own commit" >&2; exit 2
 fi
+if [ -n "${DEVKIT_COMMIT_TRAILER+x}" ]; then
+  TRAILER=$DEVKIT_COMMIT_TRAILER
+else
+  TRAILER=$(git config --get devkit.trailer || echo "$DEFAULT_TRAILER")
+fi
+# commit_sync <message> [-- <paths>...]: the sync's one way to commit, trailer appended.
+commit_sync() {
+  local message=$1
+  shift
+  [ -z "$TRAILER" ] || message+=$'\n\n'"$TRAILER"
+  git commit -q -m "$message" "$@"
+}
 git fetch -q "$DEVKIT_URL" "$REF"
 UPSTREAM=$(git rev-parse FETCH_HEAD)
 UPSTREAM_TREE=$(git rev-parse "FETCH_HEAD^{tree}")
@@ -82,7 +99,7 @@ while IFS=' ' read -r base copy; do
 done <<<"$(base_copies)"
 if [ "$CURRENT" = 1 ]; then
   [ "${#REFRESHED[@]}" -gt 0 ] || { echo "devkit at ${UPSTREAM:0:7} (tree ${UPSTREAM_TREE:0:7}), already current"; exit 0; }
-  [ "$STAGE" = 1 ] || git commit -q -m "Refresh devkit base copies to ${UPSTREAM:0:7}" -- "${REFRESHED[@]}"
+  [ "$STAGE" = 1 ] || commit_sync "Refresh devkit base copies to ${UPSTREAM:0:7}" -- "${REFRESHED[@]}"
   echo "devkit at ${UPSTREAM:0:7} (tree ${UPSTREAM_TREE:0:7}), already current; base copies refreshed"; exit 0
 fi
 if [ "$STAGE" = 1 ]; then
@@ -90,7 +107,7 @@ if [ "$STAGE" = 1 ]; then
 fi
 NOTE=
 [ "${#REFRESHED[@]}" -eq 0 ] || NOTE=$'\n'"Refreshed from the vendored bases: ${REFRESHED[*]}."
-git commit -q -m "Update devkit to ${UPSTREAM:0:7}
+commit_sync "Update devkit to ${UPSTREAM:0:7}
 
 Vendored tree ${UPSTREAM_TREE:0:7} from $DEVKIT_URL $REF (replaced wholesale; see devkit/bin/devkit-sync.sh).$NOTE"
 TREE=$(git rev-parse HEAD:devkit)

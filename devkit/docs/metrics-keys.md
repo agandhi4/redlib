@@ -34,14 +34,14 @@ schema 1 envelope (finplat's `make metrics`) and a bare flat file, which carry n
 | Domain | Direction | Examples |
 |---|---|---|
 | `coverage` | higher | `coverage.backend.lines`, `coverage.frontend.branches` |
-| `duplication` | lower | `duplication.repo.jscpd_percent` |
+| `duplication` | lower | `duplication.repo.clones`; `duplication.<s>.jscpd_percent` is REPORT-ONLY: it is duplicated over scanned lines, so deleting unduplicated code raises it with no new clone (orbit #86, #88; decision 2026-10-17) |
 | `dead` | lower | `dead.backend.vulture`, `dead.frontend.knip_exports` |
 | `complexity` | lower | `complexity.backend.cognitive_max`, `complexity.backend.mccabe_over_10` |
 | `coupling` | lower | `coupling.frontend.cycles`, `coupling.backend.layer_violations` (`bin/layer_check.py`), `coupling.backend.fan_out_max`; `coupling.<s>.fan_in_max` is REPORT-ONLY: a models or core hub has many importers by design, so its fan-in is architecture, not drift (decision 2026-10-17) |
 | `guards` | lower | `guards.backend.known` (`bin/guard_check.py`: the guard violations that fire, `known` lines once the check passes; tolerance 0) |
 | `bundle` | lower | `bundle.frontend.kb_total`, `bundle.frontend.kb_login` |
 | `statements` | lower | `statements.POST:/api/items` |
-| `size` | lower | `size.backend.max_lines`, `size.frontend.over_600` (`metrics/size.py`: lines of the largest production file; files over 600 lines) |
+| `size` | lower | `size.backend.max_lines`, `size.frontend.over_600` (`metrics/size.py`: lines of the largest production file; files over 600 lines); REPORT-ONLY: size alone never justifies a split, so a long file is a signal to read, never a gate failure (owner 2026-10-18) |
 | `vuln` | lower | `vuln.backend.high`, `vuln.frontend.total` (`metrics/vuln.py`, OSV over the locked production set; REPORT-ONLY: a new advisory moves it without a code change, so never gated even with a bound in the file; the scorecard reads the snapshot, else `docs/metrics/report-only.json`) |
 | `allowlist` | lower | `allowlist.backend.own_commit` (shrink-only allow-lists) |
 | `gate` | lower | `gate.backend-unit.seconds`, `gate.total.seconds` (wall-clock seconds) |
@@ -87,7 +87,7 @@ Exactly the keys each emits, per flag; `<s>` is `--scope`. CLIs: devkit README, 
 | `rust.py` | `--cognitive` | `complexity.<s>.cognitive_max` (clippy `cognitive_complexity` at threshold 0, so every function is scored and the max is real; clippy's own metric, comparable to itself, not to sonarjs or complexipy), `complexity.<s>.cognitive_over_15` |
 | | `--dead` | `dead.<s>.rustc` (rustc's unused-code warnings: `dead_code`, `unused_imports`/`_variables`/`_assignments`/`_mut`/`_macros`/`_macro_rules`/`_labels`/`_extern_crates`, `unreachable_code`/`_patterns`; production targets only; a crate's `#![allow]` hides what it allows). No `cycles`: a module cycle inside one crate is legal and cargo refuses one between crates. Duplication is `jscpd.mjs` over the `.rs` dirs |
 | `jscpd.mjs` | | `duplication.<s>.jscpd_percent` (jscpd's `statistics.total.percentage`, two decimals), `duplication.<s>.clones` |
-| `size.py` | `--scope <s> --src <dir>... --ext .py|.ts,.tsx [--exclude <glob>]...` | `size.<s>.max_lines`, `size.<s>.over_600` (production files only: tests, fixtures, generated and vendored paths excluded; any language) |
+| `size.py` | `--scope <s> --src <dir>... --ext .py|.ts,.tsx [--exclude <glob>]...` | `size.<s>.max_lines`, `size.<s>.over_600` (production files only: tests, fixtures, generated and vendored paths excluded; any language; both report-only, not in the starter; every file over the limit is listed on stderr) |
 | `vuln.py` | `--scope <scope> --uv <dir>|--npm-lock <file>|--pnpm-lock <file>|--cargo-lock <file>...` | `vuln.<scope>.critical`, `vuln.<scope>.high`, `vuln.<scope>.total` (known vulnerabilities in the locked production packages, from OSV; report-only, not in the starter) |
 | `statements.py` (area `job:db`) | `--in <file> --out … [--min-routes N]` | `statements.<METHOD>:/<route template>` (the db tier's statement fixture writes the per-route maxima to a file outside build/metrics/; the collector validates the shape, prefixes and sorts; tolerance 0 by the ratchet; fewer than N routes is exit 2, so a fixture that recorded nothing cannot pass as clean) |
 | `coverage.py` (area `job:<tier job>`) | `--coverage-json` | `coverage.<s>.lines` (covered_lines / num_statements), `coverage.<s>.branches` (covered_branches / num_branches; omitted when no branches were measured) |
@@ -137,8 +137,8 @@ leave the bounds: with ruff C901 or eslint `complexity` on at 10, `mccabe_over_1
 `scripts/ci/metrics.conf` (`--mccabe`, `--cyclomatic`) and its keys from `ratchet.json` in the
 PR that turns the rule on, under the `metrics-rebaseline` label (a removed bound is REMOVED).
 Deleting only the key does not stick: `rebaseline` seeds every snapshot key back. Keep
-`--cognitive` running even where sonarjs holds it: the scorecard's T2 reads the
-`complexity.*` keys, and a repo with none is unmeasured.
+`--cognitive` running even where sonarjs holds it: the scorecard's WIRED reads the
+`complexity.*` keys (`ratchet.complexity`), and a repo with none is not wired.
 
 A repo-specific collector (finplat's reinvention registry, closet's `audit-pages`) uses its
 own domain name and states the direction in `ratchet.json`.
@@ -177,13 +177,20 @@ starter lists exactly the keys the shared collectors emit (`tests/metrics_ratche
 holds it to the table below). Keys in the snapshot but not in the bounds are reported as
 untracked by `check` and never fail; remove a seeded key from the bounds to leave it so.
 
-**Report-only keys** (`vuln.*`, `coupling.<s>.fan_in_max`; `is_report_only` in
-`bin/metrics_ratchet.py`) are never gated, even when the bounds file holds one: `check` prints
+**Every key is a signal** (owner, 2026-10-18): it says where to look, and an agent judges
+whether to act or to record an exception. A bound holds a floor against drift; the
+`metrics-rebaseline` label is the exception path. A key whose movement says nothing about the
+code without that judgement is report-only: size, because size alone never justifies a split
+(decisions 2026-10-17, T2 file size).
+
+**Report-only keys** (`vuln.*`, `coupling.<s>.fan_in_max`, `duplication.<s>.jscpd_percent`,
+`size.<s>.max_lines`, `size.<s>.over_600`; `is_report_only` in `bin/metrics_ratchet.py`) are
+never gated, even when the bounds file holds one: `check` prints
 `ratchet <key> <value>|- vs <bound> REPORT-ONLY (...)` and counts it as `report_only=` in the
-summary, the comparison with main ignores it (dropping or moving its bound needs no label),
-`tighten` leaves it, and `rebaseline` drops it and seeds none. A consumer whose bounds still
-hold `fan_in_max` needs nothing at its next devkit sync; its next `rebaseline` drops the entry,
-or a PR may delete it by hand.
+summary, the comparison with main ignores it (dropping or moving its bound needs no label), and
+`tighten` and `rebaseline` drop it and seed none. A consumer whose bounds still hold one passes
+`check` after its next devkit sync; `make metrics-tighten` drops the entries, and the PR commits
+both files.
 
 **`docs/metrics/report-only.json`** is the committed copy of the report-only keys:
 `metrics_collect.sh tighten` and `rebaseline` write it beside the bounds (a schema 2 snapshot,
@@ -192,6 +199,12 @@ the author commits it with the bounds. `check` never writes or reads it, so it g
 exists because the bounds never hold these keys and `build/metrics.json` is untracked: without
 it a fresh clone's scorecard graded `sec.audit` UNMEASURED in every repo, vuln collector or not
 (devkit #76). The scorecard reads the bounds, then this file, then a fresh `build/metrics.json`.
+
+**Gains lock in.** `check` fails a BETTER key with `ratchet <key> <value> vs <bound> BETTER —
+run make metrics-tighten and commit docs/metrics/ratchet.json`: integer keys on any gain, float
+keys (coverage, bundle KiB) on a gain over 0.05; a smaller float gain prints `BETTER (within
+tolerance 0.05; not a failure)`. The `metrics-rebaseline` label does not exempt it; the fix is
+always `make metrics-tighten` and the bounds commit.
 
 **`tighten` prints what the gate will refuse.** Every WORSE and MISSING key gets check's
 `ratchet <key> ...` line; the BETTER bounds are written, then the run exits 1 with a last

@@ -36,13 +36,16 @@
 #   :always          run the step on every change
 #
 # Timings: every step that ran appends `<date>\t<hook>\t<label>\t<seconds>\t<ok|fail>` (plus a
-# sixth note column when it flipped core.bare, below) and the hook appends
+# sixth note column: `core.bare=<v> is-bare=<v>` when the step flipped core.bare, below, and
+# `load=<1m>/<cpus> scale=<x>` when the box ran above its core count as the hook started,
+# bin/_load_lib.sh's rule, for a reader to divide out of the seconds) and the hook appends
 # `<date>\t<hook>\ttotal\t<seconds>\t<ok|fail>` to
 # ${XDG_STATE_HOME:-~/.local/state}/devkit/hooks/<repo>.tsv (never printed, never fails the
 # hook). <repo> is the MAIN checkout's directory name (the parent of the common git dir), so a
 # commit in a worktree (.claude/worktrees/<branch>) lands in the repo's file, not <branch>.tsv;
-# scorecard.py derives the same name. The scorecard (T8 gate.precommit) reads it against the owner's budgets, pre-commit
-# <= 30 s and pre-push <= 60 s (2026-10-13), so a hook that quietly grew shows up as a letter.
+# scorecard.py derives the same name. The scorecard's WIRED (`hooks.ledger`: a row in 30 d) and
+# gate_bite.py (failed steps) read it; the owner's budgets stand: pre-commit <= 30 s, pre-push
+# <= 60 s (2026-10-13).
 # <globs> are comma-separated, no spaces, one override per step. A glob is a bash `case`
 # pattern over the whole repo-relative path, as in scripts/ci/gate_plan.sh: `*` also matches
 # `/`, so `*.md` matches at any depth and `docs/*` everything under docs/; `**` means `*`.
@@ -92,6 +95,8 @@
 . "$(dirname "${BASH_SOURCE[0]}")/toolchain_path.sh"
 # shellcheck source=bin/_paths_lib.sh  # the path classification, shared with local_gate.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_paths_lib.sh"
+# shellcheck source=bin/_load_lib.sh  # devkit_load_scale, shared with local_gate.sh and tier_guard.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_load_lib.sh"
 
 run_hook_steps() {
   local hook=$1
@@ -196,9 +201,13 @@ run_hook_steps() {
   fi
 
   _hook_drop_git_dir "$root"
-  local i=0 hook_start step_start bare_before
+  # shellcheck disable=SC2034  # LOAD_* are devkit_load_scale's outputs, local so they do not leak
+  local i=0 hook_start step_start bare_before HOOK_LOAD_NOTE LOAD_SCALE LOAD_BUDGET LOAD_NOTE LOAD_LEDGER
   bare_before=$(_hook_bare_state "$root")
   hook_start=$(date +%s)
+  # Any positive budget: only the factor is recorded, as the ledger note (header: Timings).
+  devkit_load_scale 1
+  HOOK_LOAD_NOTE=$LOAD_LEDGER
   for step in ${steps[@]+"${steps[@]}"}; do
     reason=${plan[$i]}
     i=$((i + 1))
@@ -228,10 +237,12 @@ run_hook_steps() {
 }
 
 # <root> <hook> <label> <start epoch> <rc> [note]: one timing line in the per-machine hooks
-# ledger (header comment above); a note is a sixth column, which scorecard.py T8 ignores (it reads
-# columns 2-4). Best effort: an unwritable state dir never fails a hook.
+# ledger (header comment above); the note column joins [note] and the hook's load note with a
+# space; gate_bite.py reads columns 1-5, the scorecard column 1. Best effort: an unwritable
+# state dir never fails a hook.
 _hook_record() {
   local root=$1 hook=$2 label=$3 start=$4 rc=$5 note=${6:-} dir row
+  [ -z "${HOOK_LOAD_NOTE:-}" ] || note="${note:+$note }$HOOK_LOAD_NOTE"
   dir=${XDG_STATE_HOME:-$HOME/.local/state}/devkit/hooks
   mkdir -p "$dir" 2>/dev/null || return 0
   row=$(printf '%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$hook" "$label" "$(( $(date +%s) - start ))" \

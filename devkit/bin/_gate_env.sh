@@ -17,7 +17,8 @@
 #       whichever source set them; exit 2 on junk.
 #   gate_plan_literal <plan> <NAME>
 #       Print the value of a literal `NAME=value` line in a gate plan without sourcing it (the
-#       dispatcher must not run plan code just to learn the slug). Empty when absent.
+#       dispatcher must not run plan code just to learn the slug). Empty when absent. Used for
+#       GATE_SLUG, GATE_REMOTE and pr_merge.sh's GATE_MERGE_REQUIRES (a comma-separated list).
 
 # shellcheck disable=SC2034  # read by gate.sh and remote_gate.sh, which source this file
 GATE_REMOTE_KEYS='GATE_REMOTE|GATE_REMOTE_HOST|GATE_REMOTE_ROOT|GATE_REMOTE_SSH_OPTS'
@@ -63,5 +64,5 @@ gate_remote_settings_check() {
 }
 
 gate_plan_literal() { # <plan> <NAME>
-  sed -n "s/^$2=\\([A-Za-z0-9._\\/-]*\\)[[:space:]]*\\(#.*\\)\\{0,1\\}\$/\\1/p" "$1" | head -1
+  sed -n "s/^$2=\\([A-Za-z0-9._,\\/-]*\\)[[:space:]]*\\(#.*\\)\\{0,1\\}\$/\\1/p" "$1" | head -1
 }

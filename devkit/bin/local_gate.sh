@@ -58,12 +58,24 @@
 #   GATE total OVERBUDGET (...). Either makes the verdict FAIL, with the job named in the status
 #   description, unless GATE_BUDGET_ENFORCE=0 (default 1), which keeps the lines and the verdict
 #   PASS: for a queue adopting budgets before its suites fit.
+#   Under load a JOB's budget stretches (bin/_load_lib.sh: min(1-minute load / cores, 2), sampled
+#   when the job starts, only above 1.0), and its PASS|FAIL and OVERBUDGET lines then carry
+#   `; budget 300 s ×1.6 (load 13.1 on 8 cpus) → 480 s` inside their parentheses. closet's db
+#   tier ran 61-65 s alone and failed 110 s twice at load ~13 on 8 cores (closet #410). The
+#   whole-gate budget is not scaled: it is the owner's wall-clock promise, load or not.
 #
 # Job seconds: after each job the gate writes $WT/build/metrics/gate.json, flat keys
 #   gate.<job>.seconds, plus gate.total.seconds once the jobs are done (docs/metrics-keys.md,
 #   domain `gate`, direction lower). Rewritten after every job, so a metrics job the plan runs
-#   last can merge the earlier jobs' seconds; a copy lands in $LOGDIR/gate.json, which outlives
-#   the worktree. Job names are therefore [A-Za-z0-9_-]+ and never `total` (exit 2 otherwise).
+#   last can merge the earlier jobs' seconds. Job names are therefore [A-Za-z0-9_-]+ and never
+#   `total` (exit 2 otherwise).
+#
+# Outcome record: once a run has a log dir, its EXIT trap (every exit, an interrupt included)
+#   hands each job's verdict to bin/gate_record.py, which writes $LOGDIR/gate.json (the seconds
+#   above plus pr, head, main, started, finished, the run's verdict and per job its verdict and
+#   failing rules, parsed from the job logs) and appends one row to $STATE/runs.tsv. Schema:
+#   README "Gate record". A fork refusal ends before the log dir and leaves no record. The
+#   recorder never changes the verdict or exit code; a failure to write is one stderr line.
 #
 # Concurrency: GATE_SLOTS (default 1; an integer >= 1) is how many gates may run on this machine
 #   at once, across every repo. 1 is the 2026-10-05 rule: overlapping full suites caused
@@ -82,9 +94,9 @@
 #   fails a gate, and an unreadable load is a note too. Both minutes count: closet's db tier
 #   failed twice at a 5-minute load of ~30 that had just dipped under 12 on the 1-minute figure
 #   (another repo's Xcode builds, 2026-10-16). The wait is before the slot and the budget clock.
-#   Load is `sysctl -n vm.loadavg` (macOS) or /proc/loadavg (Linux). Test hooks, environment
-#   only: GATE_LOADAVG_CMD (a command printing "<1m> <5m> ...") and GATE_LOAD_POLL_SECONDS
-#   (default 60).
+#   Load is `sysctl -n vm.loadavg` (macOS) or /proc/loadavg (Linux), read by _load_lib.sh. Test
+#   hooks, environment only: DEVKIT_LOADAVG_CMD (a command printing "<1m> <5m> ..."),
+#   DEVKIT_NCPU and GATE_LOAD_POLL_SECONDS (default 60).
 #
 # Expected head: GitHub moves refs/pull/<n>/head a few seconds after a push, so a gate started
 #   right after `git push` gated the previous head and posted its verdict there (Orbit #80,
@@ -147,6 +159,8 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ -n "$PR" ] || { usage >&2; exit 2; }
+GATE_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+readonly GATE_STARTED
 
 # Per-machine defaults (header). An allowlist, not GATE_*: GATE_LOCK or GATE_PLAN in a file would
 # silently split this box's lock from the queues' or swap the plan, which is no per-machine
@@ -194,6 +208,9 @@ readonly HEAD_POLL_SECS=${GATE_HEAD_POLL_SECONDS:-5}
   || { echo "local_gate: GATE_HEAD_POLL_SECONDS must be an integer >= 1 (got '$HEAD_POLL_SECS')" >&2; exit 2; }
 
 ROOT=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel) || exit 2
+# Absolute: the EXIT trap runs it, after the plan, which may have changed directory.
+GATE_RECORDER=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/gate_record.py || exit 2
+readonly GATE_RECORDER
 # shellcheck source=/dev/null  # bin/toolchain_path.sh: toolchain_path, shared with the hooks
 . "$(dirname "${BASH_SOURCE[0]}")/toolchain_path.sh"
 PLAN=${GATE_PLAN:-$ROOT/scripts/ci/gate_plan.sh}
@@ -206,6 +223,8 @@ GATE_ALLOW_FORKS=0   # set here, not read from the environment: only the plan ma
 . "$(dirname "${BASH_SOURCE[0]}")/_paths_lib.sh"
 # shellcheck source=bin/_timeout_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_timeout_lib.sh"
+# shellcheck source=bin/_load_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_load_lib.sh"
 # shellcheck source=/dev/null  # the repo's plan; its contract is in the header
 . "$PLAN"
 for required in GATE_SLUG GATE_STATE_NAME; do
@@ -220,6 +239,29 @@ WT="$STATE/$GATE_WORKTREE_PREFIX$PR"
 LOGDIR="$STATE/logs/$PR"
 GATE_REF="refs/gate/pr-$PR"
 
+JOB_OUTCOMES="" # "<name> <verdict> <seconds|->" lines, in run order, for the outcome record
+OVER_NAMES=""   # jobs (and `total`) over an ENFORCED budget, space-separated, for the record
+RECORD=0        # 1 once $LOGDIR exists: from then on every exit leaves an outcome record
+RUN_VERDICT=error   # pass|fail once verdict() or a FAIL step decides; error if neither does
+
+# record_job <name> <pass|fail|skip|budget> <seconds|->: the job's line for the outcome record;
+# a job the plan runs again replaces its earlier line, as in JOB_SECONDS.
+record_job() {
+  JOB_OUTCOMES=$(awk -v n="$1 " 'index($0, n) != 1' <<<"$JOB_OUTCOMES"; echo "$1 $2 $3")
+}
+# fail_step <name> [<detail>]: a gate step (not a plan job) failed: its GATE line and its record.
+fail_step() {
+  echo "GATE $1 FAIL${2:+ ($2)}"
+  record_job "$1" fail -
+}
+# fail_unposted <name> [<detail>]: a step failed before there is a head to post a status on.
+fail_unposted() {
+  fail_step "$@"
+  RUN_VERDICT=fail
+  echo "VERDICT FAIL head= main="
+  exit 1
+}
+
 # The fetch below runs pull/<n>/head for any PR. On a public repo that would execute a
 # stranger's code on this box, so a fork PR is refused unless the plan opts in. Fails closed:
 # a gh error or empty answer counts as a fork. No status is posted: there is no trusted head.
@@ -227,9 +269,7 @@ GATE_REF="refs/gate/pr-$PR"
 # the branch tip can stand in for the pull ref even when forks are allowed.)
 if [ "$GATE_ALLOW_FORKS" != 1 ] \
     && [ "$(gh pr view "$PR" --repo "$SLUG" --json isCrossRepository --jq .isCrossRepository 2>/dev/null)" != false ]; then
-  echo "GATE fork FAIL (PR #$PR is from a fork; set GATE_ALLOW_FORKS=1 in the plan to gate forks deliberately)"
-  echo "VERDICT FAIL head= main="
-  exit 1
+  fail_unposted fork "PR #$PR is from a fork; set GATE_ALLOW_FORKS=1 in the plan to gate forks deliberately"
 fi
 
 # The jobs must run as they would from a clean shell (or an Actions runner): `make gate`
@@ -249,23 +289,13 @@ try_slots() {
   done
   return 1
 }
-# loadavg: "<1m> <5m>" on stdout, or nothing when the load cannot be read.
-loadavg() {
-  if [ -n "${GATE_LOADAVG_CMD:-}" ]; then
-    bash -c "$GATE_LOADAVG_CMD"
-  elif [ -r /proc/loadavg ]; then
-    cat /proc/loadavg
-  else
-    sysctl -n vm.loadavg 2>/dev/null | tr -d '{}'   # macOS: "{ 1.23 4.56 7.89 }"
-  fi | awk '$1 ~ /^[0-9.]+$/ && $2 ~ /^[0-9.]+$/ { print $1, $2; exit }'
-}
 # wait_for_load: header, "Load". Returns once both averages are <= LOAD_MAX, or after
 # LOAD_WAIT_SECS, or at once when the load cannot be read; never fails the gate.
 wait_for_load() {
   [ -n "$LOAD_MAX" ] || return 0
   local t0=$SECONDS l1 l5
   while :; do
-    read -r l1 l5 <<<"$(loadavg)"
+    read -r l1 l5 <<<"$(devkit_loadavg)"
     if [ -z "$l1" ]; then
       echo "GATE note: cannot read the load average; GATE_LOAD_MAX=$LOAD_MAX not applied"
       return 0
@@ -361,11 +391,26 @@ job_went_silent() { # <log>
   return 1
 }
 
+# record_outcome: the outcome record (header, "Outcome record"), once, from the EXIT trap.
+record_outcome() {
+  [ "$RECORD" = 1 ] || return 0
+  command -v python3 >/dev/null \
+    || { echo "local_gate: python3 not found; no outcome record (gate.json, runs.tsv) for this run" >&2; return 0; }
+  local name over=() total=${TOTAL_SECS:-}
+  for name in $OVER_NAMES; do over+=(--over "$name"); done
+  printf '%s\n' "$JOB_OUTCOMES" | python3 -I "$GATE_RECORDER" --logdir "$LOGDIR" --runs "$STATE/runs.tsv" \
+    --pr "$PR" --head "$HEAD_SHA" --main "$MAIN_SHA" --started "$GATE_STARTED" \
+    --verdict "$RUN_VERDICT" --seconds "${total:-$((SECONDS - GATE_T0))}" \
+    ${total:+--total-seconds "$total"} ${over[@]+"${over[@]}"} \
+    || echo "local_gate: the outcome record for this run was not written (gate_record.py above)" >&2
+}
+
 cleanup() {
   # An interrupted gate must not leave a job running in the worktree it is about to remove.
   stop_job
   # An interrupted gate must not leave the PR showing `pending` forever.
   if [ "$STATUS_OPEN" = 1 ]; then post_status error "Local gate interrupted before a verdict"; fi
+  record_outcome
   # Bounded: a hung docker daemon made a plan's `docker rm -fv` block this trap for 12+ min
   # while the gate held its machine-wide slot (2026-10-17).
   devkit_with_timeout "$CLEANUP_SECS" gate_cleanup >/dev/null 2>&1
@@ -378,22 +423,27 @@ trap 'exit 130' INT TERM
 
 verdict() { # <PASS|FAIL> <status description>; ends the run
   local result=$1 description=$2
+  RUN_VERDICT=$(tr '[:upper:]' '[:lower:]' <<<"$result")
   if [ "$result" = PASS ]; then post_status success "$description"; else post_status failure "$description"; fi
   STATUS_OPEN=0
   echo "VERDICT $result head=$HEAD_SHA main=$MAIN_SHA"
   if [ "$result" = PASS ]; then exit 0; else exit 1; fi
 }
 
-# check_budget <name> <seconds> <budget-seconds>: the OVERBUDGET line; a FAIL unless enforcement is off.
+# check_budget <name> <seconds> <budget-seconds> [<load note>]: the OVERBUDGET line; a FAIL unless
+# enforcement is off. The note (devkit_load_scale's LOAD_NOTE) explains a stretched budget.
 check_budget() {
   [ "$3" -gt 0 ] && [ "$2" -gt "$3" ] || return 0
-  echo "GATE $1 OVERBUDGET (${2}s > ${3}s)"
+  echo "GATE $1 OVERBUDGET (${2}s > ${3}s${4:+; $4})"
   OVERBUDGET="${OVERBUDGET:+"$OVERBUDGET, "}$1 (${2}s > ${3}s)"
-  [ "$BUDGET_ENFORCE" = 0 ] || FAILED=1
+  [ "$BUDGET_ENFORCE" = 0 ] && return 0
+  FAILED=1
+  OVER_NAMES="$OVER_NAMES $1"
 }
+over_budget() { case " $OVER_NAMES " in *" $1 "*) return 0 ;; esac; return 1; }
 
-# write_gate_metrics [<total-seconds>]: gate.json in the worktree (for the plan's metrics job) and
-# in $LOGDIR (which survives cleanup). Names were validated by job(), so no JSON escaping applies.
+# write_gate_metrics [<total-seconds>]: gate.json in the worktree, for the plan's metrics job (the
+# record in $LOGDIR is gate_record.py's). Names were validated by job(), so no JSON escaping applies.
 write_gate_metrics() {
   local dir=$WT/build/metrics name secs sep="" body=""
   while read -r name secs; do
@@ -402,12 +452,14 @@ write_gate_metrics() {
     sep=$',\n'
   done <<<"$JOB_SECONDS"
   [ -z "${1:-}" ] || body="$body$sep  \"gate.total.seconds\": $1"
-  mkdir -p "$dir" && printf '{\n%s\n}\n' "$body" >"$dir/gate.json" && cp "$dir/gate.json" "$LOGDIR/gate.json"
+  mkdir -p "$dir" && printf '{\n%s\n}\n' "$body" >"$dir/gate.json"
 }
 
 # ---- helpers for gate_plan ---------------------------------------------------------------
 job() { # <name> <make target> [VAR=val...]
   local name=$1 t0=$SECONDS log=$LOGDIR/$1.log rc secs
+  devkit_load_scale "$JOB_BUDGET_SECS"
+  local budget=$LOAD_BUDGET load_note=$LOAD_NOTE
   shift
   if [[ ! "$name" =~ ^[A-Za-z0-9_-]+$ ]] || [ "$name" = total ]; then
     echo "local_gate: job name '$name' must match [A-Za-z0-9_-]+ and not be 'total' (it becomes the key gate.<name>.seconds)" >&2
@@ -425,6 +477,7 @@ job() { # <name> <make target> [VAR=val...]
   if job_went_silent "$log"; then
     stop_job
     echo "GATE $name WATCHDOG (silent for $SILENT_MINUTES min; log: $log)"
+    record_job "$name" fail $((SECONDS - t0))
     post_status error "Job $name silent for $SILENT_MINUTES min; stopped by the watchdog"
     STATUS_OPEN=0
     echo "VERDICT FAIL head=$HEAD_SHA main=$MAIN_SHA"
@@ -434,28 +487,35 @@ job() { # <name> <make target> [VAR=val...]
   rc=$?
   JOB_PGID=""
   secs=$((SECONDS - t0))
+  local verdict=fail
   if [ "$rc" = 0 ]; then
-    echo "GATE $name PASS (${secs}s)"
+    verdict=pass
+    echo "GATE $name PASS (${secs}s${load_note:+; $load_note})"
   else
-    echo "GATE $name FAIL (log: $LOGDIR/$name.log)"
+    echo "GATE $name FAIL (log: $LOGDIR/$name.log${load_note:+; $load_note})"
     FAILED=1
     FAILED_JOBS="${FAILED_JOBS:+"$FAILED_JOBS, "}$name"
   fi
-  check_budget "$name" "$secs" "$JOB_BUDGET_SECS"
+  check_budget "$name" "$secs" "$budget" "$load_note"
+  if [ "$verdict" = pass ] && over_budget "$name"; then verdict=budget; fi
+  record_job "$name" "$verdict" "$secs"
   JOB_SECONDS=$(grep -v "^$name " <<<"$JOB_SECONDS"; echo "$name $secs")
   write_gate_metrics
 }
-skip() { echo "GATE $1 SKIPPED ($2)"; }
+skip() { echo "GATE $1 SKIPPED ($2)"; record_job "$1" skip -; }
 note() { echo "GATE note: $*"; }
 changed() { grep -qE "$1" <<< "$CHANGED"; }
 pr_has_label() { # fail closed: a gh error means "no label", so label-relaxed checks stay strict
   gh pr view "$PR" --repo "$SLUG" --json labels --jq '.labels[].name' 2>/dev/null | grep -qx "$1"
 }
-nothing_to_run() { echo "GATE all SKIPPED ($1)"; verdict PASS "$1; nothing to run"; }
+# The description names main, as every verdict does: pr_merge.sh reads `on main <sha>` from it
+# when the gate ran on another host.
+nothing_to_run() { echo "GATE all SKIPPED ($1)"; verdict PASS "$1; nothing to run on main ${MAIN_SHA:0:7}"; }
 
 # ---- fetch, worktree, merge ----------------------------------------------------------------
 rm -rf "$LOGDIR"
 mkdir -p "$LOGDIR"
+RECORD=1
 
 # `+` because a force-pushed PR head is not a fast-forward of a ref a killed run left behind.
 if ! git -C "$ROOT" fetch -q origin main "+pull/$PR/head:$GATE_REF"; then
@@ -468,17 +528,13 @@ if ! git -C "$ROOT" fetch -q origin main "+pull/$PR/head:$GATE_REF"; then
   if [ "$PR_CROSS" != false ] || [ -z "$PR_BRANCH" ] || [ -z "$PR_OID" ] \
       || ! git -C "$ROOT" fetch -q origin main "+refs/heads/$PR_BRANCH:$GATE_REF" \
       || [ "$(git -C "$ROOT" rev-parse "$GATE_REF")" != "$PR_OID" ]; then
-    echo "GATE fetch FAIL"
-    echo "VERDICT FAIL head= main="
-    exit 1
+    fail_unposted fetch
   fi
   note "pull/$PR/head missing; fetched branch $PR_BRANCH @ $PR_OID"
 fi
 HEAD_SHA=$(git -C "$ROOT" rev-parse "$GATE_REF")
 if [ -n "$EXPECT_HEAD" ] && [ "$HEAD_SHA" != "$EXPECT_HEAD" ]; then
-  echo "GATE head FAIL (GitHub has PR #$PR at $HEAD_SHA, not the expected $EXPECT_HEAD after ${HEAD_WAIT_SECS}s; push it, or rerun once GitHub shows it)"
-  echo "VERDICT FAIL head= main="
-  exit 1
+  fail_unposted head "GitHub head $HEAD_SHA ≠ local $EXPECT_HEAD after ${HEAD_WAIT_SECS}s; push or wait"
 fi
 MAIN_SHA=$(git -C "$ROOT" rev-parse origin/main)
 echo "GATE pr=$PR head=$HEAD_SHA main=$MAIN_SHA"
@@ -487,12 +543,12 @@ STATUS_OPEN=1
 
 git -C "$ROOT" worktree remove --force "$WT" >/dev/null 2>&1
 if ! git -C "$ROOT" worktree add -q --detach "$WT" "$MAIN_SHA" >"$LOGDIR/worktree.log" 2>&1; then
-  echo "GATE worktree FAIL (log: $LOGDIR/worktree.log)"
+  fail_step worktree "log: $LOGDIR/worktree.log"
   verdict FAIL "Local gate could not create its worktree"
 fi
 if ! git -C "$WT" -c user.name=gate -c user.email=gate@local \
     merge -q --no-edit "$HEAD_SHA" >"$LOGDIR/merge.log" 2>&1; then
-  echo "GATE merge FAIL (conflicts with main; log: $LOGDIR/merge.log)"
+  fail_step merge "conflicts with main; log: $LOGDIR/merge.log"
   verdict FAIL "Conflicts with main ${MAIN_SHA:0:7}"
 fi
 
@@ -504,7 +560,7 @@ fi
 # environment the gate cannot provide is a FAIL verdict, never a silent fallback (and never a
 # dangling `pending` status).
 if ! toolchain_path "$WT"; then
-  echo "GATE toolchain FAIL ($TOOLCHAIN_ERROR)"
+  fail_step toolchain "$TOOLCHAIN_ERROR"
   verdict FAIL "Gate box cannot provide the declared $TOOLCHAIN_FAILED"
 fi
 [ -n "$TOOLCHAIN_NOTES" ] && note "$TOOLCHAIN_NOTES"

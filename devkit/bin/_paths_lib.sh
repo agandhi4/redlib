@@ -30,25 +30,29 @@ DEVKIT_AREA_ORDER="docs backend frontend native tooling other"
 # Never run from the merged tree by a job: the gate and hook machinery (run from the invoking
 # checkout, main's copy), the guards ci-quick runs (devkit-check, docs/toolchain/workflows/
 # release/ci-targets checks, own-commit, hooks_check and their libs), and fleet operations run
-# from a devkit checkout or after merge (sync, new, monthly audit, ship_tag in publish.yml).
+# from a devkit checkout or after merge (sync, new, monthly audit, ship_tag in publish.yml), and
+# machine setup (install_gh_shim.sh, whose --check the scorecard reads).
 DEVKIT_TOOLING_BIN="local_gate.sh gate.sh remote_gate.sh _gate_env.sh _paths_lib.sh
   hook_steps.sh quiet_run.sh push_ranges.sh hooks_check.sh
   devkit-check.sh _vendor_paths.sh docs_check.sh toolchain_check.sh ci_targets_check.sh
   _makefile_lib.sh workflows_check.sh _workflows_lib.sh release_check.sh _dockerfile_lib.sh
-  _gitattributes_lib.sh own_commit_check.py
-  devkit-sync.sh devkit-new.sh monthly_audit.sh dead_alert_audit.py ship_tag.sh scorecard.py agent_cost.py secrets_check.sh migration_check.py"
+  _gitattributes_lib.sh own_commit_check.py _dockerignore.py py_cognitive_lint.py
+  devkit-sync.sh devkit-new.sh monthly_audit.sh dead_alert_audit.py ship_tag.sh scorecard.py agent_cost.py secrets_check.sh migration_check.py
+  gate_record.py pr_merge.sh gate_bite.py _repo_identity.py install_gh_shim.sh"
 # What the image group exercises (ci-smoke/ci-image boot through them): tooling, but a change
 # to one runs the image group even when nothing else would.
 DEVKIT_IMAGE_BIN="boot_image.sh contract_probe.sh"
 # Executed by unit/db/e2e/build/metrics jobs (tier budgets, throwaway Postgres for db tiers
 # and smokes, Playwright browsers, toolchains a Makefile or cargo.sh provisions; layer_check.py
 # and guard_check.py, ci-quick guards that are also the metrics job's `layers` and `guards`
-# collectors, and the modules they load, _source_tree.py, _ts_lex.py and _guard_rules.py): other. Only
+# collectors, and the modules they load, _source_tree.py, _ts_lex.py and _guard_rules.py; the
+# timeout and load libs, and docker_bounded.sh, which a recipe's docker call runs through): other. Only
 # a record of the decision; the classification needs no lookup for other.
 # shellcheck disable=SC2034  # read by tests/gate_contract.bats (every bin/ file listed once)
 DEVKIT_JOB_BIN="tier_guard.sh throwaway_pg.sh playwright_browsers.sh node_toolchain.sh
   rust_toolchain.sh toolchain_path.sh metrics_ratchet.py metrics_collect.sh layer_check.py
-  guard_check.py _source_tree.py _ts_lex.py _guard_rules.py _timeout_lib.sh"
+  guard_check.py _source_tree.py _ts_lex.py _guard_rules.py _timeout_lib.sh _load_lib.sh
+  docker_bounded.sh"
 
 # <path>: set DEVKIT_AREA (no subshell; devkit_areas calls it once per changed path).
 _devkit_area() {
@@ -163,8 +167,10 @@ devkit_gate_areas() {
 #                                  Not for IMAGE or E2E (DEVKIT_RETIRED_PLAN_VARS): every app path
 #                                  runs them.
 #   GATE_IMAGE_PATHS=<ERE>         paths that also run the image group (anchor it)
-#   GATE_IMAGE_EXCLUDE_PATHS=<ERE> app paths that cannot reach the image (in .dockerignore, or
-#                                  read by no stage: test/, .github/); they do not run the group
+#   GATE_IMAGE_EXCLUDE_PATHS=<ERE> app paths the build copies but no stage reads (a lint config);
+#                                  they do not run the group. Not for what the root .dockerignore
+#                                  excludes: the gate reads that file itself (_dockerignore.py),
+#                                  and devkit-check warns on an alternative it already covers
 #   gate_plan_extra()              optional; called after the groups above, for the repo's own
 #                                  rules (devkit_group_ran <group> says whether a group ran)
 #
@@ -173,7 +179,7 @@ devkit_gate_areas() {
 #   DOCS      docs tooling other              required; skipped when QUICK ran, which covers it
 #   BACKEND   backend other
 #   FRONTEND  frontend other
-#   IMAGE     backend frontend other          fixed; minus GATE_IMAGE_EXCLUDE_PATHS, plus
+#   IMAGE     backend frontend other          fixed; minus .dockerignore and GATE_IMAGE_EXCLUDE_PATHS, plus
 #                                             GATE_IMAGE_PATHS and the DEVKIT_IMAGE_BIN scripts
 #   E2E       backend frontend other          fixed
 #   METRICS   backend frontend other          optional; always last (after gate_plan_extra), so
@@ -201,7 +207,7 @@ devkit_gate_areas() {
 # one, so the sync PR that retires it fails, not the next PR's gate (which sources main's copy
 # of this file).
 DEVKIT_RETIRED_PLAN_VARS="GATE_AREAS_IMAGE GATE_AREAS_E2E"
-DEVKIT_RETIRED_PLAN_ADVICE="IMAGE and E2E run for every backend, frontend or other path; delete it, and list paths that cannot reach the image in GATE_IMAGE_EXCLUDE_PATHS"
+DEVKIT_RETIRED_PLAN_ADVICE="IMAGE and E2E run for every backend, frontend or other path; delete it: the gate reads .dockerignore, and GATE_IMAGE_EXCLUDE_PATHS lists paths the build copies but never reads"
 
 devkit_group_ran() { # <group>, lowercase
   case "${DEVKIT_GATE_RAN:-}" in *" $1 "*) return 0 ;; esac
@@ -265,8 +271,8 @@ _devkit_metrics_group() {
 }
 
 # <GROUP> <default areas>: true when one of the group's areas (GATE_AREAS_<GROUP> overrides
-# the default) is in GATE_AREAS; IMAGE counts only paths outside GATE_IMAGE_EXCLUDE_PATHS and
-# also runs on its input paths. An unknown area is exit 2.
+# the default) is in GATE_AREAS; IMAGE counts only paths the image can see (_devkit_image_areas)
+# and also runs on its input paths. An unknown area is exit 2.
 _devkit_group_runs() {
   local areas_var="GATE_AREAS_$1" areas area run=0 changed_areas=" $GATE_AREAS "
   if declare -p "$areas_var" >/dev/null 2>&1; then areas=${!areas_var}; else areas=$2; fi
@@ -294,7 +300,7 @@ _devkit_group() {
     return 0
   fi
   if [ "$group" = IMAGE ] && [ "$GATE_HAS_BACKEND$GATE_HAS_FRONTEND$GATE_HAS_OTHER" != 000 ]; then
-    _devkit_skip_jobs "$jobs" "every app path changed is in GATE_IMAGE_EXCLUDE_PATHS"
+    _devkit_skip_jobs "$jobs" "every app path changed is outside the image (.dockerignore, GATE_IMAGE_EXCLUDE_PATHS)"
     return 0
   fi
   group=$(tr '[:upper:]' '[:lower:]' <<<"$group")
@@ -302,12 +308,20 @@ _devkit_group() {
   _devkit_skip_jobs "$jobs" "only $list paths changed; default for the $group group"
 }
 
-# DEVKIT_IMAGE_AREAS: the areas of the changed paths outside GATE_IMAGE_EXCLUDE_PATHS, as
-# " a b " (" " for none). A bad ERE is exit 2: grep's status 2 must not read as "all excluded".
+# DEVKIT_IMAGE_AREAS: the areas of the changed paths the image can see, as " a b " (" " for
+# none): those the merged tree's root .dockerignore keeps (every fleet image builds the root
+# context; Docker's matcher, not gitignore's), minus GATE_IMAGE_EXCLUDE_PATHS. Until 2026-10-17
+# plans hand-copied .dockerignore into the ERE and the two drifted (redlib #23, locus
+# #133). $WT is the merged tree; a harness that runs a plan without the skeleton runs it from
+# the repo root. A bad ERE is exit 2: grep's status 2 must not read as "all excluded".
 _devkit_image_areas() {
-  local DEVKIT_AREAS paths=$CHANGED rc=0
+  local DEVKIT_AREAS paths rc=0 tree=${WT:-.}
+  paths=$(python3 -I "$(dirname "${BASH_SOURCE[0]}")/_dockerignore.py" keep "$tree" <<<"$CHANGED") || {
+    echo "devkit_default_gate_plan: cannot match the changed paths against $tree/.dockerignore" >&2
+    exit 2
+  }
   if [ -n "${GATE_IMAGE_EXCLUDE_PATHS:-}" ]; then
-    paths=$(grep -vE "$GATE_IMAGE_EXCLUDE_PATHS" <<<"$CHANGED") || rc=$?
+    paths=$(grep -vE "$GATE_IMAGE_EXCLUDE_PATHS" <<<"$paths") || rc=$?
     if [ "$rc" -gt 1 ]; then
       echo "devkit_default_gate_plan: GATE_IMAGE_EXCLUDE_PATHS is not a valid ERE: $GATE_IMAGE_EXCLUDE_PATHS" >&2
       exit 2

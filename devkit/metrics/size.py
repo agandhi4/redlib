@@ -2,8 +2,9 @@
 """Shared file-size collector: how big the production source files are, as ratchet keys.
 
 A file that keeps growing can signal a missing abstraction, and no stack's linter counts it
-the same way. The ratchet holds these keys never-worse; the scorecard prints them as T2 detail
-only (report-only since 2026-10-17: size alone never justifies a split). This collector counts
+the same way. Both keys are report-only (owner 2026-10-18; the scorecard since 2026-10-17): a
+signal for a reader to judge, never a gate failure, because size alone never justifies a split.
+The ratchet writes them to report-only.json, where the scorecard's TREND reads their history. It counts
 lines per production file in any language, so Python, TypeScript, Rust and Swift repos get the
 same two keys from one line in scripts/ci/metrics.conf:
 
@@ -15,7 +16,8 @@ same two keys from one line in scripts/ci/metrics.conf:
 Keys (docs/metrics-keys.md, domain `size`, direction lower):
   size.<scope>.max_lines   lines in the largest production file
   size.<scope>.over_600    production files longer than --over (default 600) lines
-and, for the reader, the largest files are printed one per line on stderr (`size: <n> <path>`).
+and, for the reader, every file over --over is printed on stderr, largest first, one per line
+(`size: <n> <path>`); when none is over, the largest file alone, so max_lines names its file.
 
 Production set: every file under the --src directories with one of the --ext suffixes, minus
 tests and scaffolding by the same names ts.mjs excludes (`*.test.*`, `*.spec.*`, `*_test.*`,
@@ -68,7 +70,6 @@ def main() -> int:
     ap.add_argument("--ext", required=True, help="comma-separated suffixes, e.g. .py or .ts,.tsx")
     ap.add_argument("--exclude", action="append", default=[], help="extra glob (relative to --src or absolute); repeatable")
     ap.add_argument("--over", type=int, default=600, help="the long-file threshold for size.<scope>.over_600 (the key keeps its name)")
-    ap.add_argument("--top", type=int, default=5, help="largest files to print on stderr")
     ap.add_argument("--out", help="write the JSON here (default: stdout)")
     args = ap.parse_args()
     srcs = [Path(s) for s in args.src]
@@ -82,9 +83,10 @@ def main() -> int:
         print(f"size: no {','.join(sorted(exts))} production files under {', '.join(args.src)}", file=sys.stderr)
         return EXIT_USAGE
     sizes = sorted(((line_count(p), p) for p in files), key=lambda t: (-t[0], str(t[1])))
-    for n, p in sizes[: args.top]:
+    over = [(n, p) for n, p in sizes if n > args.over]
+    for n, p in over or sizes[:1]:
         print(f"size: {n} {p}", file=sys.stderr)
-    out = {f"size.{args.scope}.max_lines": sizes[0][0], f"size.{args.scope}.over_600": sum(1 for n, _ in sizes if n > args.over)}
+    out = {f"size.{args.scope}.max_lines": sizes[0][0], f"size.{args.scope}.over_600": len(over)}
     text = json.dumps(out, indent=2) + "\n"
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)

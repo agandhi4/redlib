@@ -19,6 +19,9 @@
 #   TIER <tier> FLOOR <runner> no summary line (floor <min>)                           exit 1
 #   TIER <tier> OVERBUDGET <s>s (budget <b>s)            exit 1, unless TIER_BUDGET_ENFORCE=0
 #   TIER <tier>: <s>s (budget <b>s) <runner>=<n>...      every check held: exit 0
+# Under load the budget stretches (bin/_load_lib.sh: min(1-minute load / cores, 2), sampled when
+# the command starts, only above 1.0) and both budget lines then read
+# `(budget 110 s ×1.6 (load 13.1 on 8 cpus) → 176 s)`; unloaded, they are exactly as above.
 # A bad invocation exits 2 before the command runs. TIER_BUDGET_ENFORCE=0 (default 1) keeps
 # the OVERBUDGET line but not the failure, for a repo or box adopting budgets, exactly as
 # GATE_BUDGET_ENFORCE does for local_gate's job budgets. Floors have no such switch: a count
@@ -41,6 +44,8 @@
 # Budgets are set from GATE timings with headroom and only ever go down; floors are the current
 # counts and move only in the PR that removes tests, saying why in docs/decisions.md.
 set -uo pipefail
+# shellcheck source=bin/_load_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_load_lib.sh"
 
 RUNNERS="pytest vitest playwright cargo"
 
@@ -142,6 +147,9 @@ tmp=${TMPDIR:-/tmp}
 LOG=$(mktemp "${tmp%/}/tier-$TIER.XXXXXX") || die "mktemp failed"
 trap 'rm -f "$LOG"' EXIT
 
+devkit_load_scale "$BUDGET"
+budget_text="budget ${BUDGET}s"
+[ -z "$LOAD_NOTE" ] || budget_text=$LOAD_NOTE
 start=$SECONDS
 "$@" 2>&1 | tee "$LOG"
 rc=${PIPESTATUS[0]}
@@ -184,8 +192,8 @@ if ! { mkdir -p "${out%/*}" && printf '{\n%s\n}\n' "$metrics" >"$out"; }; then
   die "could not write $out"
 fi
 
-if [ "$secs" -gt "$BUDGET" ]; then
-  echo "TIER $TIER OVERBUDGET ${secs}s (budget ${BUDGET}s)"
+if [ "$secs" -gt "$LOAD_BUDGET" ]; then
+  echo "TIER $TIER OVERBUDGET ${secs}s ($budget_text)"
   if [ "$ENFORCE" = 1 ]; then
     echo "tier_guard: over budget even though the tests passed; find the new cost (pytest --durations=30, vitest's slowest files) and cut it or move it down a tier, never raise the budget per run" >&2
     failed=1
@@ -195,4 +203,4 @@ if [ "$secs" -gt "$BUDGET" ]; then
 fi
 
 [ "$failed" = 0 ] || exit 1
-echo "TIER $TIER: ${secs}s (budget ${BUDGET}s)$counts"
+echo "TIER $TIER: ${secs}s ($budget_text)$counts"

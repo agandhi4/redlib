@@ -122,3 +122,8 @@ Consequence: URL and body rewriting (`format_url`, `rewrite_urls`, `rewrite_emot
 Why: utils.rs (753) was the last file over 600; its biggest remaining group was the Reddit-URL and body-HTML rewriting with its regexes.
 Decision: pure move. `src/rewrite.rs` takes `format_url`, `rewrite_urls`, `rewrite_emotes`, `render_bullet_lists`, their regexes and tests; importers name `crate::rewrite`. utils.rs (408) keeps page responses, instance flags, formatting and feeds, the parts templates call as `crate::utils::*`. AGENTS.md and fork.md point at preferences.rs where they named utils for the layout default and `setting_list`. Bounds over_600 1 to 0, max_lines 753 to 572.
 Consequence: every production file is at most 600 lines and the ratchet fails a PR that grows one past it. Five PRs (#24 to #28) did it under the line budget, all moves.
+
+## 2026-10-18 — make merge is the merge path; metrics gains lock in; scorecard v2
+Why: devkit 7ed3645 (#143) carries the owner's 2026-10-18 enforcement decisions. redlib has no branch protection, so nothing on GitHub requires the gate; PR #3 merged without one.
+Decision: `make merge PR=<n>` (devkit pr_merge.sh) is the only merge path: it refuses unless `local-gate` succeeded on the exact head and main has not moved. ci-image's docker calls go through docker_bounded.sh. The metrics job now fails a BETTER that the PR did not tighten. size.app.* is report-only (docs/metrics/report-only.json), a signal and not a bound. docs/metrics/scorecard.json holds only the WIRED share (12/15).
+Consequence: WIRED still misses jscpd duplication (no Rust key yet), contract_probe (the listener needs live Reddit OAuth, so smoke cannot boot) and the per-machine gh shim (install_gh_shim.sh).

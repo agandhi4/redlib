@@ -12,7 +12,8 @@
 #   --list      print the stacks and exit
 #   Exit 0 ok, 1 a step failed (the directory is left for inspection), 2 usage or a missing tool.
 # Env: DEVKIT_URL and DEVKIT_REF name what to vendor (devkit-sync.sh; default upstream main).
-#      The tests point them at a local checkout.
+#      The tests point them at a local checkout. DEVKIT_GITHUB_DATA overrides the directory
+#      holding repos.json (as for github/repo_settings.sh).
 #
 # What a generated repo contains and in what order it is built:
 #   1. `git init -b main <dir>/<name>`
@@ -37,8 +38,12 @@
 #      `make ci-quick` on the scaffold: devkit-check (index tree), toolchain-check, docs-check,
 #      release-check, workflows-check, the stack's own guards and linters. A scaffold the hooks
 #      refuse is a devkit bug, not a repo to fix by hand.
-# The follow-ups GitHub needs (repo settings, labels, Renovate access, the homelab stack) are
-# printed at the end and listed in the README ("New project").
+#   8. the repo is registered in this checkout's github/repos.json (`"<name>": {}`, sorted as the
+#      file is): the fleet scorecard and the monthly audit iterate that file, so the repo is
+#      measured from its first commit (owner, 2026-10-18). Commit it to devkit in a PR.
+# The follow-ups that act on GitHub (creating the repo, settings and labels sync, Renovate
+# access, the homelab stack) are the owner's: printed at the end, listed in the README
+# ("New project"), never run from here.
 #
 # Adding a stack: templates/new/README.md.
 set -euo pipefail
@@ -107,6 +112,9 @@ case "$STACK_IMAGE" in
 esac
 command -v "$STACK_TOOL" >/dev/null || { echo "devkit-new: '$STACK_TOOL' not found on PATH; the $STACK stack needs it for its lockfile or the first commit's hooks" >&2; exit 2; }
 command -v make >/dev/null || { echo "devkit-new: make not found on PATH; the first commit runs the hooks' make steps" >&2; exit 2; }
+command -v jq >/dev/null || { echo "devkit-new: jq not found on PATH; it registers the repo in github/repos.json (brew install jq)" >&2; exit 2; }
+REPOS_FILE=${DEVKIT_GITHUB_DATA:-$DEVKIT/github}/repos.json
+[ -f "$REPOS_FILE" ] || { echo "devkit-new: no $REPOS_FILE; run devkit new from a devkit checkout" >&2; exit 2; }
 
 DATE=$(date +%F)
 # The name as a Swift/Kotlin-style type name (my-app -> MyApp), for stacks whose targets and
@@ -231,10 +239,26 @@ scripts/ci/gate_plan.sh, git hooks, the quick-check caller, Renovate's shared pr
 the standard docs (README.md, AGENTS.md, docs/decisions.md, docs/architecture.md). This
 commit passed make ci-quick in its pre-commit hook."
 
+# Register last: a scaffold that failed above is not a repo the fleet should measure.
+if jq -e --arg n "$NAME" '.repos | keys | map(ascii_downcase) | index($n | ascii_downcase)' "$REPOS_FILE" >/dev/null; then
+  echo "devkit-new: $NAME is already in $REPOS_FILE"
+else
+  tmp=$(mktemp "$REPOS_FILE.XXXXXX")
+  if ! jq --arg n "$NAME" '.repos |= (to_entries + [{key: $n, value: {}}] | sort_by(.key | ascii_downcase) | from_entries)' \
+    "$REPOS_FILE" >"$tmp" || ! mv -f "$tmp" "$REPOS_FILE"; then
+    rm -f "$tmp"
+    die "cannot add $NAME to $REPOS_FILE"
+  fi
+  echo "devkit-new: added \"$NAME\": {} to $REPOS_FILE; commit it to devkit in a PR"
+fi
+OWNER=$(jq -r .owner "$REPOS_FILE")
+
 cat <<MSG
 devkit-new: $REPO is ready ($(git rev-parse --short=7 HEAD)).
-Next, from the devkit checkout, once the GitHub repo exists (gh repo create agandhi4/$NAME --private --source $REPO --push):
-  1. add "$NAME": {} to github/repos.json, then github/repo_settings.sh $NAME and github/labels_sync.sh $NAME
-  2. grant the Mend Renovate app access to agandhi4/$NAME (renovate.json extends devkit's preset)
-  3. replace the <!-- --> placeholders in README.md, docs/architecture.md and AGENTS.md's Architecture; add a homelab stack under stacks/$NAME when it deploys
+Owner steps (they act on GitHub, so devkit new does not run them):
+  1. create the repo: gh repo create $OWNER/$NAME --private --source $REPO --push
+  2. sync its settings and labels, from the devkit checkout: github/repo_settings.sh $NAME && github/labels_sync.sh $NAME
+Then:
+  3. grant the Mend Renovate app access to $OWNER/$NAME (renovate.json extends devkit's preset)
+  4. replace the <!-- --> placeholders in README.md, docs/architecture.md and AGENTS.md's Architecture; add a homelab stack under stacks/$NAME when it deploys
 MSG

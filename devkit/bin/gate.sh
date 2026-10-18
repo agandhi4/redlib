@@ -12,11 +12,15 @@
 #   - GATE_PLAN is set: a plan file outside the repo exists only on this machine.
 # GATE_REMOTE=1 with no host is a usage error, never a silent local run.
 #
-# Expected head: when this checkout is on the PR's branch (gh's headRefName), its tip is the
-# commit the caller means, so it is passed on as `--expect-head <sha>` and the gate waits for
-# GitHub to show it (local_gate.sh header, "Expected head"). Decided here, on the invoking
+# Expected head: the local branch named by the PR (gh's headRefName) holds the commit the
+# caller means, so its tip is passed on as `--expect-head <sha>` and the gate waits for GitHub
+# to show it (local_gate.sh header, "Expected head"). The branch need not be checked out: a
+# lane pushes from its worktree and gates from another checkout of the same repo, and a gate
+# started there right after a force-push gated the old head (finplat merge-queue lane,
+# 2026-10-17). A local branch strictly behind its last-fetched origin/<branch> is a stale copy,
+# not the caller's intent, and adds no expectation (with a note). Decided here, on the invoking
 # machine, because the remote host's checkout is always on main. An explicit --expect-head in
-# GATE_ARGS wins; another branch, a detached HEAD, no literal GATE_SLUG or a gh error means no
+# GATE_ARGS wins; no such local branch, no literal GATE_SLUG or a gh error means no
 # expectation, the old behaviour.
 # Exit codes are those of the gate that runs (0 pass, 1 fail, 2 usage or environment).
 set -uo pipefail
@@ -48,7 +52,7 @@ fi
 # expect_head_args <args...>: sets EXPECT_ARGS to `--expect-head <tip>` or nothing (header).
 EXPECT_ARGS=()
 expect_head_args() {
-  local arg pr="" branch slug head_ref
+  local arg pr="" slug head_ref tip tracked
   for arg in "$@"; do
     case "$arg" in
       --expect-head) return 0 ;;
@@ -57,13 +61,18 @@ expect_head_args() {
     esac
   done
   [ -n "$pr" ] || return 0
-  branch=$(git -C "$ROOT" symbolic-ref -q --short HEAD) || return 0
   [ -f "${GATE_PLAN:-$PLAN}" ] || return 0
   slug=$(gate_plan_literal "${GATE_PLAN:-$PLAN}" GATE_SLUG)
   [ -n "$slug" ] || return 0
   head_ref=$(gh pr view "$pr" --repo "$slug" --json headRefName --jq .headRefName 2>/dev/null) || return 0
-  [ "$head_ref" = "$branch" ] || return 0
-  EXPECT_ARGS=(--expect-head "$(git -C "$ROOT" rev-parse HEAD)")
+  [ -n "$head_ref" ] || return 0
+  tip=$(git -C "$ROOT" rev-parse -q --verify "refs/heads/$head_ref^{commit}") || return 0
+  tracked=$(git -C "$ROOT" rev-parse -q --verify "refs/remotes/origin/$head_ref^{commit}") || tracked=""
+  if [ -n "$tracked" ] && [ "$tracked" != "$tip" ] && git -C "$ROOT" merge-base --is-ancestor "$tip" "$tracked"; then
+    echo "gate: local $head_ref (${tip:0:12}) is behind origin/$head_ref (${tracked:0:12}); gating without an expected head" >&2
+    return 0
+  fi
+  EXPECT_ARGS=(--expect-head "$tip")
 }
 expect_head_args "$@"
 

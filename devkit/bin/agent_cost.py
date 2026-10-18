@@ -19,7 +19,7 @@ cache_read_tokens gate_rounds gate_fails gate_total_s merged
   api_calls          distinct assistant message ids (one API response is written as several
                      records sharing `message.id`; usage is taken once, from the last),
                      attributed to the PR the agent was working on: from the PR's first URL until
-                     its `gh pr merge`; calls made before a PR exists (its run-up, including the
+                     its `gh pr merge` or `make merge PR=`; calls made before a PR exists (its run-up, including the
                      `gh pr create`) go to the next PR that appears, trailing calls to the last.
                      An agent that shipped three PRs is split, never triple-counted.
   tool_calls         tool_use blocks
@@ -27,7 +27,7 @@ cache_read_tokens gate_rounds gate_fails gate_total_s merged
   gate_rounds        `make gate PR=<n>` / `gate.sh <n>` invocations the agent made for this PR
   gate_fails         `GATE <job> FAIL` lines the agent saw in tool results while working on it
   gate_total_s       gate.total.seconds from the state dir, or - when the gate ran elsewhere
-  merged             1 when a `gh pr merge <n>` ran or a merge result was seen, else 0
+  merged             1 when `gh pr merge <n>` or `make merge PR=<n>` ran or a merge result was seen, else 0
 
 Project dir: ~/.claude/projects/<cwd with / replaced by ->, as Claude Code lays it out; pass
 --project-dir for another checkout. The reference parser is claude-kit's
@@ -61,7 +61,7 @@ def default_owner() -> str:
         return ""
 GATE_CMD = re.compile(r"(?:make\s+(?:-C\s+\S+\s+)?gate\s+PR=|gate\.sh\s+)(\d+)")
 GATE_FAIL = re.compile(r"^GATE \S+ FAIL", re.M)
-MERGE_CMD = re.compile(r"gh pr merge\s+(\d+)")
+MERGE_CMD = re.compile(r"(?:gh pr merge\s+|make\s+(?:-C\s+\S+\s+)?merge\s+PR=|pr_merge\.sh\s+)(\d+)")
 
 
 @dataclass

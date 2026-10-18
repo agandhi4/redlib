@@ -11,7 +11,8 @@
 #       [--conf scripts/ci/metrics.conf] [--bounds docs/metrics/ratchet.json] [--out build/metrics.json]
 #   snapshot    run the collectors and merge; build/metrics.json is the report
 #   check       snapshot, then `metrics_ratchet.py check` (the gate job; METRICS_REBASELINE=1,
-#               which the gate plan sets from the metrics-rebaseline label, adds --rebaseline-ok)
+#               which the gate plan sets from the metrics-rebaseline label, adds --rebaseline-ok).
+#               A BETTER key fails too until `make metrics-tighten` is committed (gains lock in)
 #   tighten     snapshot, then lock in the BETTER numbers (commit the bounds in the same PR);
 #               exit 1 when a key is WORSE or MISSING, printed as check prints it, after
 #               writing the BETTER bounds and running the scorecard's tighten
@@ -59,6 +60,17 @@
 # rather than MISSING: a frontend-only PR cannot have changed backend coverage, and the unit
 # job that produces that coverage did not run either.
 #
+# Tier inputs, outside the gate: coverage.py's --coverage-json/--istanbul-summary and
+# statements.py's --in name files a test tier writes (coverage reports, the statement fixture's
+# build/statements.json). Before any collector runs, every such file of every collector that
+# will run is checked; when any is missing the run stops once (exit 2) listing each file, its
+# collector and the make target of the gate job that writes it (the collector's job:<name> area,
+# looked up in scripts/ci/gate_plan.sh: a GATE_JOBS_* entry or a `job <name> <target>` call).
+# Lanes in fresh worktrees otherwise met them one failure at a time: frontend coverage, then
+# build/statements.json, then `make test-db` (finplat and Orbit, 2026-10-17). TIGHTEN_RUN_TIERS=1
+# runs those targets first instead, then checks again. Inside the gate a job: collector runs only
+# when its job ran, so a missing input there is the collector's ordinary failure.
+#
 # Toolchain: before any collector, the tree's pinned Node and Rust go first on PATH
 # (bin/toolchain_path.sh, as the gate and the hooks do), so `make metrics-snapshot` on a Mac
 # whose PATH has Node 25 still runs dependency-cruiser on the .nvmrc Node. A pin that cannot
@@ -76,7 +88,7 @@
 # command, so the collector must be its last command (no trailing `&&`, `|` or `;`). The run ends with one `findings: <files>` line, whatever the verdict. The ratchet and the
 # scorecard never read these files.
 #
-# Output: the `metrics …` lines above, each collector's log tail (40 lines) on failure, then
+# Output: the `metrics …` lines above (and `metrics tiers RUN …` under TIGHTEN_RUN_TIERS=1), each collector's log tail (40 lines) on failure, then
 # the ratchet's own `ratchet …` lines, then the `findings:` line. Exit: 0 ok, 1 the ratchet failed, 2 usage, a malformed
 # conf, a collector that failed or wrote no file, or an unreadable bounds file.
 # Portability: macOS bash 3.2 and GNU bash.
@@ -93,6 +105,10 @@ readonly SUBCOMMANDS="snapshot check tighten rebaseline"
 # A conf command that runs one of devkit's --list-out collectors (any path prefix: devkit/,
 # ../devkit/). Matched against " <command> " so the name may end the line.
 readonly LIST_OUT_COLLECTOR='[[:space:]/]metrics/(python\.py|ts\.mjs|rust\.py|jscpd\.mjs)[[:space:]]'
+# devkit's collectors that read a test tier's output, and the flags that name it (header: Tier
+# inputs). A new tier-reading collector or flag is added to both.
+readonly TIER_INPUT_COLLECTOR='[[:space:]/]metrics/(coverage|statements)\.py[[:space:]]'
+readonly TIER_INPUT_FLAGS="--coverage-json --istanbul-summary --in"
 
 usage() {
   echo "usage: $0 <snapshot|check|tighten|rebaseline> [--conf FILE] [--bounds FILE] [--out FILE]" >&2
@@ -189,6 +205,75 @@ while [ "$i" -lt "${#NAMES[@]}" ]; do
   i=$((i + 1))
 done
 
+# ---- tier inputs (header: Tier inputs) -------------------------------------------------------------
+# tier_inputs <command>: the files the command's tier-input flags name, one per line.
+tier_inputs() {
+  [[ " $1 " =~ $TIER_INPUT_COLLECTOR ]] || return 0
+  local words w flag prev=""
+  read -ra words <<<"$1"
+  for w in "${words[@]}"; do
+    for flag in $TIER_INPUT_FLAGS; do
+      if [ "$prev" = "$flag" ]; then echo "$w"; elif [[ "$w" == "$flag="?* ]]; then echo "${w#*=}"; fi
+    done
+    prev=$w
+  done
+}
+# plan_job_target <job>: the make target of the plan's gate job <job>, or nothing.
+plan_job_target() {
+  [ -f scripts/ci/gate_plan.sh ] || return 0
+  awk -v j="$1" '
+    { sub(/#.*/, "") }
+    match($0, /GATE_JOBS_[A-Z0-9_]+="[^"]*"/) {
+      s = substr($0, RSTART, RLENGTH); sub(/^[^"]*"/, "", s); sub(/"$/, "", s)
+      n = split(s, e, "|")
+      for (i = 1; i <= n; i++) { split(e[i], w, " "); if (w[1] == j) { print w[2]; exit } }
+    }
+    { for (i = 1; i < NF - 1; i++) if ($i == "job" && $(i + 1) == j) { print $(i + 2); exit } }
+  ' scripts/ci/gate_plan.sh
+}
+# missing_inputs: sets MISSING (lines "<file>\t<collector>\t<target or empty>") and TARGETS
+# (the distinct targets, in conf order) for the collectors that will run.
+missing_inputs() {
+  local i=0 f target
+  MISSING="" TARGETS=""
+  while [ "$i" -lt "${#NAMES[@]}" ]; do
+    if [ "${RUN[$i]}" = 1 ]; then
+      while IFS= read -r f; do
+        [ -n "$f" ] && [ ! -e "$f" ] || continue
+        target=""
+        case "${COLLECTOR_AREAS[$i]}" in job:*) target=$(plan_job_target "${COLLECTOR_AREAS[$i]#job:}") ;; esac
+        MISSING+="$f"$'\t'"${NAMES[$i]}"$'\t'"$target"$'\n'
+        case " $TARGETS " in *" $target "*) ;; *) [ -z "$target" ] || TARGETS="${TARGETS:+$TARGETS }$target" ;; esac
+      done <<<"$(tier_inputs "${COMMANDS[$i]}")"
+    fi
+    i=$((i + 1))
+  done
+}
+if [ -z "${GATE_AREAS+x}" ]; then
+  missing_inputs
+  if [ -n "$MISSING" ] && [ "${TIGHTEN_RUN_TIERS:-0}" = 1 ] && [ -n "$TARGETS" ]; then
+    echo "metrics tiers RUN (TIGHTEN_RUN_TIERS=1): make $TARGETS"
+    # shellcheck disable=SC2086  # TARGETS is a word list of make targets
+    make --no-print-directory $TARGETS || die "make $TARGETS failed; the inputs above are still missing"
+    missing_inputs
+  fi
+  if [ -n "$MISSING" ]; then
+    echo "metrics_collect: $SUB needs files the test tiers write; missing here:" >&2
+    while IFS=$'\t' read -r f name target; do
+      [ -n "$f" ] || continue
+      if [ -n "$target" ]; then
+        echo "  $f  ($name; make $target)" >&2
+      else
+        echo "  $f  ($name; no gate job in scripts/ci/gate_plan.sh writes it: give the collector a job:<name> area)" >&2
+      fi
+    done <<<"$MISSING"
+    rerun=metrics-$SUB
+    [ "$SUB" != check ] || rerun=ci-metrics
+    [ -z "$TARGETS" ] || echo "  run: make $TARGETS   (or TIGHTEN_RUN_TIERS=1 make $rerun to run them first)" >&2
+    exit 2
+  fi
+fi
+
 # ---- run ------------------------------------------------------------------------------------------
 # shellcheck source=bin/toolchain_path.sh
 . "$HERE/toolchain_path.sh"
@@ -275,7 +360,7 @@ if [ -f "$SCORECARD_BOUNDS" ] \
   if [ "$SC_MODE" = check ] && { [ "${METRICS_REBASELINE:-0}" = 1 ] || [ "$KEYED" = 1 ]; }; then
     SC_ARGS+=(--rebaseline-ok)
   fi
-  python3 -I "$HERE/scorecard.py" "${SC_ARGS[@]}" | grep -E '^(scorecard-ratchet(-bound)?|grade|metrics-rebaseline:) ' || exit "${PIPESTATUS[0]}"
+  python3 -I "$HERE/scorecard.py" "${SC_ARGS[@]}" | grep -E '^(scorecard-ratchet(-bound)?|scorecard|metrics-rebaseline:) ' || exit "${PIPESTATUS[0]}"
   if [ "$SUB" = rebaseline ] && [ "$KEYED" = 0 ]; then
     echo "metrics_collect: WARNING: $SCORECARD_BOUNDS was rewritten too (every track to today's share); to loosen only named bounds, restore both files and run \`make metrics-rebaseline KEYS=<key>[,<key>]\`" >&2
   fi
