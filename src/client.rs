@@ -1,8 +1,9 @@
 use crate::dbg_msg;
+use crate::model::Post;
 use crate::oauth::{exit_for_restart, force_refresh_token, refresh_blocked_token, token_daemon, MobileSpoofMinter, Oauth, TokenManager, FRESH_TOKEN_BUDGET};
 use crate::reddit_response::{interpret_response, TokenAction};
 use crate::swr_cache::SwrCache;
-use crate::utils::{format_url, Post};
+use crate::utils::format_url;
 use arc_swap::ArcSwap;
 use cached::proc_macro::cached;
 use futures_lite::{future::Boxed, FutureExt};

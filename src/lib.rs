@@ -6,6 +6,7 @@ pub mod db;
 pub mod duplicates;
 pub mod instance_info;
 pub mod media_proxy;
+pub mod model;
 pub mod oauth;
 pub mod oauth_device;
 pub mod oauth_resources;
