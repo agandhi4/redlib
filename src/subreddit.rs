@@ -1,10 +1,8 @@
 #![allow(clippy::cmp_owned)]
 
 use crate::cookie_chain::set_cookie_chain;
-use crate::utils::{
-	catch_random, error, filter_posts, format_num, format_url, get_filters, info, nsfw_landing, param, redirect, rewrite_urls, setting, template, val, Post, Preferences,
-	Subreddit, FEEDS,
-};
+use crate::model::{filter_posts, Post, Subreddit};
+use crate::utils::{catch_random, error, format_num, format_url, get_filters, info, nsfw_landing, param, redirect, rewrite_urls, setting, template, val, Preferences, FEEDS};
 use crate::{client::json, server::RequestExt, server::ResponseExt};
 use askama::Template;
 use cookie::Cookie;
