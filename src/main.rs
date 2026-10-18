@@ -9,10 +9,11 @@ use std::sync::LazyLock;
 use futures_lite::FutureExt;
 use hyper::{header::HeaderValue, Body, Request, Response};
 use log::{info, warn};
-use redlib::client::{canonical_path, init_oauth_client, proxy, rate_limit_check, CLIENT};
+use redlib::client::{canonical_path, init_oauth_client, rate_limit_check, CLIENT};
+use redlib::media_proxy::proxy;
 use redlib::server::{self, RequestExt};
 use redlib::utils::{error, redirect, ThemeAssets};
-use redlib::{config, db, duplicates, headers, instance_info, post, search, settings, subreddit, user};
+use redlib::{config, db, duplicates, headers, instance_info, post, search, settings, subreddit, subreddit_rss, user};
 
 // Create Services
 
@@ -310,7 +311,7 @@ async fn main() {
 	app.at("/settings/update").get(|r| settings::update(r).boxed());
 
 	// RSS Subscriptions
-	app.at("/r/:sub.rss").get(|r| subreddit::rss(r).boxed());
+	app.at("/r/:sub.rss").get(|r| subreddit_rss::rss(r).boxed());
 
 	// Named feeds (instance-defined multireddits, REDLIB_DEFAULT_FEEDS)
 	app.at("/f/:name").get(|r| subreddit::feed(r).boxed());

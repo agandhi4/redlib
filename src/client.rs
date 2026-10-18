@@ -1,25 +1,19 @@
 use crate::dbg_msg;
 use crate::oauth::{exit_for_restart, force_refresh_token, refresh_blocked_token, token_daemon, MobileSpoofMinter, Oauth, TokenManager, FRESH_TOKEN_BUDGET};
-use crate::server::RequestExt;
+use crate::reddit_response::{interpret_response, TokenAction};
+use crate::swr_cache::SwrCache;
 use crate::utils::{format_url, Post};
 use arc_swap::ArcSwap;
 use cached::proc_macro::cached;
-use cached::{Cached, SizedCache};
 use futures_lite::{future::Boxed, FutureExt};
-use hyper::{header, Body, Request as HyperRequest, Response as HyperResponse};
-use log::{debug, error, info, trace, warn};
+use log::{info, trace, warn};
 use percent_encoding::{percent_encode, CONTROLS};
 use serde_json::Value;
-use std::collections::HashSet;
-use std::fmt::Debug;
-use std::future::Future;
-use std::hash::Hash;
 use std::result::Result;
 use std::sync::atomic::Ordering;
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::sync::OnceCell;
-use tokio::time::Instant;
 use wreq::redirect::Policy;
 use wreq::{header as wreq_header, Client as WreqClient, EmulationFactory, Method, Response as WreqResponse};
 use wreq_util::{Emulation, EmulationOS, EmulationOption};
@@ -181,83 +175,6 @@ pub async fn canonical_path(path: String, tries: i8) -> Result<Option<String>, S
 	}
 }
 
-pub async fn proxy(req: HyperRequest<Body>, format: &str) -> Result<HyperResponse<Body>, String> {
-	let mut url = format!("{format}?{}", req.uri().query().unwrap_or_default());
-
-	// For each parameter in request
-	for (name, value) in &req.params() {
-		// Fill the parameter value in the url
-		url = url.replace(&format!("{{{name}}}"), value);
-	}
-
-	// First parameter is target URL (mandatory).
-	let wreq_uri = wreq::Uri::try_from(url.clone()).map_err(|_| "Couldn't parse URL".to_string())?;
-
-	// Reddit's CDN intermittently drops connections (resets, HTTP/2 GOAWAY) under
-	// concurrent load. Without a retry, each such drop renders as a permanently
-	// blank image on the page, so retry transport errors and 5xx briefly.
-	const MAX_ATTEMPTS: u32 = 3;
-	let mut last_err = String::new();
-
-	for attempt in 1..=MAX_ATTEMPTS {
-		let mut builder = CLIENT.get(wreq_uri.clone());
-
-		// Copy useful headers from original request
-		for &key in &["Range", "If-Modified-Since", "Cache-Control"] {
-			if let Some(value) = req.headers().get(key) {
-				builder = builder.header(key, value.as_bytes());
-			}
-		}
-
-		// Add User-Agent header of the currently spoofed device
-		{
-			let client = oauth_client().load_full();
-			builder = builder.header("User-Agent", client.user_agent());
-		}
-
-		// This is needed or Reddit will redirect us to a /media landing page that just renders the image.
-		builder = builder.header(wreq_header::ACCEPT, "*/*");
-
-		match builder.send().await {
-			// Retry CDN-side errors; pass the final attempt's response through unmodified.
-			Ok(res) if res.status().is_server_error() && attempt < MAX_ATTEMPTS => {
-				last_err = format!("upstream returned {}", res.status());
-			}
-			Ok(mut res) => {
-				let headers = res.headers_mut();
-
-				let mut rm = |key: &str| headers.remove(key);
-
-				rm("access-control-expose-headers");
-				rm("server");
-				rm("vary");
-				rm("etag");
-				rm("x-cdn");
-				rm("x-cdn-client-region");
-				rm("x-cdn-name");
-				rm("x-cdn-server-region");
-				rm("x-reddit-cdn");
-				rm("x-reddit-video-features");
-				rm("Nel");
-				rm("Report-To");
-
-				return Ok(res.into_hyper_response());
-			}
-			Err(e) => {
-				last_err = e.to_string();
-			}
-		}
-
-		if attempt < MAX_ATTEMPTS {
-			warn!("Proxy fetch for {url} failed (attempt {attempt}/{MAX_ATTEMPTS}): {last_err}");
-			tokio::time::sleep(std::time::Duration::from_millis(250 * u64::from(attempt))).await;
-		}
-	}
-
-	error!("Proxy fetch for {url} failed after {MAX_ATTEMPTS} attempts: {last_err}");
-	Err(last_err)
-}
-
 /// Makes a GET request to Reddit at `path`. By default, this will honor HTTP
 /// 3xx codes Reddit returns and will automatically redirect.
 fn reddit_get(path: String, quarantine: bool) -> Boxed<Result<WreqResponse, String>> {
@@ -367,84 +284,6 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 	.boxed()
 }
 
-/// Stale-while-revalidate cache. A hit younger than `fresh` is served as-is; one older than that
-/// (up to `stale_max`) is served immediately while a single background refresh replaces it, so a
-/// revisit within the window never waits on the fetch. Only Ok results are cached; values are
-/// cloned on hit. The fetch function is the test seam: `json()` passes `fetch_json` (live Reddit),
-/// the offline tests pass a fake. Ages use tokio's clock so tests can pause and advance it.
-pub(crate) struct SwrCache<K, V> {
-	fresh: Duration,
-	stale_max: Duration,
-	entries: Mutex<SizedCache<K, (Instant, V)>>,
-	// Keys with a background refresh in flight, so a burst of stale hits spawns one fetch.
-	refreshing: Mutex<HashSet<K>>,
-}
-
-impl<K, V> SwrCache<K, V>
-where
-	K: Hash + Eq + Clone + Debug + Send + 'static,
-	V: Clone + Send + 'static,
-{
-	pub(crate) fn new(size: usize, fresh: Duration, stale_max: Duration) -> Self {
-		Self {
-			fresh,
-			stale_max,
-			entries: Mutex::new(SizedCache::with_size(size)),
-			refreshing: Mutex::new(HashSet::new()),
-		}
-	}
-
-	/// `&'static self` because a stale hit spawns a refresh task that outlives the call.
-	pub(crate) async fn get<F, Fut>(&'static self, key: K, fetch: F) -> Result<V, String>
-	where
-		F: FnOnce(K) -> Fut + Send + 'static,
-		Fut: Future<Output = Result<V, String>> + Send + 'static,
-	{
-		let hit = {
-			let mut entries = self.entries.lock().unwrap();
-			match entries.cache_get(&key).map(|(fetched_at, value)| (fetched_at.elapsed(), value.clone())) {
-				Some((age, _)) if age > self.stale_max => {
-					entries.cache_remove(&key);
-					None
-				}
-				hit => hit,
-			}
-		};
-		if let Some((age, value)) = hit {
-			if age > self.fresh {
-				debug!("Serving stale entry ({}s old) and refreshing: {key:?}", age.as_secs());
-				self.spawn_refresh(key, fetch);
-			}
-			return Ok(value);
-		}
-		// Cold misses are not single-flighted: two simultaneous first requests for one key both
-		// go upstream. Rare for one user, and the cost is a duplicate request, not a wrong answer.
-		let value = fetch(key.clone()).await?;
-		self.entries.lock().unwrap().cache_set(key, (Instant::now(), value.clone()));
-		Ok(value)
-	}
-
-	fn spawn_refresh<F, Fut>(&'static self, key: K, fetch: F)
-	where
-		F: FnOnce(K) -> Fut + Send + 'static,
-		Fut: Future<Output = Result<V, String>> + Send + 'static,
-	{
-		if !self.refreshing.lock().unwrap().insert(key.clone()) {
-			return;
-		}
-		tokio::spawn(async move {
-			match fetch(key.clone()).await {
-				Ok(value) => {
-					self.entries.lock().unwrap().cache_set(key.clone(), (Instant::now(), value));
-				}
-				// Keep serving the stale copy; it ages out at stale_max on its own.
-				Err(e) => warn!("Background refresh failed for {key:?}: {e}"),
-			}
-			self.refreshing.lock().unwrap().remove(&key);
-		});
-	}
-}
-
 // Reddit JSON cache: fresh 30s, then stale-while-revalidate up to 5 minutes. Worst case ~100
 // thread JSONs (~1MB each) resident for 5 minutes.
 const JSON_FRESH: Duration = Duration::from_secs(30);
@@ -456,18 +295,6 @@ static JSON_CACHE: LazyLock<SwrCache<JsonKey, Value>> = LazyLock::new(|| SwrCach
 /// stale-while-revalidate cache above.
 pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 	JSON_CACHE.get((path, quarantine), |(path, quarantine)| fetch_json(path, quarantine)).await
-}
-
-/// What `fetch_json` must do to the token after a response, as decided by `interpret_response`.
-#[derive(Debug, PartialEq, Eq)]
-enum TokenAction {
-	None,
-	/// Empty body: the token's budget is spent. Rotate without holding up this request.
-	RotateInBackground,
-	/// JSON 401 "Unauthorized": the token expired. Rotate before answering.
-	Rotate,
-	/// Non-JSON 403: Reddit's network-policy block page for a flagged token/device pair.
-	RotateBlocked,
 }
 
 /// Fetch and parse one Reddit JSON document. Uncached; every caller goes through `json()`.
@@ -527,63 +354,6 @@ async fn fetch_json(path: String, quarantine: bool) -> Result<Value, String> {
 	result
 }
 
-/// Classify one Reddit response: the caller's result, and what must happen to the token. Pure, so
-/// the rotation triggers (401, non-JSON 403, empty body) are tested offline.
-fn interpret_response(status: u16, body: &[u8], ratelimit_reset: Option<&str>, path: &str) -> (Result<Value, String>, TokenAction) {
-	if body.is_empty() {
-		let msg = match ratelimit_reset {
-			Some(val) => format!(
-				"Reddit rate limit exceeded. Try refreshing in a few seconds.\
-				 Rate limit will reset in: {val}"
-			),
-			None => "Reddit rate limit exceeded".to_string(),
-		};
-		return (Err(msg), TokenAction::RotateInBackground);
-	}
-
-	let json: Value = match serde_json::from_slice(body) {
-		Ok(json) => json,
-		Err(e) => {
-			error!("Got an invalid response from reddit {e}. Status code: {status}");
-			return if status == 403 {
-				(
-					Err("Reddit blocked this session. A new one was issued; refresh the page.".to_string()),
-					TokenAction::RotateBlocked,
-				)
-			} else if (500..600).contains(&status) {
-				(Err("Reddit is having issues, check if there's an outage".to_string()), TokenAction::None)
-			} else {
-				(Err(format!("Failed to parse page JSON data: {e} | {path}")), TokenAction::None)
-			};
-		}
-	};
-
-	// If user is suspended
-	if json["data"]["is_suspended"].as_bool() == Some(true) {
-		return (Err("suspended".into()), TokenAction::None);
-	}
-
-	// Reddit returned an API error
-	if json["error"].is_i64() {
-		// OAuth token has expired; http status 401
-		if json["message"] == "Unauthorized" {
-			error!("Forcing a token refresh");
-			return (Err("OAuth token has expired. Please refresh the page!".to_string()), TokenAction::Rotate);
-		}
-		for reason in ["quarantined", "gated", "private", "banned"] {
-			if json["reason"] == reason {
-				return (Err(reason.into()), TokenAction::None);
-			}
-		}
-		return (
-			Err(format!("Reddit error {} \"{}\": {} | {path}", json["error"], json["reason"], json["message"])),
-			TokenAction::None,
-		);
-	}
-
-	(Ok(json), TokenAction::None)
-}
-
 async fn self_check(sub: &str) -> Result<(), String> {
 	let query = format!("/r/{sub}/hot.json?&raw_json=1");
 
@@ -618,35 +388,6 @@ pub async fn rate_limit_check() -> Result<(), String> {
 	}
 
 	Ok(())
-}
-
-trait IntoHyperResponse {
-	fn into_hyper_response(self) -> HyperResponse<Body>;
-}
-
-impl IntoHyperResponse for WreqResponse {
-	fn into_hyper_response(self) -> HyperResponse<Body> {
-		let status = self.status();
-		let version = self.version();
-
-		let mut builder = HyperResponse::builder().status(status.as_u16()).version(match version {
-			wreq::Version::HTTP_09 => hyper::Version::HTTP_09,
-			wreq::Version::HTTP_10 => hyper::Version::HTTP_10,
-			wreq::Version::HTTP_11 => hyper::Version::HTTP_11,
-			wreq::Version::HTTP_2 => hyper::Version::HTTP_2,
-			wreq::Version::HTTP_3 => hyper::Version::HTTP_3,
-			_ => hyper::Version::HTTP_11,
-		});
-
-		for (name, value) in self.headers() {
-			builder = builder.header(
-				header::HeaderName::from_bytes(name.as_str().as_bytes()).unwrap(),
-				header::HeaderValue::from_bytes(value.as_bytes()).unwrap(),
-			);
-		}
-
-		builder.body(Body::wrap_stream(self.bytes_stream())).unwrap()
-	}
 }
 
 #[cfg(test)]
@@ -715,195 +456,6 @@ mod tests {
 		let link = json("/r/aaa/about.json?raw_json=1".into(), true).await;
 		assert!(link.is_err());
 		assert_eq!(link, Err("banned".into()));
-	}
-
-	// Offline: the SWR cache driven by a fake fetch on a paused clock (AGENTS.md "Test seams").
-
-	use serde_json::json;
-	use std::sync::atomic::AtomicUsize;
-	use std::sync::Arc;
-	use tokio::sync::Notify;
-
-	const FRESH: Duration = Duration::from_secs(30);
-	const STALE_MAX: Duration = Duration::from_secs(300);
-
-	/// The cache's refresh task needs `&'static`; each test gets its own, leaked for the process.
-	fn cache() -> &'static SwrCache<&'static str, usize> {
-		Box::leak(Box::new(SwrCache::new(10, FRESH, STALE_MAX)))
-	}
-
-	/// A fetch that returns how many times it has been called (1, 2, ...).
-	fn counting(calls: &Arc<AtomicUsize>) -> impl FnOnce(&'static str) -> Boxed<Result<usize, String>> {
-		let calls = calls.clone();
-		move |_| async move { Ok(calls.fetch_add(1, Ordering::SeqCst) + 1) }.boxed()
-	}
-
-	fn failing(calls: &Arc<AtomicUsize>) -> impl FnOnce(&'static str) -> Boxed<Result<usize, String>> {
-		let calls = calls.clone();
-		move |_| {
-			async move {
-				calls.fetch_add(1, Ordering::SeqCst);
-				Err("upstream down".to_string())
-			}
-			.boxed()
-		}
-	}
-
-	/// Let spawned refresh tasks run to completion: with the clock paused, a sleep only returns
-	/// once every other task is idle.
-	async fn settle() {
-		tokio::time::sleep(Duration::from_millis(1)).await;
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn swr_fresh_hit_skips_the_fetch() {
-		let (cache, calls) = (cache(), Arc::new(AtomicUsize::new(0)));
-		assert_eq!(cache.get("k", counting(&calls)).await, Ok(1));
-		tokio::time::advance(FRESH - Duration::from_secs(1)).await;
-		assert_eq!(cache.get("k", counting(&calls)).await, Ok(1));
-		settle().await;
-		assert_eq!(calls.load(Ordering::SeqCst), 1);
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn swr_stale_hit_serves_stale_then_refreshes() {
-		let (cache, calls) = (cache(), Arc::new(AtomicUsize::new(0)));
-		cache.get("k", counting(&calls)).await.unwrap();
-		tokio::time::advance(FRESH + Duration::from_secs(1)).await;
-
-		assert_eq!(cache.get("k", counting(&calls)).await, Ok(1), "stale value served without waiting");
-		settle().await;
-		assert_eq!(calls.load(Ordering::SeqCst), 2, "one background refresh");
-		assert_eq!(cache.get("k", counting(&calls)).await, Ok(2), "refreshed value replaces the stale one");
-		settle().await;
-		assert_eq!(calls.load(Ordering::SeqCst), 2, "the refreshed entry is fresh again");
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn swr_concurrent_stale_hits_refresh_once() {
-		let (cache, calls) = (cache(), Arc::new(AtomicUsize::new(0)));
-		cache.get("k", counting(&calls)).await.unwrap();
-		tokio::time::advance(FRESH + Duration::from_secs(1)).await;
-
-		// The refresh parks on a gate so every hit below lands while it is in flight.
-		let gate = Arc::new(Notify::new());
-		for _ in 0..5 {
-			let (gate, calls) = (gate.clone(), calls.clone());
-			let held = move |_| {
-				async move {
-					gate.notified().await;
-					Ok(calls.fetch_add(1, Ordering::SeqCst) + 1)
-				}
-				.boxed()
-			};
-			assert_eq!(cache.get("k", held).await, Ok(1));
-		}
-		gate.notify_one();
-		settle().await;
-		// A second refresh would still be parked on the gate, uncounted; this catches it.
-		assert_eq!(cache.refreshing.lock().unwrap().len(), 0, "no refresh left in flight");
-		assert_eq!(calls.load(Ordering::SeqCst), 2, "five stale hits, one refresh");
-		assert_eq!(cache.get("k", counting(&calls)).await, Ok(2));
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn swr_failed_refresh_keeps_the_stale_copy_and_retries() {
-		let (cache, calls) = (cache(), Arc::new(AtomicUsize::new(0)));
-		cache.get("k", counting(&calls)).await.unwrap();
-		tokio::time::advance(FRESH + Duration::from_secs(1)).await;
-
-		assert_eq!(cache.get("k", failing(&calls)).await, Ok(1));
-		settle().await;
-		assert_eq!(cache.get("k", counting(&calls)).await, Ok(1), "still the stale copy");
-		settle().await;
-		assert_eq!(calls.load(Ordering::SeqCst), 3, "the failed refresh released its slot, so the next stale hit refreshed");
-		assert_eq!(cache.get("k", counting(&calls)).await, Ok(3));
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn swr_expired_entry_is_a_miss() {
-		let (cache, calls) = (cache(), Arc::new(AtomicUsize::new(0)));
-		cache.get("k", counting(&calls)).await.unwrap();
-		tokio::time::advance(STALE_MAX + Duration::from_secs(1)).await;
-		assert_eq!(cache.get("k", counting(&calls)).await, Ok(2), "past stale_max the caller waits for a fresh fetch");
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn swr_errors_are_not_cached() {
-		let (cache, calls) = (cache(), Arc::new(AtomicUsize::new(0)));
-		assert_eq!(cache.get("k", failing(&calls)).await, Err("upstream down".to_string()));
-		assert_eq!(cache.get("k", counting(&calls)).await, Ok(2));
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn swr_keys_are_independent() {
-		let (cache, calls) = (cache(), Arc::new(AtomicUsize::new(0)));
-		assert_eq!(cache.get("a", counting(&calls)).await, Ok(1));
-		assert_eq!(cache.get("b", counting(&calls)).await, Ok(2));
-		assert_eq!(cache.get("a", counting(&calls)).await, Ok(1));
-	}
-
-	// Offline: response classification, which decides when fetch_json rotates the token.
-
-	fn interpret(status: u16, body: &str) -> (Result<Value, String>, TokenAction) {
-		interpret_response(status, body.as_bytes(), None, "/r/rust.json")
-	}
-
-	#[test]
-	fn interpret_ok_json_passes_through() {
-		assert_eq!(interpret(200, r#"{"data":{"x":1}}"#), (Ok(json!({"data": {"x": 1}})), TokenAction::None));
-	}
-
-	#[test]
-	fn interpret_expired_token_rotates_before_answering() {
-		let (result, action) = interpret(401, r#"{"message":"Unauthorized","error":401}"#);
-		assert_eq!(result, Err("OAuth token has expired. Please refresh the page!".to_string()));
-		assert_eq!(action, TokenAction::Rotate);
-	}
-
-	#[test]
-	fn interpret_html_403_rotates_the_blocked_token() {
-		let (result, action) = interpret(403, "<html><body>whoa there, pardner!</body></html>");
-		assert_eq!(result, Err("Reddit blocked this session. A new one was issued; refresh the page.".to_string()));
-		assert_eq!(action, TokenAction::RotateBlocked);
-	}
-
-	#[test]
-	fn interpret_json_403_is_an_api_error_not_a_block() {
-		let (result, action) = interpret(403, r#"{"error":403,"reason":"private","message":"Forbidden"}"#);
-		assert_eq!((result, action), (Err("private".to_string()), TokenAction::None));
-	}
-
-	#[test]
-	fn interpret_empty_body_is_a_spent_budget() {
-		let (result, action) = interpret_response(200, b"", Some("42"), "/r/rust.json");
-		assert!(result.unwrap_err().ends_with("Rate limit will reset in: 42"));
-		assert_eq!(action, TokenAction::RotateInBackground);
-	}
-
-	#[test]
-	fn interpret_non_json_errors_do_not_touch_the_token() {
-		assert_eq!(interpret(502, "<html>bad gateway</html>").1, TokenAction::None);
-		assert_eq!(
-			interpret(502, "<html>bad gateway</html>").0,
-			Err("Reddit is having issues, check if there's an outage".to_string())
-		);
-		let (result, action) = interpret(200, "not json");
-		assert!(result.unwrap_err().starts_with("Failed to parse page JSON data"));
-		assert_eq!(action, TokenAction::None);
-	}
-
-	#[test]
-	fn interpret_named_reasons_and_suspension() {
-		for reason in ["quarantined", "gated", "private", "banned"] {
-			let body = format!(r#"{{"error":403,"reason":"{reason}","message":"Forbidden"}}"#);
-			assert_eq!(interpret(403, &body), (Err(reason.to_string()), TokenAction::None));
-		}
-		assert_eq!(interpret(200, r#"{"data":{"is_suspended":true}}"#).0, Err("suspended".to_string()));
-		assert_eq!(
-			interpret(404, r#"{"error":404,"message":"Not Found"}"#).0,
-			Err(r#"Reddit error 404 "null": "Not Found" | /r/rust.json"#.to_string())
-		);
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
