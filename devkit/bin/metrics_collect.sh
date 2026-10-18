@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The ci-metrics mechanism: run the repo's declared metrics collectors, merge their output
-# into one snapshot, then run the ratchet. A repo's Makefile holds three one-line targets
-# (`ci-metrics` = check, `metrics-snapshot`, `metrics-tighten`) and nothing else; which
+# into one snapshot, then run the ratchet. A repo's Makefile holds four one-line targets
+# (`ci-metrics` = check, `metrics-snapshot`, `metrics-tighten`, `metrics-rebaseline`) and
+# nothing else; which
 # collectors exist is scripts/ci/metrics.conf, which run for a PR is decided here from the
 # gate's areas (devkit docs/decisions.md 2026-10-15).
 #
@@ -14,7 +15,16 @@
 #   tighten     snapshot, then lock in the BETTER numbers (commit the bounds in the same PR);
 #               exit 1 when a key is WORSE or MISSING, printed as check prints it, after
 #               writing the BETTER bounds and running the scorecard's tighten
-#   rebaseline  snapshot, then overwrite every bound (first adoption, or after a tool change)
+#   rebaseline  snapshot, then overwrite every bound (first adoption, or after a tool change).
+#               KEYS=<key>[,<key>] (`make metrics-rebaseline KEYS=...`: make hands command-line
+#               variables to the recipe's environment) loosens only those bounds, each only
+#               when WORSE, and leaves scorecard.json alone: the scorecard runs as `check`
+#               under the label instead, so its verdict shows now. Without KEYS every bound
+#               moves; the ratchet and this script then WARN, naming each loosened bound and
+#               the scorecard.json rewrite (devkit decisions 2026-10-17)
+#   tighten and rebaseline also write the report-only keys (vuln.*, fan_in_max) to
+#   report-only.json beside the bounds: the committed copy the scorecard reads from a fresh
+#   clone (commit it with the bounds)
 #   Every mode also runs the scorecard ratchet (bin/scorecard.py --mode <same>) when
 #   docs/metrics/scorecard.json exists, and `check` also when only origin/main has it
 #   (SCORECARD_BOUNDS overrides the path).
@@ -59,7 +69,7 @@
 # tiers that ran in this gate) were written before this job and are merged into the snapshot;
 # an `rm -rf build/metrics` here would silently drop them.
 #
-# Findings: a collector whose command runs devkit's metrics/python.py, ts.mjs or rust.py gets
+# Findings: a collector whose command runs devkit's metrics/python.py, ts.mjs, rust.py or jscpd.mjs gets
 # `--list-out build/metrics/<name>.findings.txt` appended (nothing to declare in the conf; a
 # command that names its own --list-out keeps it): the file, function, module behind every
 # count, so a lane reads what to fix instead of scripting it. Appended to the end of the
@@ -82,7 +92,7 @@ readonly GATE_JSON=build/metrics/gate.json   # local_gate.sh's job seconds: whic
 readonly SUBCOMMANDS="snapshot check tighten rebaseline"
 # A conf command that runs one of devkit's --list-out collectors (any path prefix: devkit/,
 # ../devkit/). Matched against " <command> " so the name may end the line.
-readonly LIST_OUT_COLLECTOR='[[:space:]/]metrics/(python\.py|ts\.mjs|rust\.py)[[:space:]]'
+readonly LIST_OUT_COLLECTOR='[[:space:]/]metrics/(python\.py|ts\.mjs|rust\.py|jscpd\.mjs)[[:space:]]'
 
 usage() {
   echo "usage: $0 <snapshot|check|tighten|rebaseline> [--conf FILE] [--bounds FILE] [--out FILE]" >&2
@@ -239,6 +249,11 @@ python3 -I "$RATCHET" merge --out "$OUT" ${MERGE_ARGS[@]+"${MERGE_ARGS[@]}"} \
 
 RATCHET_ARGS=("$SUB" --snapshot "$OUT" --bounds "$BOUNDS")
 if [ "$SUB" = check ] && [ "${METRICS_REBASELINE:-0}" = 1 ]; then RATCHET_ARGS+=(--rebaseline-ok); fi
+KEYED=0
+if [ "$SUB" = rebaseline ] && [ -n "${KEYS:-}" ]; then KEYED=1; RATCHET_ARGS+=(--keys "$KEYS"); fi
+# The modes an author commits from also refresh the committed report-only copy beside the
+# bounds; check (the gate) never writes a tracked file.
+case "$SUB" in tighten|rebaseline) RATCHET_ARGS+=(--report-only "$(dirname "$BOUNDS")/report-only.json") ;; esac
 python3 -I "$RATCHET" "${RATCHET_ARGS[@]}"
 ratchet_rc=$?
 # A failing tighten (rc 1: a WORSE key) has still written its BETTER bounds; the scorecard's
@@ -254,8 +269,15 @@ fi
 SCORECARD_BOUNDS=${SCORECARD_BOUNDS:-docs/metrics/scorecard.json}
 if [ -f "$SCORECARD_BOUNDS" ] \
   || { [ "$SUB" = check ] && git cat-file -e "origin/main:$SCORECARD_BOUNDS" 2>/dev/null; }; then
-  SC_ARGS=(. --mode "$SUB" --bounds-file "$SCORECARD_BOUNDS")
-  if [ "$SUB" = check ] && [ "${METRICS_REBASELINE:-0}" = 1 ]; then SC_ARGS+=(--rebaseline-ok); fi
+  SC_MODE=$SUB
+  [ "$KEYED" = 0 ] || SC_MODE=check
+  SC_ARGS=(. --mode "$SC_MODE" --bounds-file "$SCORECARD_BOUNDS")
+  if [ "$SC_MODE" = check ] && { [ "${METRICS_REBASELINE:-0}" = 1 ] || [ "$KEYED" = 1 ]; }; then
+    SC_ARGS+=(--rebaseline-ok)
+  fi
   python3 -I "$HERE/scorecard.py" "${SC_ARGS[@]}" | grep -E '^(scorecard-ratchet(-bound)?|grade|metrics-rebaseline:) ' || exit "${PIPESTATUS[0]}"
+  if [ "$SUB" = rebaseline ] && [ "$KEYED" = 0 ]; then
+    echo "metrics_collect: WARNING: $SCORECARD_BOUNDS was rewritten too (every track to today's share); to loosen only named bounds, restore both files and run \`make metrics-rebaseline KEYS=<key>[,<key>]\`" >&2
+  fi
 fi
 exit "$ratchet_rc"

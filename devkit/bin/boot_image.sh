@@ -72,7 +72,10 @@ APP="$NAME-app"
 PG="$NAME-pg"
 THROWAWAY_PG="$(dirname "$0")/throwaway_pg.sh"
 
-command -v docker >/dev/null || { echo "boot_image: docker not found on PATH" >&2; exit 1; }
+# Every docker call below is bounded; a hung daemon is one line and exit 1 (bin/_timeout_lib.sh).
+# shellcheck source=bin/_timeout_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_timeout_lib.sh"
+devkit_docker_guard boot_image
 
 # Order matters: the network cannot be removed while a container is still attached.
 teardown() {
