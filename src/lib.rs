@@ -14,6 +14,7 @@ pub mod oauth_resources;
 pub mod post;
 pub mod preferences;
 pub mod reddit_response;
+pub mod rewrite;
 pub mod search;
 pub mod server;
 pub mod settings;

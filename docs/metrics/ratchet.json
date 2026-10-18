@@ -15,12 +15,12 @@
     "source": "rust-app"
   },
   "size.app.max_lines": {
-    "bound": 753,
+    "bound": 572,
     "direction": "lower",
     "source": "size-app"
   },
   "size.app.over_600": {
-    "bound": 1,
+    "bound": 0,
     "direction": "lower",
     "source": "size-app"
   }
