@@ -1,0 +1,14 @@
+{
+  "metrics": {
+    "vuln.app.critical": 0,
+    "vuln.app.high": 0,
+    "vuln.app.total": 6
+  },
+  "schema_version": 2,
+  "skipped": [],
+  "sources": {
+    "vuln.app.critical": "vuln-app",
+    "vuln.app.high": "vuln-app",
+    "vuln.app.total": "vuln-app"
+  }
+}

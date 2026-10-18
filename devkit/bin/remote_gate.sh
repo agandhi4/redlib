@@ -22,7 +22,11 @@
 #      reads the plan from the checkout it runs from, so a stale or dirty one would gate with
 #      the wrong policy;
 #   3. run devkit/bin/local_gate.sh <pr> [--no-post] [--expect-head <sha>] there, which fetches the PR ref itself
-#      (with its fork guard and missing-pull-ref fallback).
+#      (with its fork guard and missing-pull-ref fallback). The checkout is main's, so its gate
+#      can predate a flag this wrapper forwards: the devkit-sync PR that brings --expect-head is
+#      gated by main's older local_gate.sh, which exits 2 on it (Codex on closet #406). So the
+#      flag goes only when that gate's --help usage line lists it; otherwise a GATE note says it
+#      was dropped and the gate runs as main's always did, without the head wait.
 # Remote gates keep their state in $GATE_REMOTE_ROOT/.state (logs: .state/<GATE_STATE_NAME>/
 # logs/<pr>/), not the host's default: the host's merge queue gates the same repo from its own
 # checkout with the same worktree names, and a worktree left by a killed run in one checkout
@@ -123,13 +127,29 @@ remote_main() {
   gate=$dir/devkit/bin/local_gate.sh
   [ -x "$gate" ] || { echo "remote_gate: $gate missing on $(hostname); is devkit vendored on main?" >&2; exit 2; }
   echo "GATE note: remote $(hostname) $dir main $(git -C "$dir" rev-parse --short HEAD)"
+  local usage_line arg
+  local args=()
+  usage_line=$("$gate" --help 2>/dev/null)
+  while [ $# -gt 0 ]; do
+    arg=$1
+    shift
+    if [ "$arg" = --expect-head ]; then
+      case "$usage_line" in
+        *--expect-head*) args+=(--expect-head "$1") ;;
+        *) echo "GATE note: the local_gate.sh on main takes no --expect-head (a devkit-sync PR brings it); gating without the head wait" ;;
+      esac
+      shift
+      continue
+    fi
+    args+=("$arg")
+  done
 
   export XDG_STATE_HOME=$root/.state
   # Background jobs of a non-interactive shell read /dev/null, so keep ssh's stdin on fd 3 for
   # the watcher. The watcher's own output goes nowhere: sshd waits for every holder of the
   # session's stdout/stderr before it reports the exit status.
   exec 3<&0
-  "$gate" "$pr" "$@" </dev/null 3<&- &
+  "$gate" "$pr" ${args[@]+"${args[@]}"} </dev/null 3<&- &
   gate_pid=$!
   ( cat <&3 >/dev/null; kill -TERM "$gate_pid" ) >/dev/null 2>&1 &
   watch_pid=$!

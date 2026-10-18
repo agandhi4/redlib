@@ -48,7 +48,7 @@ DEVKIT_IMAGE_BIN="boot_image.sh contract_probe.sh"
 # shellcheck disable=SC2034  # read by tests/gate_contract.bats (every bin/ file listed once)
 DEVKIT_JOB_BIN="tier_guard.sh throwaway_pg.sh playwright_browsers.sh node_toolchain.sh
   rust_toolchain.sh toolchain_path.sh metrics_ratchet.py metrics_collect.sh layer_check.py
-  guard_check.py _source_tree.py _ts_lex.py _guard_rules.py"
+  guard_check.py _source_tree.py _ts_lex.py _guard_rules.py _timeout_lib.sh"
 
 # <path>: set DEVKIT_AREA (no subshell; devkit_areas calls it once per changed path).
 _devkit_area() {
@@ -160,7 +160,11 @@ devkit_gate_areas() {
 #   GATE_JOBS_<GROUP>="<name> <make target> [VAR=val...]|<name> <target> ..."   jobs, in order
 #   GATE_AREAS_<GROUP>="<areas>"   which areas run the group; set (even to "") to override the
 #                                  default below. Words are split on spaces: no spaces in a val.
+#                                  Not for IMAGE or E2E (DEVKIT_RETIRED_PLAN_VARS): every app path
+#                                  runs them.
 #   GATE_IMAGE_PATHS=<ERE>         paths that also run the image group (anchor it)
+#   GATE_IMAGE_EXCLUDE_PATHS=<ERE> app paths that cannot reach the image (in .dockerignore, or
+#                                  read by no stage: test/, .github/); they do not run the group
 #   gate_plan_extra()              optional; called after the groups above, for the repo's own
 #                                  rules (devkit_group_ran <group> says whether a group ran)
 #
@@ -169,8 +173,9 @@ devkit_gate_areas() {
 #   DOCS      docs tooling other              required; skipped when QUICK ran, which covers it
 #   BACKEND   backend other
 #   FRONTEND  frontend other
-#   IMAGE     other                           + GATE_IMAGE_PATHS + the DEVKIT_IMAGE_BIN scripts
-#   E2E       backend frontend other
+#   IMAGE     backend frontend other          fixed; minus GATE_IMAGE_EXCLUDE_PATHS, plus
+#                                             GATE_IMAGE_PATHS and the DEVKIT_IMAGE_BIN scripts
+#   E2E       backend frontend other          fixed
 #   METRICS   backend frontend other          optional; always last (after gate_plan_extra), so
 #                                             its ci-metrics merges every earlier job's gate.*
 #                                             seconds and the tier-*.json the tiers wrote, and
@@ -184,9 +189,19 @@ devkit_gate_areas() {
 #                                             metrics_collect.sh turns into --rebaseline-ok.
 #
 # So docs-only runs DOCS; tooling(+docs)-only runs QUICK, plus IMAGE when boot_image.sh or
-# contract_probe.sh changed; native-only (or an empty diff) is nothing_to_run; any other path
-# runs every group. A group not run prints
-# one SKIPPED line per job, naming the areas changed.
+# contract_probe.sh changed; native-only (or an empty diff) is nothing_to_run; backend and
+# frontend run their own group, IMAGE and E2E; any other path runs every group. A group not
+# run prints one SKIPPED line per job, naming the areas changed.
+
+# Plan variables the default plan refuses (exit 2). IMAGE and E2E run for every app path: a
+# plan that narrowed them to "image inputs only" let closet #406 merge src/ changes no image
+# build or smoke had booted (GATE_AREAS_IMAGE="", copied from the devkit new scaffolds), and
+# Orbit and locus skipped their image (Orbit's Playwright suite with it) on every backend/ and
+# server/ change. devkit-check (ci-quick, the merged tree's copy) fails a plan that still sets
+# one, so the sync PR that retires it fails, not the next PR's gate (which sources main's copy
+# of this file).
+DEVKIT_RETIRED_PLAN_VARS="GATE_AREAS_IMAGE GATE_AREAS_E2E"
+DEVKIT_RETIRED_PLAN_ADVICE="IMAGE and E2E run for every backend, frontend or other path; delete it, and list paths that cannot reach the image in GATE_IMAGE_EXCLUDE_PATHS"
 
 devkit_group_ran() { # <group>, lowercase
   case "${DEVKIT_GATE_RAN:-}" in *" $1 "*) return 0 ;; esac
@@ -198,6 +213,13 @@ devkit_default_gate_plan() {
     echo "devkit_default_gate_plan: the plan must declare GATE_JOBS_QUICK and GATE_JOBS_DOCS" >&2
     exit 2
   fi
+  local retired
+  for retired in $DEVKIT_RETIRED_PLAN_VARS; do
+    if declare -p "$retired" >/dev/null 2>&1; then
+      echo "devkit_default_gate_plan: the plan sets $retired; $DEVKIT_RETIRED_PLAN_ADVICE" >&2
+      exit 2
+    fi
+  done
   [ -n "$GATE_AREAS" ] || nothing_to_run "No changed paths"
   [ "$GATE_AREAS" != native ] \
     || nothing_to_run "Only native paths changed (ios/, OrbitAgent/, *.xcodeproj/); build and test them on the Mac"
@@ -210,7 +232,7 @@ devkit_default_gate_plan() {
   fi
   _devkit_group BACKEND "backend other"
   _devkit_group FRONTEND "frontend other"
-  _devkit_group IMAGE "other"
+  _devkit_group IMAGE "backend frontend other"
   _devkit_group E2E "backend frontend other"
   if declare -F gate_plan_extra >/dev/null; then gate_plan_extra; fi
   _devkit_metrics_group
@@ -243,16 +265,18 @@ _devkit_metrics_group() {
 }
 
 # <GROUP> <default areas>: true when one of the group's areas (GATE_AREAS_<GROUP> overrides
-# the default) is in GATE_AREAS; IMAGE also runs on its input paths. An unknown area is exit 2.
+# the default) is in GATE_AREAS; IMAGE counts only paths outside GATE_IMAGE_EXCLUDE_PATHS and
+# also runs on its input paths. An unknown area is exit 2.
 _devkit_group_runs() {
-  local areas_var="GATE_AREAS_$1" areas area run=0
+  local areas_var="GATE_AREAS_$1" areas area run=0 changed_areas=" $GATE_AREAS "
   if declare -p "$areas_var" >/dev/null 2>&1; then areas=${!areas_var}; else areas=$2; fi
+  if [ "$1" = IMAGE ]; then _devkit_image_areas; changed_areas=$DEVKIT_IMAGE_AREAS; fi
   for area in $areas; do
     case " $DEVKIT_AREA_ORDER " in
       *" $area "*) ;;
       *) echo "devkit_default_gate_plan: $areas_var names '$area' (areas: $DEVKIT_AREA_ORDER)" >&2; exit 2 ;;
     esac
-    case " $GATE_AREAS " in *" $area "*) run=1 ;; esac
+    case "$changed_areas" in *" $area "*) run=1 ;; esac
   done
   if [ "$1" = IMAGE ] && [ "$run" = 0 ] && _devkit_image_input_changed; then run=1; fi
   [ "$run" = 1 ]
@@ -269,9 +293,28 @@ _devkit_group() {
     _devkit_run_jobs "$jobs"
     return 0
   fi
+  if [ "$group" = IMAGE ] && [ "$GATE_HAS_BACKEND$GATE_HAS_FRONTEND$GATE_HAS_OTHER" != 000 ]; then
+    _devkit_skip_jobs "$jobs" "every app path changed is in GATE_IMAGE_EXCLUDE_PATHS"
+    return 0
+  fi
   group=$(tr '[:upper:]' '[:lower:]' <<<"$group")
   for area in $GATE_AREAS; do list+=${list:+, }$area; done
   _devkit_skip_jobs "$jobs" "only $list paths changed; default for the $group group"
+}
+
+# DEVKIT_IMAGE_AREAS: the areas of the changed paths outside GATE_IMAGE_EXCLUDE_PATHS, as
+# " a b " (" " for none). A bad ERE is exit 2: grep's status 2 must not read as "all excluded".
+_devkit_image_areas() {
+  local DEVKIT_AREAS paths=$CHANGED rc=0
+  if [ -n "${GATE_IMAGE_EXCLUDE_PATHS:-}" ]; then
+    paths=$(grep -vE "$GATE_IMAGE_EXCLUDE_PATHS" <<<"$CHANGED") || rc=$?
+    if [ "$rc" -gt 1 ]; then
+      echo "devkit_default_gate_plan: GATE_IMAGE_EXCLUDE_PATHS is not a valid ERE: $GATE_IMAGE_EXCLUDE_PATHS" >&2
+      exit 2
+    fi
+  fi
+  devkit_areas "$paths"
+  DEVKIT_IMAGE_AREAS=" ${DEVKIT_AREAS:- } "
 }
 
 _devkit_image_input_changed() {

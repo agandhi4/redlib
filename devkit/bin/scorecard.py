@@ -4,7 +4,8 @@
 Design: standardization/scorecard-design.md (owner, 2026-10-16: "encode it as a scorecard,
 then raise everything to an A"). Read-only and deterministic: it runs none of the repo's own
 code. It reads the metrics snapshot (build/metrics.json after `make metrics-snapshot`, else the
-committed bounds in docs/metrics/ratchet.json, which `tighten` keeps at the real numbers), the
+committed bounds in docs/metrics/ratchet.json, which `tighten` keeps at the real numbers, and
+the report-only keys the bounds never hold in docs/metrics/report-only.json), the
 docs report (bin/docs_check.sh --report), the read-only guards (toolchain, workflows, release,
 hooks), config files, the gate's state dir, and the devkit checkout this script lives in.
 
@@ -43,6 +44,7 @@ repo. The ratchet over track shares (`scorecard check`) is a follow-up, report-o
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -52,10 +54,29 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import median
+from types import ModuleType
 
 HERE = Path(__file__).resolve().parent
 DEVKIT = HERE.parent
 EXIT_USAGE = 2
+
+
+def _load_ratchet() -> ModuleType:
+    """bin/metrics_ratchet.py by path (`python3 -I` keeps bin/ off sys.path): its
+    is_report_only and load_snapshot are the one definition of those keys and that file."""
+    path = HERE / "metrics_ratchet.py"
+    spec = importlib.util.spec_from_file_location("devkit_metrics_ratchet", path)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"scorecard ERROR: cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    sys.dont_write_bytecode = True  # no __pycache__ in a consumer's vendored devkit/
+    spec.loader.exec_module(module)
+    return module
+
+
+ratchet_mod = _load_ratchet()
+REPORT_ONLY_FILE = "docs/metrics/report-only.json"
 
 # Tracks whose share a PR can move only by changing the repo: the ratchet's domain.
 RATCHETED = ("T1", "T2", "T3", "T4", "T5", "T6", "T10", "T12", "T13", "T14")
@@ -94,6 +115,7 @@ class Repo:
     tracked: set[str] = field(default_factory=set)
     metrics: dict[str, float] = field(default_factory=dict)
     metrics_from: str = ""
+    report_only_from: str = ""  # where vuln.* / fan_in_max came from, for the evidence
     checks: list[Check] = field(default_factory=list)
     declared: dict[str, str] = field(default_factory=dict)  # check id -> delta line
     excepted: dict[str, str] = field(default_factory=dict)  # check id -> exception line
@@ -166,24 +188,37 @@ def repo_name(root: Path) -> str:
 
 
 def load_metrics(repo: Repo) -> None:
-    """Today's numbers: the committed bounds (docs/metrics/ratchet.json) overlaid by a fresh
-    build/metrics.json when one exists. The overlay matters in the gate: an area-scoped plan
-    skips the collectors of untouched areas (a backend-only PR runs no ts.mjs), so the snapshot
-    lacks their keys; read as missing they graded FAIL and the scorecard ratchet failed every
-    such PR (Orbit #76). A key the snapshot does not carry keeps main's committed value, which
-    is what the metrics ratchet does with a skipped collector's bound."""
+    """Today's numbers, three layers, each over the last: the committed bounds
+    (docs/metrics/ratchet.json), the committed report-only keys (docs/metrics/report-only.json,
+    which `tighten` and `rebaseline` write: the bounds never hold vuln.* or fan_in_max, devkit
+    #76), then a fresh build/metrics.json when one exists. A report-only bound left in an old
+    ratchet.json is not a measurement and is skipped. The overlay matters in the gate: an
+    area-scoped plan skips the collectors of untouched areas (a backend-only PR runs no ts.mjs),
+    so the snapshot lacks their keys; read as missing they graded FAIL and the scorecard ratchet
+    failed every such PR (Orbit #76). A key the snapshot does not carry keeps the committed
+    value, which is what the metrics ratchet does with a skipped collector's bound."""
     bounds = repo.root / "docs" / "metrics" / "ratchet.json"
-    carried = 0
     if bounds.is_file():
         try:
             doc = json.loads(bounds.read_text())
         except ValueError:
             doc = {}
         for key, entry in doc.items():
+            if ratchet_mod.is_report_only(key):
+                continue
             if isinstance(entry, dict) and isinstance(entry.get("bound"), (int, float)):
                 repo.metrics[key] = float(entry["bound"])
-                carried += 1
         repo.metrics_from = "docs/metrics/ratchet.json bounds"
+    report_only = repo.root / REPORT_ONLY_FILE
+    if report_only.is_file():
+        try:
+            committed = ratchet_mod.load_snapshot(report_only, allow_empty=True).values
+        except ratchet_mod.InputError:
+            committed = {}
+        repo.metrics.update(committed)
+        when = git(repo.root, "log", "-1", "--format=%cs", "--", REPORT_ONLY_FILE) or "uncommitted"
+        repo.report_only_from = f"{REPORT_ONLY_FILE}, {when}"
+        repo.metrics_from += (" + " if repo.metrics_from else "") + REPORT_ONLY_FILE
     snap = repo.root / "build" / "metrics.json"
     if snap.is_file():
         try:
@@ -194,7 +229,9 @@ def load_metrics(repo: Repo) -> None:
             return
         carried = sum(1 for k in repo.metrics if k not in fresh)
         repo.metrics.update(fresh)
-        repo.metrics_from = "build/metrics.json" + (f" (+{carried} bounds carried for skipped collectors)" if carried else "")
+        repo.metrics_from = "build/metrics.json" + (f" (+{carried} committed values carried for skipped collectors)" if carried else "")
+        if any(ratchet_mod.is_report_only(k) for k in fresh):
+            repo.report_only_from = "build/metrics.json"
 
 
 def section_lines(text: str, heading_re: str) -> list[str]:
@@ -387,6 +424,23 @@ def t3_dead(repo: Repo, conf: dict[str, float]) -> None:
         repo.add("T3", "dead.allowlists", True, "; ".join(f"{k}={v:g}" for k, v in sorted(allow.items())) + " (shrink-only, tracked)")
 
 
+GUARDS_CONF = "scripts/ci/guards.conf"
+# A rule line of the kind, with or without its @NAME (bin/guard_check.py's conf grammar).
+OWN_TRANSACTION_LINE = re.compile(r"^\s*(?:@\S+\s+)?own-transaction\s")
+
+
+def own_transaction_rule(repo: Repo) -> str | None:
+    """`guards.conf:<line>` of the TS own-commit rule (guard_check's own-transaction), which
+    ci-quick and the guards collector already judge; None when the repo declares none."""
+    path = repo.root / GUARDS_CONF
+    if not path.is_file():
+        return None
+    for n, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+        if OWN_TRANSACTION_LINE.match(line):
+            return f"{GUARDS_CONF}:{n}"
+    return None
+
+
 def t4_arch(repo: Repo, conf: dict[str, float]) -> None:
     layers = repo.root / "scripts" / "ci" / "layers.conf"
     lv = {k: v for k, v in repo.metrics.items() if k.endswith(".layer_violations")}
@@ -408,12 +462,13 @@ def t4_arch(repo: Repo, conf: dict[str, float]) -> None:
         q = re.search(r"^layer\s+(queries|repositories|db)\b", text, re.M)
         ban = any(Path(f).name in ("eslint.config.js", "eslint.config.mjs", ".eslintrc.cjs") for f in repo.tracked) and "no-restricted-imports" in "".join((repo.root / f).read_text(errors="replace") for f in repo.tracked if Path(f).name.startswith("eslint.config"))
         repo.add("T4", "arch.queries", bool(q) or ban, f"query layer in layers.conf: {q.group(1) if q else 'none'}; eslint import ban: {'yes' if ban else 'no'}")
-        own = "allowlist.backend.own_commit" in repo.metrics or any("own_commit" in f for f in repo.tracked)
         is_py = any(f.endswith("pyproject.toml") for f in repo.tracked)
         if is_py:
+            own = "allowlist.backend.own_commit" in repo.metrics or any("own_commit" in f for f in repo.tracked)
             repo.add("T4", "arch.own_commit", own, "own-commit guard tracked" if own else "no own_commit allow-list")
         else:
-            repo.add("T4", "arch.own_commit", None, "TypeScript repo", mechanism="a TS own_commit_check (devkit gap)")
+            at = own_transaction_rule(repo)
+            repo.add("T4", "arch.own_commit", at is not None, f"own-transaction rule at {at}" if at else f"no own-transaction rule in {GUARDS_CONF}")
     else:
         repo.na("T4", "arch.queries", "no database tier")
     fan = {k: v for k, v in repo.metrics.items() if k.endswith(".fan_out_max")}
@@ -589,9 +644,10 @@ def t11_security(repo: Repo) -> None:
     vuln = {k: v for k, v in repo.metrics.items() if k.startswith("vuln.") and (k.endswith(".high") or k.endswith(".critical"))}
     if vuln:
         bad = [f"{k}={v:g}" for k, v in sorted(vuln.items()) if v > 0]
-        repo.add("T11", "sec.audit", not bad, "no high or critical vulnerabilities in the locked production set" if not bad else "; ".join(bad))
+        verdict = "no high or critical vulnerabilities in the locked production set" if not bad else "; ".join(bad)
+        repo.add("T11", "sec.audit", not bad, f"{verdict} ({repo.report_only_from})")
     else:
-        repo.add("T11", "sec.audit", None, "no vuln.* keys", mechanism="metrics/vuln.py collector line in metrics.conf (report-only keys; needs a fresh `make metrics-snapshot`)")
+        repo.add("T11", "sec.audit", None, "no vuln.* keys", mechanism=f"metrics/vuln.py collector line in metrics.conf, then `make metrics-tighten` commits {REPORT_ONLY_FILE}")
     makes = "\n".join((repo.root / f).read_text(errors="replace") for f in repo.tracked if Path(f).name == "Makefile")
     wired = "secrets_check.sh" in makes or "secrets-check" in makes
     if wired:

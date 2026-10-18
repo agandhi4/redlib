@@ -12,8 +12,12 @@
 //   --root       the package: holds package.json and node_modules/.bin, where every tool comes
 //                from (never PATH: the lockfile's version measures). A requested tool that is
 //                not installed is exit 2 naming the dev dependency.
-//   --src        the source directory under --root; its .ts/.tsx/.js/.jsx files minus tests
-//                and `*.d.ts` are the production set the complexity rules and the graph see
+//   --src        the source directory under --root; its .ts/.tsx/.js/.jsx files (and .vue,
+//                below) minus tests and `*.d.ts` are the production set the complexity rules
+//                and the graph see. A .vue single-file component joins the set when
+//                vue-eslint-parser and @vue/compiler-sfc are installed under --root (the repo's
+//                eslint config then parses it, dependency-cruiser extracts its <script> imports);
+//                otherwise the .vue files are skipped with a note on stderr
 //   --test-glob  what is a test or test scaffolding, besides the defaults below; repeatable.
 //                Globs are relative to --src, `**` crosses directories, a bare `*.x` matches
 //                at any depth
@@ -93,6 +97,17 @@ const CYCLOMATIC_LIST_THRESHOLD = 10; // --list-out only: there is no cyclomatic
 const FAN_TOP = 10; // --list-out modules per fan key; the same in metrics/python.py
 const ANONYMOUS = "<anonymous>"; // --list-out's name for a function the tool does not name
 const SOURCE_EXT = /\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$/;
+const SFC_EXT = /\.vue$/;
+// What reads a .vue file: eslint through the repo's config (eslint-plugin-vue's parser), and
+// dependency-cruiser, which without the compiler lists a component with no imports at all.
+const SFC_READERS = ["vue-eslint-parser", "@vue/compiler-sfc"];
+// ESLint's warning for a file passed by path that no config object's `files` covers: it lints
+// nothing, so the file's functions would silently score 0.
+// dependency-cruiser's dependencyTypes for an edge that exists only before compilation. They are
+// read with --ts-pre-compilation-deps, which lists each import statement separately: without it
+// a .vue <script lang="ts"> keeps `import type` as a runtime edge while a .ts file elides it.
+const TYPE_ONLY_EDGES = new Set(["type-only", "type-import", "pre-compilation-only"]);
+const ESLINT_UNCONFIGURED = /^File ignored because no matching configuration was supplied/;
 // Tests and scaffolding, as the fleet names them (finplat, Orbit, closet, rollcall); a repo
 // adds its own with --test-glob.
 const DEFAULT_TEST_GLOBS = [
@@ -150,11 +165,15 @@ function parse(argv) {
 }
 
 // productionFiles: sorted paths relative to --root (`src/a/b.ts`) of the files the complexity
-// rules see: sources under --src minus tests, scaffolding and declaration files.
+// rules and the import graph see: sources under --src minus tests, scaffolding and declaration
+// files. The graph's nodes are this list, so complexity and coupling never disagree on a file.
 function productionFiles(opts) {
   const tests = [...DEFAULT_TEST_GLOBS, ...opts["test-glob"]].map(globToRegExp);
   const srcDir = join(opts.root, opts.src);
+  const missingReaders = SFC_READERS.filter((pkg) => !existsSync(join(opts.root, "node_modules", pkg, "package.json")));
+  const isSource = (name) => SOURCE_EXT.test(name) || (SFC_EXT.test(name) && missingReaders.length === 0);
   const found = [];
+  let skippedSfc = 0;
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
       const path = join(dir, entry.name);
@@ -162,13 +181,19 @@ function productionFiles(opts) {
         if (entry.name !== "node_modules") walk(path);
         continue;
       }
-      if (!entry.isFile() || !SOURCE_EXT.test(entry.name) || entry.name.endsWith(".d.ts")) continue;
+      if (!entry.isFile() || entry.name.endsWith(".d.ts")) continue;
       const rel = relative(srcDir, path).split("\\").join("/");
       if (tests.some((re) => re.test(rel))) continue;
-      found.push(`${opts.src}/${rel}`);
+      if (isSource(entry.name)) found.push(`${opts.src}/${rel}`);
+      else if (SFC_EXT.test(entry.name)) skippedSfc++;
     }
   };
   walk(srcDir);
+  if (skippedSfc > 0) {
+    process.stderr.write(
+      `${SCRIPT}: ${skippedSfc} .vue files not measured: ${missingReaders.join(", ")} not installed in ${opts.root}/node_modules\n`,
+    );
+  }
   if (found.length === 0) throw new CollectorError(`no production source files under ${srcDir}`);
   return found;
 }
@@ -194,6 +219,9 @@ function eslintFindings(opts, files, extraArgs, ruleId, pattern) {
     const rel = relative(root, realpathSync(report.filePath)).split("\\").join("/");
     for (const msg of report.messages) {
       if (msg.fatal) throw new CollectorError(`eslint could not lint ${report.filePath}: ${msg.message}`);
+      if (msg.ruleId === null && ESLINT_UNCONFIGURED.test(msg.message)) {
+        throw new CollectorError(`eslint has no config for ${rel}: the repo's eslint config must list its extension in \`files\``);
+      }
       if (msg.ruleId !== ruleId) continue;
       const match = pattern.exec(msg.message);
       if (!match) throw new CollectorError(`unparseable ${ruleId} message: ${JSON.stringify(msg.message)}`);
@@ -311,31 +339,28 @@ function collectKnip(opts) {
 
 // importGraph: production module -> the production modules it imports at runtime, from
 // dependency-cruiser; shared by --cycles and --fan so both see one graph.
-function importGraph(opts) {
+function importGraph(opts, files) {
   const depcruise = requireBin(opts.root, "depcruise", "dependency-cruiser");
   const args = [
     opts.src, "--no-config", "--include-only", `^${escapeForRegExp(opts.src)}`,
-    "--output-type", "json",
+    "--ts-pre-compilation-deps", "--output-type", "json",
   ];
   if (opts.tsconfig) args.push("--ts-config", opts.tsconfig);
   // No rules under --no-config, so a non-zero exit is an error, not a finding.
   const out = runTool(depcruise, args, { cwd: opts.root, ok: [0] });
   const report = parseJson(out, "dependency-cruiser output");
   if (!Array.isArray(report?.modules)) throw new CollectorError("dependency-cruiser output has no `modules`");
-  // A node is a production source file, the complexity file set's definition: SOURCE_EXT, no
-  // tests, no declaration files, the same glob matcher (dependency-cruiser's --exclude refuses a
-  // regex with nested repetition as "probably very slow", which every `**` glob becomes). A
-  // stylesheet, an image or a `?raw`/`?url` import is an asset the bundler inlines, not a
-  // module whose API the importer couples to, so it is no fan-out edge (orbit #82: a .css
+  // A node is a production file (productionFiles), filtered here rather than by depcruise's
+  // --exclude, which refuses a regex with nested repetition as "probably very slow" (every `**`
+  // glob). A stylesheet, an image or a `?raw`/`?url` import is an asset the bundler inlines, not
+  // a module whose API the importer couples to, so it is no fan-out edge (orbit #82: a .css
   // import moved fan_out_max 23 -> 24).
-  const tests = [...DEFAULT_TEST_GLOBS, ...opts["test-glob"], "**/*.d.ts"].map(globToRegExp);
-  const isProduction = (module) => {
-    const rel = module.startsWith(`${opts.src}/`) ? module.slice(opts.src.length + 1) : null;
-    return rel !== null && SOURCE_EXT.test(rel) && !tests.some((re) => re.test(rel));
-  };
+  const production = new Set(files);
   const graph = new Map();
   for (const module of report.modules) {
-    if (isProduction(module.source)) graph.set(module.source, new Set(module.dependencies.map((d) => d.resolved)));
+    if (!production.has(module.source)) continue;
+    const runtime = module.dependencies.filter((d) => !(d.dependencyTypes ?? []).some((t) => TYPE_ONLY_EDGES.has(t)));
+    graph.set(module.source, new Set(runtime.map((d) => d.resolved)));
   }
   for (const [module, imports] of graph) {
     graph.set(module, new Set([...imports].filter((t) => graph.has(t) && t !== module)));
@@ -443,11 +468,11 @@ function collect(opts) {
     Object.assign(out.keys, keys);
     Object.assign(out.findings, findings);
   };
-  const files = opts.cyclomatic || opts.cognitive ? productionFiles(opts) : [];
+  const files = opts.cyclomatic || opts.cognitive || opts.cycles || opts.fan ? productionFiles(opts) : [];
   if (opts.cyclomatic) add(collectCyclomatic(opts, files));
   if (opts.cognitive) add(collectCognitive(opts, files));
   if (opts.knip) add(collectKnip(opts));
-  const graph = opts.cycles || opts.fan ? importGraph(opts) : null;
+  const graph = opts.cycles || opts.fan ? importGraph(opts, files) : null;
   if (opts.cycles) add(collectCycles(opts, graph));
   if (opts.fan) add(collectFan(opts, graph));
   if (opts.bundle) add(collectBundle(opts));

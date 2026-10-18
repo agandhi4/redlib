@@ -85,7 +85,9 @@ metrics-snapshot: ## collect the metrics into build/metrics.json, no check
 	devkit/bin/metrics_collect.sh snapshot
 metrics-tighten: ## collect, then lock the better numbers into docs/metrics/ratchet.json
 	devkit/bin/metrics_collect.sh tighten
-metrics-rebaseline: ## collect, then overwrite every bound (label the PR metrics-rebaseline)
+# KEYS=<key>[,<key>] loosens only the named bounds and leaves scorecard.json alone (make hands
+# command-line variables to the recipe's environment, where metrics_collect.sh reads KEYS).
+metrics-rebaseline: ## collect, then overwrite every bound, or only KEYS=a,b (label the PR metrics-rebaseline)
 	devkit/bin/metrics_collect.sh rebaseline
 
 gate: ## make gate PR=<n> [GATE_ARGS=--no-post]

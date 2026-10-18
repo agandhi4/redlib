@@ -4,7 +4,10 @@ per language, and the by-path loads of metrics/python.py and _ts_lex.py.
 
 Each script loads this file by path (`python3 -I` keeps bin/ off sys.path; the vendored layout,
 VENDOR_PATHS bin + metrics, fixes where everything sits). A conf is one directive per line, `#`
-comments, one `[section]` per source tree; the keys every section takes:
+comments, one `[section]` per source tree. A word is a run of non-space characters, or a
+double-quoted string that holds spaces or `#` (guard_check's only-text PATTERN: `"for: x"`);
+there is no escape, so a pattern holding `"` is written as a /REGEX/ with `\x22`. The keys every
+section takes:
 
   lang     python | ts
   root     DIR          the tree's directory, relative to the repo root; globs are relative to it
@@ -48,6 +51,9 @@ _SCRIPT_LANGS = frozenset({"", "ts", "js", "tsx", "jsx"})
 _NOT_NEWLINE = re.compile(r"[^\n]")
 ALWAYS_SKIPPED_DIRS = frozenset({"node_modules", "__pycache__"})
 TREE_KEYS = frozenset({"lang", "root", "src", "exclude", "alias"})
+# A quoted word, a bare word, a comment, or a quote that opens nothing that closes (finditer
+# skips the spaces between them).
+_CONF_WORD = re.compile(r'"([^"]*)"(?=[\s#]|$)|([^\s"#]+)|(#.*)|(")')
 
 DEVKIT = Path(__file__).resolve().parent.parent
 
@@ -118,11 +124,12 @@ def parse_sections(path: Path, make: Callable[[str, int], T], directive: Directi
         raise ConfError(f"cannot read {path}: {exc.strerror}") from exc
     sections: list[T] = []
     for lineno, raw in enumerate(text.splitlines(), start=1):
-        line = raw.split("#", 1)[0].strip()
-        if not line:
-            continue
         where = f"{path}:{lineno}"
-        if line.startswith("["):
+        tokens = conf_words(raw, where)
+        if not tokens:
+            continue
+        if tokens[0].startswith("["):
+            line = " ".join(tokens)
             name = line.strip("[]")
             if not line.endswith("]") or SECTION_NAME.fullmatch(name) is None:
                 raise ConfError(f"{where}: a section is `[name]`, name [A-Za-z0-9_-]+")
@@ -132,7 +139,6 @@ def parse_sections(path: Path, make: Callable[[str, int], T], directive: Directi
             continue
         if not sections:
             raise ConfError(f"{where}: directive before the first [section]")
-        tokens = line.split()
         if tokens[0] in TREE_KEYS:
             _tree_key(sections[-1], tokens[0], tokens[1:], where)
         else:
@@ -142,6 +148,21 @@ def parse_sections(path: Path, make: Callable[[str, int], T], directive: Directi
     for section in sections:
         _validate_tree(section, path)
     return sections
+
+
+def conf_words(raw: str, where: str) -> list[str]:
+    """One conf line's words, its `#` comment dropped; a quoted word loses its quotes."""
+    words: list[str] = []
+    for match in _CONF_WORD.finditer(raw):
+        quoted, word, comment, stray = match.groups()
+        if comment is not None:
+            break
+        if stray is not None:
+            raise ConfError(
+                f'{where}: a stray `"`; a quoted word is `"..."`, closed and followed by a space'
+            )
+        words.append(quoted if quoted is not None else word)
+    return words
 
 
 def _tree_key(tree: SourceTree, word: str, args: list[str], where: str) -> None:
@@ -233,13 +254,17 @@ def read_source(root: Path, rel: str) -> str:
 
 def ts_source(root: Path, rel: str) -> str:
     """The code the TS lexer reads for a file of ts_files: a component's script blocks."""
-    text = read_source(root, rel)
-    if posixpath.splitext(rel)[1] not in SFC_EXTS:
+    return ts_code(read_source(root, rel), root / rel)
+
+
+def ts_code(text: str, path: Path) -> str:
+    """The code of a ts_files file's TEXT (ts_source, for a caller that also keeps the text)."""
+    if path.suffix not in SFC_EXTS:
         return text
     try:
         return sfc_scripts(text)
     except ValueError as exc:
-        raise ConfError(f"cannot read {root / rel}: {exc}") from exc
+        raise ConfError(f"cannot read {path}: {exc}") from exc
 
 
 def sfc_scripts(text: str) -> str:

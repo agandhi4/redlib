@@ -58,7 +58,10 @@ PG_TMPFS=${PG_TMPFS:-1}
 PG_ARGS=${PG_ARGS:-}
 PG_READY_TIMEOUT=${PG_READY_TIMEOUT:-60}
 
-command -v docker >/dev/null || die "docker not found on PATH"
+# Every docker call below is bounded; a hung daemon is one line and exit 1 (bin/_timeout_lib.sh).
+# shellcheck source=bin/_timeout_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_timeout_lib.sh"
+devkit_docker_guard throwaway_pg
 
 remove() { docker rm -fv "$NAME" >/dev/null 2>&1 || true; }
 is_running() { [ "$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" = true ]; }

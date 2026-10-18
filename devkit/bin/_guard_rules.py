@@ -12,9 +12,12 @@ like a pass.
 from __future__ import annotations
 
 import ast
+import bisect
+import io
 import itertools
 import re
-from collections.abc import Iterable, Sequence
+import tokenize
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 from typing import Protocol
@@ -79,11 +82,39 @@ class PyCall:
     line: int
 
 
+def _blanked(text: str, spans: Iterable[tuple[int, int]]) -> str:
+    """TEXT with every character of each (start, end) span but its newlines turned to spaces,
+    so each line and offset left is the file's own."""
+    out = list(text)
+    for start, end in spans:
+        for i in range(start, end):
+            if out[i] != "\n":
+                out[i] = " "
+    return "".join(out)
+
+
+def _line_starts(text: str) -> list[int]:
+    return [0, *(m.end() for m in re.finditer("\n", text))]
+
+
 @dataclass(frozen=True)
 class PyFile:
     tree: ast.Module
     imports: list[Imported]
     calls: list[PyCall]
+    source: str
+
+    @cached_property
+    def code_text(self) -> str:
+        """The source with its comments blanked (only-text): strings and docstrings stay."""
+        starts = _line_starts(self.source)
+        readline = io.StringIO(self.source).readline
+        comments = (
+            (starts[t.start[0] - 1] + t.start[1], starts[t.end[0] - 1] + t.end[1])
+            for t in tokenize.generate_tokens(readline)
+            if t.type == tokenize.COMMENT
+        )
+        return _blanked(self.source, comments)
 
 
 class Tok(Protocol):
@@ -125,10 +156,19 @@ class TsFile:
     imports: list[Imported]
     calls: list[TsCallSite]
     interpolations: list[Span]
+    # The file as written. A component's lexed text (bin/_source_tree.py sfc_scripts) keeps
+    # its offsets, so the comments' spans index this too.
+    source: str
 
     @cached_property
     def module(self) -> TsModule:
         return module_functions(self.tokens, self.comments)
+
+    @cached_property
+    def code_text(self) -> str:
+        """The file with its comments blanked (only-text): strings, template text and a
+        component's template and style stay, since a spelling there is still a spelling."""
+        return _blanked(self.source, ((c.at, c.end) for c in self.comments))
 
 
 # ------------------------------------------------------------------------- the primitives
@@ -287,6 +327,41 @@ def single_writer(file: PyFile, attr: str) -> list[Hit]:
         if call.canonical == "setattr" and named:
             hits.append(Hit(call.line, f"setattr(..., {attr!r}, ...) writes .{attr}"))
     return _keep_first(sorted(hits, key=lambda h: h.line))
+
+
+@dataclass(frozen=True)
+class TextPattern:
+    regex: re.Pattern[str]
+    text: str  # as the conf wrote it
+    literal: bool
+
+    @property
+    def shown(self) -> str:
+        return f'"{self.text}"' if self.literal else self.text
+
+
+def text_pattern(text: str) -> TextPattern:
+    """only-text's PATTERN: `/REGEX/` searched as written, anything else a plain substring (a
+    route literal that starts and ends with `/` is written as a regex, its slashes escaped);
+    ValueError names what is wrong with it."""
+    if not text:
+        raise ValueError("only-text needs a PATTERN; an empty one matches everywhere")
+    if len(text) < 3 or not (text.startswith("/") and text.endswith("/")):
+        return TextPattern(re.compile(re.escape(text)), text, True)
+    try:
+        return TextPattern(re.compile(text[1:-1]), text, False)
+    except re.error as exc:
+        raise ValueError(f"{text!r}: bad regex: {exc}") from exc
+
+
+def text_hits(text: str, pattern: TextPattern) -> list[Hit]:
+    """only-text: each line of a file's code text (PyFile/TsFile code_text: comments blanked,
+    strings kept) where PATTERN matches, a match spanning lines at its first. Not seen: a
+    spelling built at run time (`"fo" + "r"`, an f-string or template part), and HTML comments
+    in a component's template, which are not blanked."""
+    starts = _line_starts(text)
+    lines = (bisect.bisect_right(starts, m.start()) for m in pattern.regex.finditer(text))
+    return _keep_first(Hit(line, f"spells {pattern.shown}") for line in lines)
 
 
 def _word_in(text: str, words: frozenset[str]) -> bool:
@@ -833,6 +908,167 @@ def ts_scoped_exports(file: TsFile, params: frozenset[str], marker: str) -> list
             continue
         hits.append(Hit(fn.line, f"{fn.name}() declares {'/'.join(sorted(declared))} and never uses it"))
     return _keep_first(hits)
+
+
+# ---------------------------------------------------------------- ts single-writer (drizzle)
+
+_DRIZZLE_WRITES = frozenset({"update", "insert", "delete"})
+
+
+def _names_table(tokens: Sequence[Tok], first: int, close: int, table: str) -> bool:
+    """tokens[first:close] is TABLE, or a dotted chain ending in it (`schema.signals`)."""
+    arg = tokens[first:close]
+    shaped = all(
+        t.kind == "id" if i % 2 == 0 else _is(t, "punct", ".") for i, t in enumerate(arg)
+    )
+    return bool(arg) and len(arg) % 2 == 1 and shaped and arg[-1].value == table
+
+
+def _own_property(tokens: Sequence[Tok], open_at: int, close: int, key: str) -> int | None:
+    """Index of KEY where the object literal from tokens[open_at] (`{`) to tokens[close] has it
+    as a property of its own (`key: v`, `"key": v` or shorthand `key`), else None. A nested
+    object's keys are not its own, and a spread (`...patch`) is not read."""
+    starts_property = True
+    j = open_at + 1
+    while j < close:
+        tok = tokens[j]
+        if tok.kind == "punct" and tok.value in _OPENERS:
+            j, starts_property = _close(tokens, j) + 1, False
+            continue
+        if starts_property and tok.kind in ("id", "str") and tok.value == key:
+            if j + 1 == close or _p(tokens, j + 1, ":") or _p(tokens, j + 1, ","):
+                return j
+        starts_property = _is(tok, "punct", ",")
+        j += 1
+    return None
+
+
+def _object_has(tokens: Sequence[Tok], at: int, key: str) -> bool:
+    """tokens[at] opens an object literal with KEY as its own property."""
+    return _p(tokens, at, "{") and _own_property(tokens, at, _close(tokens, at), key) is not None
+
+
+def _rows_have(tokens: Sequence[Tok], at: int, key: str) -> bool:
+    """tokens[at] opens an insert's rows that set KEY: one object literal, or an array literal
+    with such an object among its elements (`values([{ id }, { id, role }])`)."""
+    if not _p(tokens, at, "["):
+        return _object_has(tokens, at, key)
+    close, j = _close(tokens, at), at + 1
+    while j < close:
+        if _object_has(tokens, j, key):
+            return True
+        j = _close(tokens, j) + 1 if tokens[j].kind == "punct" and tokens[j].value in _OPENERS else j + 1
+    return False
+
+
+def _chained_calls(tokens: Sequence[Tok], at: int) -> Iterator[tuple[str, int]]:
+    """(method, index of its `(`) for each `.method(...)` chained from tokens[at]: the
+    `.values(...).onConflictDoUpdate(...)` after an `.insert(T)`. Stops at the first token that
+    does not continue the chain."""
+    while _p(tokens, at, ".") and _id(tokens, at + 1) and _p(tokens, at + 2, "("):
+        yield tokens[at + 1].value, at + 2
+        at = _close(tokens, at + 2) + 1
+
+
+def _writes_column(tokens: Sequence[Tok], verb: str, after: int, column: str) -> bool:
+    """The drizzle `.VERB(TABLE)` whose `)` is tokens[after - 1] sets COLUMN in a literal:
+    update's `.set({...})`, insert's `.values({...})` (or an array of rows), or an upsert's
+    `.onConflictDoUpdate({ set: {...} })` anywhere in the insert's chain. A delete sets none."""
+    calls = _chained_calls(tokens, after)
+    if verb == "update":
+        method, paren = next(calls, ("", 0))
+        return method == "set" and _object_has(tokens, paren + 1, column)
+    if verb != "insert":
+        return False
+    for method, paren in calls:
+        if method == "values" and _rows_have(tokens, paren + 1, column):
+            return True
+        if method == "onConflictDoUpdate" and _p(tokens, paren + 1, "{"):
+            key = _own_property(tokens, paren + 1, _close(tokens, paren + 1), "set")
+            if key is not None and _p(tokens, key + 1, ":") and _object_has(tokens, key + 2, column):
+                return True
+    return False
+
+
+def _enclosing(module: TsModule, at: int) -> str:
+    """The module's top-level function (or value initializer) holding offset AT, by its
+    declared name; "" outside every one (a class method, module-level code)."""
+    for fn in module.local.values():
+        if fn.body and fn.body[0].at <= at <= fn.body[-1].at:
+            return fn.name
+    return ""
+
+
+def ts_single_writer(file: TsFile, table: str, column: str) -> list[Hit]:
+    """drizzle writes of TABLE: `.update(TABLE)`, `.insert(TABLE)`, `.delete(TABLE)` on any
+    receiver (`tx.`, a chain broken across lines, `(await getDb()).`), TABLE written bare or
+    as a dotted chain's last name. With COLUMN, only a write whose object literal has COLUMN
+    as its own key (the drizzle property, `setBy`, not the SQL name `set_by`):
+    `.update(TABLE).set({...})`, `.insert(TABLE).values({...})` or `.values([{...}])`, and
+    the insert's `.onConflictDoUpdate({ set: {...} })` (rollcall #67: a second writer went
+    through an insert and an upsert). Each hit names the top-level function it is in, so an
+    owner site `GLOB:FUNCTION` sanctions one function. Not seen: raw SQL (an `sql` template,
+    `db.execute`), a table re-bound under another name, and with COLUMN rows or a patch passed
+    by name (`.values(row)`, `.set(patch)`) or spread (`.set({ ...patch })`): the TABLE form
+    sees every one of those writes, so a column whose writers spread is held by a TABLE rule
+    instead."""
+    tokens = file.tokens
+    subject = f"{table}.{column}" if column else table
+    hits: list[Hit] = []
+    for k, tok in enumerate(tokens):
+        if tok.kind != "id" or tok.value not in _DRIZZLE_WRITES:
+            continue
+        if not (k and _is(tokens[k - 1], "punct", ".") and _p(tokens, k + 1, "(")):
+            continue
+        close = _close(tokens, k + 1)
+        if not _names_table(tokens, k + 2, close, table):
+            continue
+        if column and not _writes_column(tokens, tok.value, close + 1, column):
+            continue
+        hits.append(_owned_hit(file, tok.at, tok.line, f"{tok.value}s {subject}"))
+    return _keep_first(hits)
+
+
+def _owned_hit(file: TsFile, at: int, line: int, what: str) -> Hit:
+    """A hit naming the top-level function holding offset AT, so an owner site
+    `GLOB:FUNCTION` sanctions that function alone (single-writer, own-transaction)."""
+    owner = _enclosing(file.module, at)
+    return Hit.naming(line, (owner,), f"{what} in {{names}}()") if owner else Hit(line, what)
+
+
+# Transaction control on any receiver: drizzle `db.transaction(cb)` (and `tx.transaction(cb)`,
+# a savepoint) and `tx.rollback()`; a driver's or Kysely's `.commit()`.
+_TX_METHODS = frozenset({"transaction", "commit", "rollback"})
+# A literal that is one transaction-control statement, whole: `query("BEGIN")`, sql`commit;`.
+_TX_STATEMENT = re.compile(
+    r"""(['"`])\s*(begin|commit|rollback|start\s+transaction)(?:\s+(?:work|transaction))?\s*;?\s*\1""",
+    re.IGNORECASE,
+)
+
+
+def ts_own_transaction(file: TsFile) -> list[Hit]:
+    """Opening or ending a transaction (own-transaction, the TS form of own_commit_check.py's
+    rule: the unit-of-work owner begins and ends it; a helper handed the tx only uses it). Fires
+    on `.transaction(`, `.commit(` and `.rollback(` called on any receiver (`db.`, `this.db.`,
+    `tx.`, `pool?.`) and on a string or template literal that is a whole BEGIN, COMMIT,
+    ROLLBACK or START TRANSACTION statement (`client.query("BEGIN")`, sql`commit`). Each hit
+    names its top-level function, as single-writer's do. Not seen: a statement built at run
+    time or with other SQL in the same literal, postgres.js `sql.begin(` (too common a method
+    name to read as a transaction), and a method named otherwise that wraps one (the wrapper
+    is the site to own)."""
+    tokens = file.tokens
+    hits: list[Hit] = []
+    for k, tok in enumerate(tokens):
+        if tok.kind != "id" or tok.value not in _TX_METHODS:
+            continue
+        if k and _is(tokens[k - 1], "punct", ".") and _p(tokens, k + 1, "("):
+            hits.append(_owned_hit(file, tok.at, tok.line, f"calls .{tok.value}()"))
+    starts = _line_starts(file.source)
+    for match in _TX_STATEMENT.finditer(file.code_text):
+        line = bisect.bisect_right(starts, match.start())
+        statement = " ".join(match.group(2).upper().split())
+        hits.append(_owned_hit(file, match.start(), line, f"runs {statement}"))
+    return _keep_first(sorted(hits, key=lambda hit: hit.line))
 
 
 def is_server_module(tokens: Sequence[Tok]) -> bool:

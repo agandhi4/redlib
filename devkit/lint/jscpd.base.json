@@ -8,6 +8,23 @@
     "**/*.spec.*",
     "**/test-setup.*",
     "**/conftest.py",
-    "**/*.d.ts"
+    "**/*.d.ts",
+    "**/*.md",
+    "**/*.txt",
+    "**/LICENSE",
+    "**/LICENSE.*",
+    "**/LICENCE",
+    "**/LICENCE.*",
+    "**/COPYING",
+    "**/COPYING.*",
+    "**/package-lock.json",
+    "**/pnpm-lock.yaml",
+    "**/yarn.lock",
+    "**/bun.lock",
+    "**/uv.lock",
+    "**/poetry.lock",
+    "**/Cargo.lock",
+    "**/Gemfile.lock",
+    "**/Package.resolved"
   ]
 }
