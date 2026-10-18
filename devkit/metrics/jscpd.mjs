@@ -4,7 +4,8 @@
 // One line in scripts/ci/metrics.conf, run from the repo root, for example:
 //   dup repo node devkit/metrics/jscpd.mjs --scope repo --out build/metrics/dup.json backend/server frontend/src
 //
-// Usage: jscpd.mjs --scope <name> [--min-tokens 50] [--min-lines 5] [--bin <jscpd>] [--base] [--out FILE] <paths...>
+// Usage: jscpd.mjs --scope <name> [--min-tokens 50] [--min-lines 5] [--bin <jscpd>] [--base] [--out FILE]
+//                  [--list-out FILE] <paths...>
 //   paths        repo-relative directories or files jscpd scans (at least one)
 //   --min-tokens, --min-lines   jscpd's clone size knobs (its defaults are 50 and 5). The one
 //                knob that moves the percentage: a repo that changes it rebaselines
@@ -22,13 +23,28 @@
 //                                       statistics.total.percentage, rounded to the two decimals
 //                                       its console reporter prints (the JSON carries the raw float)
 //   duplication.<scope>.clones          clone pairs found (statistics.total.clones)
+//
+// --list-out FILE: the clone pairs behind `clones` (_lib.mjs writeFindings, ts.mjs's format),
+// one line per pair, largest first: `<fileA>:<start>-<end> ↔ <fileB>:<start>-<end> lines=<n>`,
+// paths relative to the working directory, the pair's two ends in path order. Never read by the
+// ratchet; the JSON is the same with or without it.
 // Exit: 0 ok, 2 a missing jscpd, a report that cannot be read or a bad call.
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
-import { CollectorError, SCOPE, fail, ownConfig, parseJson, runTool, withMergedConfig, writeOutput } from "./_lib.mjs";
+import {
+  CollectorError,
+  SCOPE,
+  fail,
+  ownConfig,
+  parseJson,
+  runTool,
+  withMergedConfig,
+  writeFindings,
+  writeOutput,
+} from "./_lib.mjs";
 
 const SCRIPT = "jscpd.mjs";
 
@@ -43,6 +59,7 @@ function parse(argv) {
       bin: { type: "string", default: join("node_modules", ".bin", "jscpd") },
       base: { type: "boolean", default: false },
       out: { type: "string" },
+      "list-out": { type: "string" },
     },
   });
   if (!values.scope || !SCOPE.test(values.scope)) {
@@ -71,7 +88,9 @@ function collect(opts) {
       ...opts.paths,
       "--min-tokens", opts["min-tokens"],
       "--min-lines", opts["min-lines"],
-      "--reporters", "json", "--output", outDir, "--no-colors",
+      // --absolute: jscpd otherwise names a file relative to whichever scanned path holds it,
+      // so src/a.ts and lib/a.ts both read `a.ts` in a finding.
+      "--reporters", "json", "--output", outDir, "--no-colors", "--absolute",
       ...extra,
     ], { cwd: process.cwd() });
     if (opts.base) {
@@ -87,18 +106,56 @@ function collect(opts) {
     if (typeof total?.percentage !== "number" || typeof total?.clones !== "number") {
       throw new CollectorError("jscpd report has no statistics.total.percentage/clones");
     }
+    const clonesKey = `duplication.${opts.scope}.clones`;
     return {
-      [`duplication.${opts.scope}.jscpd_percent`]: Number(total.percentage.toFixed(2)),
-      [`duplication.${opts.scope}.clones`]: total.clones,
+      keys: {
+        [`duplication.${opts.scope}.jscpd_percent`]: Number(total.percentage.toFixed(2)),
+        [clonesKey]: total.clones,
+      },
+      findings: { [clonesKey]: clonePairs(report) },
     };
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
 }
 
+// sourceOf: the file a duplicate end lives in. jscpd 5.4 names a block of a multi-format file
+// `<path>:<format>` (a .vue's `<style>` is `A.vue:css`, lines still the file's), so a name that
+// is not a file but whose prefix is keeps the format as a block suffix. Anything else is an error,
+// never a silently dropped end.
+function sourceOf(name) {
+  if (existsSync(name)) return { source: name };
+  const m = /^(.+):([A-Za-z0-9_-]+)$/.exec(name);
+  if (m && existsSync(m[1])) return { source: m[1], block: m[2] };
+  throw new CollectorError(`jscpd named a duplicate in ${name}, which is not a file`);
+}
+
+// clonePairs: the --list-out lines, largest clone first, then by path and line.
+function clonePairs(report) {
+  // Both sides real paths, as in ts.mjs: macOS's /var/folders is /private/var/folders, and a
+  // relative path across that link would climb out of the repo.
+  const cwd = realpathSync(process.cwd());
+  if (!Array.isArray(report.duplicates)) throw new CollectorError("jscpd report has no `duplicates` array");
+  const end = (file) => {
+    if (typeof file?.name !== "string" || !Number.isInteger(file.start) || !Number.isInteger(file.end)) {
+      throw new CollectorError(`unreadable jscpd duplicate end: ${JSON.stringify(file)}`);
+    }
+    const { source, block } = sourceOf(file.name);
+    const path = relative(cwd, realpathSync(source)).split("\\").join("/");
+    return { path: block === undefined ? path : `${path}:${block}`, start: file.start, end: file.end };
+  };
+  const byPlace = (x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : x.start - y.start);
+  return report.duplicates
+    .map((d) => ({ lines: d.lines, ends: [end(d.firstFile), end(d.secondFile)].sort(byPlace) }))
+    .sort((x, y) => y.lines - x.lines || byPlace(x.ends[0], y.ends[0]) || byPlace(x.ends[1], y.ends[1]))
+    .map(({ lines, ends: [a, b] }) => `${a.path}:${a.start}-${a.end} ↔ ${b.path}:${b.start}-${b.end} lines=${lines}`);
+}
+
 try {
   const opts = parse(process.argv.slice(2));
-  writeOutput(collect(opts), opts.out);
+  const { keys, findings } = collect(opts);
+  writeOutput(keys, opts.out);
+  if (opts["list-out"] !== undefined) writeFindings(findings, opts["list-out"]);
 } catch (err) {
   if (err instanceof CollectorError || err.code === "ERR_PARSE_ARGS_UNKNOWN_OPTION" || err.code === "ERR_PARSE_ARGS_INVALID_OPTION_VALUE") {
     fail(SCRIPT, err.message);

@@ -42,7 +42,7 @@ schema 1 envelope (finplat's `make metrics`) and a bare flat file, which carry n
 | `bundle` | lower | `bundle.frontend.kb_total`, `bundle.frontend.kb_login` |
 | `statements` | lower | `statements.POST:/api/items` |
 | `size` | lower | `size.backend.max_lines`, `size.frontend.over_600` (`metrics/size.py`: lines of the largest production file; files over 600 lines) |
-| `vuln` | lower | `vuln.backend.high`, `vuln.frontend.total` (`metrics/vuln.py`, OSV over the locked production set; REPORT-ONLY: a new advisory moves it without a code change, so never gated even with a bound in the file; the scorecard reads the snapshot) |
+| `vuln` | lower | `vuln.backend.high`, `vuln.frontend.total` (`metrics/vuln.py`, OSV over the locked production set; REPORT-ONLY: a new advisory moves it without a code change, so never gated even with a bound in the file; the scorecard reads the snapshot, else `docs/metrics/report-only.json`) |
 | `allowlist` | lower | `allowlist.backend.own_commit` (shrink-only allow-lists) |
 | `gate` | lower | `gate.backend-unit.seconds`, `gate.total.seconds` (wall-clock seconds) |
 | `tier` | lower | `tier.unit.seconds`, `tier.db.seconds` (wall-clock seconds of the guarded command) |
@@ -78,11 +78,11 @@ Exactly the keys each emits, per flag; `<s>` is `--scope`. CLIs: devkit README, 
 | | `--vulture` | `dead.<s>.vulture` (findings; `[tool.vulture]` in `--root`'s pyproject.toml is honoured, else the `--src` paths; unused fields of pydantic/SQLAlchemy models, dataclasses, enums, TypedDicts and Protocols are dropped with `--vulture-ignore-declarative`) |
 | | `--fan` | `coupling.<s>.fan_in_max` (most importers one module has; report-only), `coupling.<s>.fan_out_max` (most modules one module imports: a god module) over the import-statement edges of the same graph (no initializer edges: they would make every package initializer a hub) |
 | | `--cycles` | `coupling.<s>.cycles` (strongly connected components of the runtime import graph over the `--src` directories and `.py` modules, so a flat backend lists `app.py` beside its packages; `if TYPE_CHECKING:` imports excluded, imports inside functions included). Importing `a.b.c` also runs `a/__init__` and `a/b/__init__`, so the graph holds an initializer edge from the importer to each such ancestor that imports something of ours, except the importer's own ancestors (already loaded): a cycle through a re-exporting package initializer counts |
-| `ts.mjs` | `--cyclomatic` | `complexity.<s>.cyclomatic_max` (eslint `complexity` at 0, `--no-inline-config`, production files: `--src` minus tests, `__tests__`/`__mocks__`/`test-helpers`, `test-setup.*`, `setupTests.*`, `*.d.ts` and `--test-glob`s) |
+| `ts.mjs` | `--cyclomatic` | `complexity.<s>.cyclomatic_max` (eslint `complexity` at 0, `--no-inline-config`, production files: `--src` minus tests, `__tests__`/`__mocks__`/`test-helpers`, `test-setup.*`, `setupTests.*`, `*.d.ts` and `--test-glob`s; `.vue` components too when `vue-eslint-parser` and `@vue/compiler-sfc` are installed under `--root`, else skipped with a stderr note; a production file the repo's eslint config does not cover is exit 2) |
 | | `--cognitive` | `complexity.<s>.cognitive_max`, `complexity.<s>.cognitive_over_15` (eslint-plugin-sonarjs) |
 | | `--knip` | `dead.<s>.knip_exports` (exports + types), `dead.<s>.knip_files` (knip 6: files reported as issues), `dead.<s>.knip_deps` (dependencies, devDependencies, unlisted, unresolved, binaries) |
-| | `--cycles` | `coupling.<s>.cycles` (dependency-cruiser `--no-config` graph of `--src`, same production filter, `import type` is not an edge) |
-| | `--fan` | `coupling.<s>.fan_in_max`, `coupling.<s>.fan_out_max` (the same graph; the python.py definition). Nodes are the production source set the complexity keys read (`.ts/.tsx/.js/.jsx/.mts/.cts/.mjs/.cjs`, no tests or `.d.ts`), so a stylesheet, image or `?raw`/`?url` import is no edge: an asset is not coupling |
+| | `--cycles` | `coupling.<s>.cycles` (dependency-cruiser `--no-config` graph of `--src`, same production filter, `--ts-pre-compilation-deps` so an `import type`/`type-import` edge is dropped alike in `.ts` and in a `.vue` `<script>`) |
+| | `--fan` | `coupling.<s>.fan_in_max`, `coupling.<s>.fan_out_max` (the same graph; the python.py definition). Nodes are the production source set the complexity keys read (`.ts/.tsx/.js/.jsx/.mts/.cts/.mjs/.cjs` and `.vue` as above, no tests or `.d.ts`); a component registered by an auto-import `.d.ts` or used only in a `<template>` is no edge, so a stylesheet, image or `?raw`/`?url` import is no edge: an asset is not coupling |
 | | `--bundle` | `bundle.<s>.kb_total` (every file `vite build` emits, raw KiB, one decimal), `bundle.<s>.kb_entry` (the `--bundle-entry` chunk, its static-import closure and their CSS) |
 | `rust.py` | `--cognitive` | `complexity.<s>.cognitive_max` (clippy `cognitive_complexity` at threshold 0, so every function is scored and the max is real; clippy's own metric, comparable to itself, not to sonarjs or complexipy), `complexity.<s>.cognitive_over_15` |
 | | `--dead` | `dead.<s>.rustc` (rustc's unused-code warnings: `dead_code`, `unused_imports`/`_variables`/`_assignments`/`_mut`/`_macros`/`_macro_rules`/`_labels`/`_extern_crates`, `unreachable_code`/`_patterns`; production targets only; a crate's `#![allow]` hides what it allows). No `cycles`: a module cycle inside one crate is legal and cargo refuses one between crates. Duplication is `jscpd.mjs` over the `.rs` dirs |
@@ -93,7 +93,7 @@ Exactly the keys each emits, per flag; `<s>` is `--scope`. CLIs: devkit README, 
 | `coverage.py` (area `job:<tier job>`) | `--coverage-json` | `coverage.<s>.lines` (covered_lines / num_statements), `coverage.<s>.branches` (covered_branches / num_branches; omitted when no branches were measured) |
 | | `--istanbul-summary` | `coverage.<s>.lines` (`total.lines.pct`), `coverage.<s>.branches` (`total.branches.pct`; omitted when "Unknown") |
 
-**Findings (`--list-out FILE`, `python.py`, `ts.mjs` and `rust.py`).** The lines behind the counts, for
+**Findings (`--list-out FILE`, `python.py`, `ts.mjs`, `rust.py` and `jscpd.mjs`).** The lines behind the counts, for
 a lane to work from; never a ratchet input, and the JSON is the same bytes with or without it.
 A `# <key>` header per key that has findings, then one line each; keys sorted; an empty file
 when nothing is over. Paths are `--root` joined with the tool's path, so repo-relative in a
@@ -105,7 +105,26 @@ identifier at the reported column, `<anonymous>` for an inline callback. Dead co
 `dependency`, `devDependency`, `unlisted`, `unresolved`, `binary`; no `:<line>` when knip has
 none), by path and line; a vulture reachability finding prints its message; rustc's is `<path>:<line> <lint> <message>` at the macro call site for a finding inside an expansion. `cycles`: one line
 per cycle, its files space-separated, largest first. `fan_in_max`, `fan_out_max`:
-`<path> fan_in=<n>`, the top 10, ties by path.
+`<path> fan_in=<n>`, the top 10, ties by path. `clones` (jscpd.mjs, whose paths are relative
+to the working directory, the repo root): one line per clone pair,
+`<pathA>:<start>-<end> ↔ <pathB>:<start>-<end> lines=<n>`, largest first, the two ends in
+path order.
+
+**Bundle keys and the label (2026-10-17).** `bundle.*` keys stay at tolerance 0: every KiB
+the first screen loads is a bound. Extracting a component or helper adds a sub-KiB rise the
+code did not earn as weight, because names survive minification (an export, a component name,
+an import specifier). That rise is the sanctioned use of `metrics-rebaseline`: run
+`make metrics-rebaseline KEYS=bundle.frontend.kb_total` (the moved key or keys, comma-separated;
+nothing else moves), commit `docs/metrics/ratchet.json`, label the PR `metrics-rebaseline`, and
+add a line to the repo's decisions.md naming the extraction and the KiB. Never hand-edit the
+bounds file. Anything past a KiB, or a rise with no extraction, is a regression to fix.
+Precedents: finplat #663, orbit #84, instalite #22, locus #127.
+
+**Vue components counted (2026-10-17).** Before, ts.mjs saw no `.vue` file, so a Vue repo's
+`complexity.<s>.*` and `coupling.<s>.*` measured its `.ts` alone. At the first sync after this
+change those keys RISE with no code change (orbit: `cognitive_max` 31 to 37, `fan_out_max` 10
+to 23; `fan_in_max`, report-only, 22 to 45). That sync PR carries the `metrics-rebaseline`
+label legitimately: the bound moves because the measurement widened, not because code got worse.
 
 **Coverage determinism.** vitest's V8 coverage remaps branches per worker unless
 `coverage.experimentalAstAwareRemapping: true` is set in the vitest config: locus saw 12 vs 13
@@ -165,6 +184,14 @@ summary, the comparison with main ignores it (dropping or moving its bound needs
 `tighten` leaves it, and `rebaseline` drops it and seeds none. A consumer whose bounds still
 hold `fan_in_max` needs nothing at its next devkit sync; its next `rebaseline` drops the entry,
 or a PR may delete it by hand.
+
+**`docs/metrics/report-only.json`** is the committed copy of the report-only keys:
+`metrics_collect.sh tighten` and `rebaseline` write it beside the bounds (a schema 2 snapshot,
+`--report-only` of the ratchet; a key whose collector was skipped keeps its committed value), and
+the author commits it with the bounds. `check` never writes or reads it, so it gates nothing. It
+exists because the bounds never hold these keys and `build/metrics.json` is untracked: without
+it a fresh clone's scorecard graded `sec.audit` UNMEASURED in every repo, vuln collector or not
+(devkit #76). The scorecard reads the bounds, then this file, then a fresh `build/metrics.json`.
 
 **`tighten` prints what the gate will refuse.** Every WORSE and MISSING key gets check's
 `ratchet <key> ...` line; the BETTER bounds are written, then the run exits 1 with a last

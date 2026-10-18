@@ -8,9 +8,16 @@
 # runs the old script). Rerunning make devkit-sync, now the new script, slims it.
 #
 # Also: every tracked .swift-format must equal devkit/lint/swift-format.json byte for byte.
+#
+# Also: scripts/ci/gate_plan.sh sets none of the plan variables this devkit retired
+# (DEVKIT_RETIRED_PLAN_VARS, bin/_paths_lib.sh). The gate sources main's _paths_lib.sh, so the
+# sync PR that retires one would pass its own gate and break the next PR's; this check, run
+# from the merged tree, fails the sync PR instead.
 set -euo pipefail
 # shellcheck source=bin/_vendor_paths.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_vendor_paths.sh"
+# shellcheck source=bin/_paths_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_paths_lib.sh"
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 # Both sides come from the INDEX, not HEAD or the working copy. In CI the index equals HEAD; in
@@ -61,4 +68,15 @@ while IFS= read -r copy; do
   fi
 done <<<"$(swift_format_copies)"
 [ "$copies" -eq 0 ] || exit 1
+# Assignments only: a comment naming a retired variable is history, not a setting.
+if plan=$(git show :scripts/ci/gate_plan.sh 2>/dev/null | awk '{ sub(/#.*/, "") } 1'); then
+  retired_set=0
+  for var in $DEVKIT_RETIRED_PLAN_VARS; do
+    if grep -qE "(^|[^A-Za-z0-9_])$var=" <<<"$plan"; then
+      echo "devkit-check: scripts/ci/gate_plan.sh sets $var; $DEVKIT_RETIRED_PLAN_ADVICE" >&2
+      retired_set=1
+    fi
+  done
+  [ "$retired_set" -eq 0 ] || exit 1
+fi
 echo "devkit-check: ok (${_commit:0:7})"

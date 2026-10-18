@@ -20,6 +20,12 @@ hand for a never-deployed branch; the output says which. When --base cannot be r
 shallow Actions checkout without origin/main) the check prints one SKIP line and judges nothing:
 a guard that cannot see the base must say so, not pass.
 
+Symlink check (every kind): any symlink under a --versions directory fails, shipped or new, file
+or directory. A migration is its own bytes: a link's target can change outside the directory
+with no diff under it, and the journal's append exemption would follow a link to any JSON that
+keeps the old entries (Codex on closet #406). git reports the swap of a file for a link as T,
+which counts as a shipped edit but never reaches that exemption (it is for M only).
+
 Pass-downgrade lint (--kind alembic, the default when a --versions path contains "alembic" or
 "migrations"; drizzle has no down files): a `def downgrade()` whose body is only `pass`,
 `...` and docstrings fails: write the downgrade, or raise with the reason
@@ -96,10 +102,24 @@ def shipped_edits(root: Path, base: str, dirs: list[str], kind: str) -> tuple[li
         edit, path = SHIPPED_EDITS.get(parts[0][0]), parts[1]
         if edit is None or path not in shipped:
             continue
-        if edit == "modified" and kind == "drizzle" and is_drizzle_journal(path) and journal_appended(root, base, path):
+        # M only: a T (file turned link) must not reach journal_appended, which reads through it.
+        if parts[0][0] == "M" and kind == "drizzle" and is_drizzle_journal(path) and journal_appended(root, base, path):
             continue
         hits.append(f"{path}: shipped migration {edit} (data.md 12: fix forward in a new migration; a never-deployed branch passes --allow-shipped-edits, a PR gets the migration-contract label)")
     return hits, len(shipped)
+
+
+def symlinks(root: Path, dirs: list[str]) -> list[str]:
+    """Every symlink under the migrations directories, in the working tree. os.walk does not
+    descend into a linked directory, so the link itself is the one hit."""
+    hits = []
+    for d in dirs:
+        for top, subdirs, files in os.walk(root / d):
+            for name in sorted(subdirs + files):
+                path = Path(top) / name
+                if path.is_symlink():
+                    hits.append(f"{path.relative_to(root)}: symlink in a migrations directory (data.md 12: a migration is its own bytes; a link's target changes with no diff here; commit the file itself)")
+    return hits
 
 
 def _body_is_empty(body: list[ast.stmt]) -> bool:
@@ -165,6 +185,7 @@ def main() -> int:
             print(f"migration-check: {len(edits)} shipped migration edit(s) allowed by --allow-shipped-edits (label migration-contract or a never-deployed branch)")
         else:
             hits.extend(edits)
+    hits.extend(symlinks(root, args.versions))
     files_n = 0
     if kind == "alembic":
         down_hits, files_n = pass_downgrades(root, args.versions)

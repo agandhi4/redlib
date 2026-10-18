@@ -64,6 +64,44 @@ const eslintConfig = defineConfig([
 ]);
 ```
 
+### sonarjs
+
+The base also exports two rule maps for eslint-plugin-sonarjs. `sonarjsRules` turns on
+`sonarjs/no-nested-conditional` and `sonarjs/no-duplicate-string` at threshold 3, sonar's
+default. Two refactor sweeps named them: finplat #663 and instalite #22 flattened nested
+load-state ternaries five times and turned copy-pasted JSX into tables four times, by hand.
+`sonarjsTestRules` turns the duplicate-string rule off again, for the repo's test-file layer.
+
+They are rule maps, not config objects, because a plugin's rules only resolve in a files scope
+that also registers the plugin, and that scope is the repo's. Every JS repo in the fleet pins
+eslint-plugin-sonarjs 4.2.x (closet, finplat, instalite, locus, orbit, rollcall); a repo
+without it ignores both exports. Adoption is one spread in the layer that already registers
+the plugin, plus one in the test layer, at the repo's next sync (the next-vercel scaffold ships
+both, so a new app starts with them):
+
+```js
+import base, { sonarjsRules, sonarjsTestRules } from "../devkit/lint/eslint.base.mjs"
+
+  {
+    files: ["**/*.{ts,tsx}"],
+    plugins: { sonarjs },
+    rules: { "sonarjs/cognitive-complexity": ["error", 15], ...sonarjsRules },
+  },
+  { files: ["**/*.test.{ts,tsx}", "e2e/**"], rules: sonarjsTestRules },
+```
+
+No repo is at 0 yet, so the adopting sync also fixes what the rules flag (read-only dry run on
+each origin/main, 2026-10-17, test files under the test layer):
+
+| Repo | no-nested-conditional | no-duplicate-string |
+|---|---|---|
+| locus | 4 | 0 |
+| instalite | 2 | 7 |
+| rollcall | 15 | 17 |
+| finplat | 92 | 18 |
+
+finplat's count wants a sweep lane of its own before its sync turns the rules on.
+
 ### Prettier
 
 eslint-plugin-prettier doubles the cost: it runs prettier as an eslint rule over the files
@@ -152,13 +190,14 @@ hands the tool the result as `--config`, opt-in per collector line. The merge is
 everywhere (`mergeConfig` in `metrics/_lib.mjs`, `merge_config` in `metrics/python.py`): lists
 are unions, base first, so a repo adds to an ignore list but cannot silently drop a base entry.
 Tables merge key by key, and any other repo value wins. Keep in the repo only what names its
-own code. Opting in can move the numbers, so the adopting PR runs `metrics-rebaseline` or
-`metrics-tighten`.
+own code. Opting in can move the numbers, so the adopting PR runs `make metrics-tighten`, or
+`make metrics-rebaseline KEYS=<key>[,<key>]` for the keys that rose (commit, then label the PR
+`metrics-rebaseline`).
 
 | Base | Collector flag | Holds | Stays in the repo |
 |---|---|---|---|
 | `knip.base.jsonc` | `ts.mjs --knip --knip-base` | `ignoreDependencies` for the tools devkit's collectors run (dependency-cruiser, eslint-plugin-sonarjs, jscpd); `ignore` `devkit/**` | entries, `paths`, `ignoreBinaries`, stack choices such as shadcn/ui's `src/components/ui/**` and openapi-typescript's `schema.d.ts` |
-| `jscpd.base.json` | `jscpd.mjs --base` | `ignore`: tests (`tests/`, `test/`, `__tests__/`, `test-helpers/`, `*.test.*`, `*.spec.*`, `test-setup.*`, `conftest.py`) and `*.d.ts` | `format`, extra ignores; `--min-tokens` stays a flag |
+| `jscpd.base.json` | `jscpd.mjs --base` | `ignore`: tests (`tests/`, `test/`, `__tests__/`, `test-helpers/`, `*.test.*`, `*.spec.*`, `test-setup.*`, `conftest.py`), `*.d.ts`, and non-code: `*.md`, `*.txt` (a font's OFL licence), `LICENSE`/`LICENCE`/`COPYING` and lockfiles | `format`, extra ignores; `--min-tokens` stays a flag |
 | `vulture.toml` | `python.py --vulture --vulture-base <set>[,<set>…]` | `[tool.vulture] min_confidence = 60`; decorator sets `fastapi`, `flask`, `pydantic`, `sqlalchemy` | `paths`, whitelist files, `ignore_names` |
 
 The repo config is read where the tool would read it: knip's `knip.json[c]`/`.knip.json[c]` or

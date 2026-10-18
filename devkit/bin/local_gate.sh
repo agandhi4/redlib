@@ -45,6 +45,10 @@
 #   Postgres with no timeout for an hour, holding the machine-wide lock (2026-10-13). The job's
 #   process group gets TERM (KILL after 10s), the status is `error`, the EXIT trap cleans up, and
 #   the run stops with GATE <job> WATCHDOG, VERDICT FAIL and exit 2: the box failed, not the code.
+#   The watchdog sees only jobs; the plan's gate_cleanup (EXIT trap) is bounded by
+#   GATE_CLEANUP_SECONDS (default 120) instead, and the docker scripts a job runs
+#   (throwaway_pg.sh, boot_image.sh) probe the daemon and bound every docker call themselves
+#   (bin/_timeout_lib.sh), so a hung daemon fails in seconds with one line, not 15 minutes.
 #
 # Budgets (owner directive 2026-10-13: whole gate <= 10 min, no job > 5 min): GATE_JOB_BUDGET_MINUTES
 #   (default 5) per job and GATE_BUDGET_MINUTES (default 10) for the whole gate, counted from the
@@ -92,7 +96,7 @@
 #   is worse than none. Both settings are environment-only test hooks.
 #
 # Per-machine defaults: ${XDG_CONFIG_HOME:-$HOME/.config}/devkit/gate.env, if present, holds
-#   GATE_SLOTS, GATE_SILENT_MINUTES, GATE_JOB_BUDGET_MINUTES, GATE_BUDGET_MINUTES,
+#   GATE_SLOTS, GATE_SILENT_MINUTES, GATE_CLEANUP_SECONDS, GATE_JOB_BUDGET_MINUTES, GATE_BUDGET_MINUTES,
 #   GATE_BUDGET_ENFORCE, GATE_LOAD_MAX and GATE_LOAD_WAIT_MINUTES `KEY=value` lines (blank lines and full-line `#` comments
 #   allowed; GATE_REMOTE* lines are gate.sh's and skipped). It is parsed, never sourced: any other
 #   key, quoting, `export` or other shell syntax is a usage error (exit 2) naming the line. An explicit environment variable wins over the
@@ -158,6 +162,9 @@ minutes_to_secs() {
     || { echo "local_gate: $1 must be a number of minutes (got '$2')" >&2; return 2; }
   awk -v m="$2" 'BEGIN { s = int(m * 60 + 0.5); print (m > 0 && s < 1) ? 1 : s }'
 }
+readonly CLEANUP_SECS=${GATE_CLEANUP_SECONDS:-120}
+[[ "$CLEANUP_SECS" =~ ^[1-9][0-9]*$ ]] \
+  || { echo "local_gate: GATE_CLEANUP_SECONDS must be a whole number of seconds >= 1 (got '$CLEANUP_SECS')" >&2; exit 2; }
 readonly SILENT_MINUTES=${GATE_SILENT_MINUTES:-15}
 SILENT_SECS=$(minutes_to_secs GATE_SILENT_MINUTES "$SILENT_MINUTES") || exit 2
 JOB_BUDGET_SECS=$(minutes_to_secs GATE_JOB_BUDGET_MINUTES "${GATE_JOB_BUDGET_MINUTES:-5}") || exit 2
@@ -197,6 +204,8 @@ GATE_ALLOW_FORKS=0   # set here, not read from the environment: only the plan ma
 # for the skeleton: a PR cannot change how its own paths are classified.
 # shellcheck source=bin/_paths_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_paths_lib.sh"
+# shellcheck source=bin/_timeout_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_timeout_lib.sh"
 # shellcheck source=/dev/null  # the repo's plan; its contract is in the header
 . "$PLAN"
 for required in GATE_SLUG GATE_STATE_NAME; do
@@ -314,7 +323,8 @@ post_status() { # <state> <description>; three attempts, a GitHub timeout used t
   for attempt in 1 2 3; do
     gh api "repos/$SLUG/statuses/$HEAD_SHA" \
       -f state="$1" -f context="$STATUS_CONTEXT" -f description="$2" >/dev/null 2>&1 && return 0
-    sleep $((attempt * 5))
+    # Backoff between attempts only (5 s, 10 s); GATE_STATUS_BACKOFF_SECONDS is a test hook.
+    [ "$attempt" = 3 ] || sleep $((attempt * ${GATE_STATUS_BACKOFF_SECONDS:-5}))
   done
   echo "local_gate: could not post $STATUS_CONTEXT=$1 on $HEAD_SHA after 3 attempts" >&2
 }
@@ -356,7 +366,10 @@ cleanup() {
   stop_job
   # An interrupted gate must not leave the PR showing `pending` forever.
   if [ "$STATUS_OPEN" = 1 ]; then post_status error "Local gate interrupted before a verdict"; fi
-  gate_cleanup >/dev/null 2>&1
+  # Bounded: a hung docker daemon made a plan's `docker rm -fv` block this trap for 12+ min
+  # while the gate held its machine-wide slot (2026-10-17).
+  devkit_with_timeout "$CLEANUP_SECS" gate_cleanup >/dev/null 2>&1
+  [ $? -ne 124 ] || echo "local_gate: gate_cleanup stopped after ${CLEANUP_SECS}s (a hung docker daemon?); containers may be left: docker ps" >&2
   git -C "$ROOT" worktree remove --force "$WT" >/dev/null 2>&1
   git -C "$ROOT" update-ref -d "$GATE_REF" >/dev/null 2>&1
 }

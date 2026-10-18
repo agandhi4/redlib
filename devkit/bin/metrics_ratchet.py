@@ -17,7 +17,11 @@ regression only from a gate run).
 Report-only keys (`vuln.*`, `coupling.<scope>.fan_in_max`; is_report_only): collected and
 printed, never gated, even when a bounds file still holds one. `check` prints them as
 REPORT-ONLY and ignores them in the comparison with main (dropping one needs no label),
-`tighten` leaves them, `rebaseline` drops them and seeds none. Why fan-in (lead decision
+`tighten` leaves them, `rebaseline` drops them and seeds none. With `--report-only FILE`,
+`tighten` and `rebaseline` also write the snapshot's report-only keys to FILE, a schema 2
+snapshot (metrics_collect.sh passes docs/metrics/report-only.json): the bounds never hold them
+and build/metrics.json is untracked, so this committed copy is what a fresh clone's scorecard
+reads (devkit #76). `check` never writes it and never reads it. Why fan-in (lead decision
 2026-10-17): a models or core hub has many importers by design, so its count is architecture,
 not drift; finplat #659 failed its gate because a new module imported the models hub. Fan-out
 (a god module) stays gated.
@@ -35,6 +39,16 @@ the gate plan reads the `metrics-rebaseline` PR label and passes `--rebaseline-o
 unreadable label means no flag, so the ratchet holds. The author produces the looser file with
 `rebaseline` (`make metrics-rebaseline`) and commits it.
 
+Why `rebaseline --keys` (2026-10-17): the whole-file rebaseline also moves every other bound
+to today's value (a skipped collector's keys aside) and seeds and drops keys, so a PR that
+meant to loosen one bundle bound loosened unrelated ones; five lanes (finplat #663 #665 #669,
+Orbit #84, locus #127) hand-edited ratchet.json instead. With `--keys K1,K2` only the named
+bounds move, each only when the snapshot is WORSE than it (loosened to the value); a named key
+that is SAME or BETTER is left and reported (`tighten` locks in a better one), and a key that
+is not a gated bound, or that the snapshot did not measure, is exit 2. Nothing is seeded or
+dropped. Without `--keys` the whole file is rewritten as before, ending with a WARNING that
+names every bound it loosened.
+
 What the label permits (Orbit #78/#79): COMMITTING bounds looser than main's, nothing else.
 Every measured value is still held to the PR's own bounds file in both modes, so a key the PR
 did not loosen cannot regress under the label. Before this, the label passed every WORSE key:
@@ -45,8 +59,8 @@ for a number the file does not admit.
 Usage:
   metrics_ratchet.py check --snapshot S --bounds B [--base-ref REF | --base-bounds F]
                            [--rebaseline-ok] [--show-untracked]
-  metrics_ratchet.py tighten --snapshot S --bounds B
-  metrics_ratchet.py rebaseline --snapshot S --bounds B
+  metrics_ratchet.py tighten --snapshot S --bounds B [--report-only F]
+  metrics_ratchet.py rebaseline --snapshot S --bounds B [--report-only F] [--keys K1,K2]
   metrics_ratchet.py merge --out OUT [--skipped NAME]... [--] [INPUT.json...]
 
 Key shape (docs/metrics-keys.md): flat dotted keys `<domain>.<scope>.<stat>`, numbers only,
@@ -105,6 +119,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -312,6 +327,43 @@ def write_bounds(path: Path, bounds: dict[str, Bound]) -> None:
     _atomic_write(path, json.dumps(doc, indent=2, sort_keys=True) + "\n")
 
 
+def _write_envelope(
+    path: Path, values: dict[str, float], sources: dict[str, str], skipped: list[str]
+) -> None:
+    """A schema 2 snapshot: what `merge` writes and what the report-only file is."""
+    doc = {
+        "schema_version": SNAPSHOT_SCHEMA,
+        "metrics": values,
+        "sources": sources,
+        "skipped": sorted(set(skipped)),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(path, json.dumps(doc, indent=2, sort_keys=True) + "\n")
+
+
+def write_report_only(path: Path, snapshot: Snapshot) -> None:
+    """Commit the report-only keys beside the bounds (docs/metrics/report-only.json), so the
+    scorecard of a fresh clone has them (devkit #76): the bounds never hold one, and
+    build/metrics.json is untracked. A key whose collector was skipped keeps its committed
+    value. A repo that collects no such key and has no file gets none."""
+    old = load_snapshot(path, allow_empty=True) if path.is_file() else None
+    values: dict[str, float] = {}
+    sources: dict[str, str] = {}
+    if old is not None:
+        for metric, value in old.values.items():
+            if old.sources.get(metric) in snapshot.skipped:
+                values[metric], sources[metric] = value, old.sources[metric]
+    for metric, value in snapshot.values.items():
+        if is_report_only(metric):
+            values[metric] = value
+            if metric in snapshot.sources:
+                sources[metric] = snapshot.sources[metric]
+    if old is None and not values:
+        return
+    _write_envelope(path, values, sources, [])
+    print(f"ratchet report-only {len(values)} key(s) written to {path} (commit it with the bounds)")
+
+
 def _with_value(metric: str, bound: Bound, snapshot: Snapshot) -> Bound:
     """The bound moved to the snapshot's value, carrying the snapshot's source for the key (a
     schema 1 or flat snapshot has none, and then the bound keeps the source it had)."""
@@ -414,6 +466,12 @@ def _status_line(metric: str, bound: Bound, snapshot: Snapshot, bounds_path: Pat
     return status
 
 
+def _rebaseline_command(keys: Iterable[str]) -> str:
+    """The command a fix line names: keyed to the WORSE keys, so it moves no other bound."""
+    named = ",".join(sorted(keys))
+    return f"`make metrics-rebaseline KEYS={named or '<key>[,<key>]'}`"
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     snapshot = load_snapshot(Path(args.snapshot), allow_empty=True)
     bounds_path = Path(args.bounds)
@@ -473,15 +531,16 @@ def cmd_check(args: argparse.Namespace) -> int:
         for metric, value, bound_value in worse:
             _fail(
                 f"metrics-rebaseline: {metric} {_fmt(value)} is past its bound "
-                f"{_fmt(bound_value)}; set the bound in {bounds_path} or fix the regression"
+                f"{_fmt(bound_value)}; `make metrics-rebaseline KEYS={metric}` and commit "
+                f"{bounds_path}, or fix the regression"
             )
         failed = True
     elif worse or (moved["loosened"] and not args.rebaseline_ok):
         _fail(
             f"ratchet FAIL: {len(worse)} metric(s) worse than their bound, "
             f"{moved['loosened']} bound(s) looser than main; fix them, or, if a tool change "
-            f"moved the numbers, commit the looser {bounds_path} (`make metrics-rebaseline`) "
-            "and label the PR metrics-rebaseline"
+            f"moved the numbers, commit the looser {bounds_path} "
+            f"({_rebaseline_command(m for m, _, _ in worse)}) and label the PR metrics-rebaseline"
         )
         failed = True
     if failed:
@@ -505,6 +564,7 @@ def cmd_tighten(args: argparse.Namespace) -> int:
     tightened = dict(bounds)
     changed = 0
     failing = {"WORSE": 0, "MISSING": 0}
+    worse: list[str] = []
     for metric in sorted(bounds):
         bound = bounds[metric]
         if is_report_only(metric):
@@ -519,9 +579,13 @@ def cmd_tighten(args: argparse.Namespace) -> int:
         status = _status_line(metric, bound, snapshot, bounds_path)
         if status in failing:
             failing[status] += 1
+        if status == "WORSE":
+            worse.append(metric)
     if changed:
         write_bounds(bounds_path, tightened)
     print(f"ratchet tightened {changed} bound(s) in {bounds_path}")
+    if args.report_only:
+        write_report_only(Path(args.report_only), snapshot)
     if not any(failing.values()):
         return EXIT_OK
     _fail(
@@ -529,18 +593,68 @@ def cmd_tighten(args: argparse.Namespace) -> int:
         f"{failing['MISSING']} absent from the snapshot; `make ci-metrics` and the gate will "
         "fail on them. Fix each WORSE regression (build/metrics/*.findings.txt names the code), "
         f"remove or rename a MISSING key in {bounds_path}, or, if a tool change moved the "
-        "numbers, run `make metrics-rebaseline`, commit the bounds and label the PR "
+        f"numbers, run {_rebaseline_command(worse)}, commit the bounds and label the PR "
         "metrics-rebaseline"
     )
     return EXIT_RATCHET
 
 
+def _parse_keys(text: str) -> list[str]:
+    keys = [k.strip() for k in text.split(",") if k.strip()]
+    if not keys:
+        raise InputError("--keys names no key (want K1[,K2...])")
+    for key in keys:
+        _check_key(key, "--keys")
+    return sorted(set(keys))
+
+
+def rebaseline_keys(
+    keys: list[str], snapshot: Snapshot, bounds: dict[str, Bound], bounds_path: Path
+) -> dict[str, Bound] | None:
+    """Loosen exactly `keys` to their measured values where WORSE; None when none moved."""
+    for key in keys:
+        if key not in bounds:
+            raise InputError(f"--keys {key}: not a bound in {bounds_path}")
+        if is_report_only(key):
+            raise InputError(f"--keys {key}: report-only, never gated; nothing to loosen")
+        if key not in snapshot.values:
+            collector = skipped_collector(key, bounds[key], snapshot)
+            why = f"collector {collector} did not run" if collector else "absent from it"
+            raise InputError(f"--keys {key}: the snapshot did not measure it ({why})")
+    rebased = dict(bounds)
+    loosened = 0
+    for key in keys:
+        bound = bounds[key]
+        value = snapshot.values[key]
+        status = "WORSE" if bound.bound is None else classify(value, bound.bound, bound.direction)
+        if status == "WORSE":
+            rebased[key] = _with_value(key, bound, snapshot)
+            loosened += 1
+            print(f"ratchet {key} {_fmt(bound.bound)} -> {_fmt(value)} LOOSENED")
+        else:
+            print(
+                f"ratchet {key} {_fmt(value)} vs {_fmt(bound.bound)} {status} (not worse; "
+                "left as is: `make metrics-tighten` locks in a better number)"
+            )
+    print(f"ratchet rebaselined {loosened} of {len(keys)} named bound(s) in {bounds_path}; "
+          "no other bound moved")
+    return rebased if loosened else None
+
+
 def cmd_rebaseline(args: argparse.Namespace) -> int:
-    """Overwrite every tracked bound with the snapshot value. A bound whose collector was
-    skipped is left as it is (there is no value to take); any other absent key is an error."""
+    """Overwrite every tracked bound with the snapshot value, or with --keys only the named
+    ones (rebaseline_keys). A bound whose collector was skipped is left as it is (there is no
+    value to take); any other absent key is an error."""
     snapshot = load_snapshot(Path(args.snapshot), allow_empty=True)
     bounds_path = Path(args.bounds)
     bounds = load_bounds(bounds_path)
+    if args.keys is not None:
+        keyed = rebaseline_keys(_parse_keys(args.keys), snapshot, bounds, bounds_path)
+        if keyed is not None:
+            write_bounds(bounds_path, keyed)
+        if args.report_only:
+            write_report_only(Path(args.report_only), snapshot)
+        return EXIT_OK
     missing = sorted(
         m
         for m, b in bounds.items()
@@ -559,6 +673,7 @@ def cmd_rebaseline(args: argparse.Namespace) -> int:
         return EXIT_RATCHET
     rebased: dict[str, Bound] = {}
     dropped = 0
+    loosened: list[str] = []
     for metric in sorted(bounds):
         bound = bounds[metric]
         if is_report_only(metric):
@@ -568,6 +683,10 @@ def cmd_rebaseline(args: argparse.Namespace) -> int:
         if metric in snapshot.values:
             rebased[metric] = _with_value(metric, bound, snapshot)
             print(f"ratchet {metric} {_fmt(bound.bound)} -> {_fmt(rebased[metric].bound)}")
+            if bound.bound is not None and classify(
+                snapshot.values[metric], bound.bound, bound.direction
+            ) == "WORSE":
+                loosened.append(metric)
         else:
             rebased[metric] = bound
             print(
@@ -592,11 +711,19 @@ def cmd_rebaseline(args: argparse.Namespace) -> int:
         seeded += 1
         print(f"ratchet {metric} - -> {_fmt(snapshot.values[metric])} (seeded, {direction})")
     write_bounds(bounds_path, rebased)
+    if args.report_only:
+        write_report_only(Path(args.report_only), snapshot)
     dropped_note = f", {dropped} report-only dropped" if dropped else ""
     print(
         f"ratchet rebaselined {len(rebased)} bound(s) in {bounds_path} "
         f"({seeded} seeded{dropped_note})"
     )
+    if loosened:
+        _fail(
+            f"ratchet WARNING: the whole-file rebaseline loosened {len(loosened)} bound(s): "
+            f"{', '.join(loosened)}. To loosen only the keys this PR moved, restore "
+            f"{bounds_path} and run `make metrics-rebaseline KEYS=<key>[,<key>]`"
+        )
     return EXIT_OK
 
 
@@ -614,21 +741,21 @@ def cmd_merge(args: argparse.Namespace) -> int:
             owner[key] = name
             sources[key] = Path(name).stem
             merged[key] = value
-    doc = {
-        "schema_version": SNAPSHOT_SCHEMA,
-        "metrics": merged,
-        "sources": sources,
-        "skipped": sorted(set(args.skipped)),
-    }
     out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(out, json.dumps(doc, indent=2, sort_keys=True) + "\n")
-    skipped_note = f"; skipped: {', '.join(doc['skipped'])}" if doc["skipped"] else ""
+    _write_envelope(out, merged, sources, args.skipped)
+    skipped = sorted(set(args.skipped))
+    skipped_note = f"; skipped: {', '.join(skipped)}" if skipped else ""
     print(
         f"ratchet merged {len(merged)} metric(s) from {len(args.inputs)} file(s) into {out}"
         f"{skipped_note}"
     )
     return EXIT_OK
+
+
+REPORT_ONLY_HELP = (
+    "also write the snapshot's report-only keys to FILE (docs/metrics/report-only.json), the "
+    "committed copy the scorecard reads"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -666,6 +793,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tighten.add_argument("--snapshot", required=True, help="metrics snapshot JSON")
     tighten.add_argument("--bounds", required=True, help="bounds JSON to rewrite")
+    tighten.add_argument("--report-only", metavar="FILE", help=REPORT_ONLY_HELP)
     tighten.set_defaults(func=cmd_tighten)
 
     rebaseline = sub.add_parser(
@@ -673,6 +801,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rebaseline.add_argument("--snapshot", required=True, help="metrics snapshot JSON")
     rebaseline.add_argument("--bounds", required=True, help="bounds JSON to rewrite")
+    rebaseline.add_argument("--report-only", metavar="FILE", help=REPORT_ONLY_HELP)
+    rebaseline.add_argument(
+        "--keys",
+        metavar="K1,K2",
+        help="loosen only these bounds, each only when the snapshot is worse; no other bound "
+        "moves, nothing is seeded or dropped",
+    )
     rebaseline.set_defaults(func=cmd_rebaseline)
 
     merge = sub.add_parser("merge", help="merge collector outputs into one snapshot envelope")

@@ -12,6 +12,9 @@ The rule (transaction-boundary-design.md, owner decisions 2026-10-13):
     exists) fails until its line is deleted. Growth across PRs is held by `metrics_ratchet.py`
     tracking the printed `own_commit_allowlist_entries` (direction lower).
 
+TypeScript has no session objects to trace: its form is guard_check.py's `own-transaction` kind
+(only the declared owner files or functions open or end a transaction).
+
 Why lexical and per function: a closure or callee that commits the outer function's session
 is exactly the hidden boundary the rule exists to prevent, so nested functions are their own
 scope. The helper's own body is exempt (it is the one sanctioned raw commit).

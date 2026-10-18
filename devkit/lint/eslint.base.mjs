@@ -32,3 +32,22 @@ export default [
     },
   },
 ];
+
+// eslint-plugin-sonarjs rules, as plain rule maps rather than config objects: the plugin must be
+// registered in the same files scope that uses its rules ("Could not find plugin" otherwise), and
+// only the repo knows that scope. So a repo spreads these into its own sonarjs layer
+// (lint/README.md "sonarjs"); a repo without the plugin ignores them. Both rules were named by
+// two refactor sweeps (finplat #663, instalite #22).
+export const sonarjsRules = {
+  // Nested ternaries were the load-state pattern (loading ? … : error ? … : …) flattened 5x.
+  "sonarjs/no-nested-conditional": "error",
+  // 3 is sonar's default; it catches the copy-pasted rows (instalite health.ts labels at 3x and
+  // 4x) that the sweeps turned into tables.
+  "sonarjs/no-duplicate-string": ["error", { threshold: 3 }],
+};
+
+// For the repo's test-file layer: repeated literals in tests (titles, fixture ids, expected
+// text) are the readable form, and they were 87% of the 2026-10-17 fleet dry run's duplicate-string findings.
+export const sonarjsTestRules = {
+  "sonarjs/no-duplicate-string": "off",
+};
