@@ -28,11 +28,11 @@ GATE_JOBS_BACKEND="unit ci-unit"
 GATE_JOBS_METRICS="metrics ci-metrics"
 GATE_JOBS_IMAGE="image ci-image CI_IMAGE=$IMAGE CI_BUILD_VERSION=gate-$PR"
 # Every app path builds the image (devkit 2026-10-17: a plan excludes paths, never areas). These
-# reach no stage's output: .github/ is in .dockerignore; the rest are copied by `COPY . ./` but
-# read by neither cargo build nor the release stage (only src/, static/, templates/, build.rs,
-# Cargo.* and rust-toolchain.toml are). .gitattributes stays out of this list: it changes the
+# reach no stage's output: `COPY . ./` copies them, but neither cargo build nor the release stage
+# reads them (only src/, static/, templates/, build.rs, Cargo.* and rust-toolchain.toml are). The
+# gate reads .dockerignore itself, so its paths (.github/) are not repeated here. .gitattributes stays out of this list: it changes the
 # checked-out bytes of the files include_str! embeds.
-GATE_IMAGE_EXCLUDE_PATHS='^(\.github/|scripts/|extensions/|docs/metrics/|\.githooks/|clippy\.toml$|rustfmt\.toml$|renovate\.json$|\.env\.example$|\.gitignore$|CREDITS$|LICENSE$)'
+GATE_IMAGE_EXCLUDE_PATHS='^(scripts/|extensions/|docs/metrics/|\.githooks/|clippy\.toml$|rustfmt\.toml$|renovate\.json$|\.env\.example$|\.gitignore$|CREDITS$|LICENSE$)'
 # Re-included from the scripts/ exclusion: this file declares the ci-image job.
 GATE_IMAGE_PATHS='^scripts/ci/gate_plan\.sh$'
 
