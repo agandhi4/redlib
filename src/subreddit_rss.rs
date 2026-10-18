@@ -1,9 +1,10 @@
 //! The subreddit RSS feed (`/r/:sub.rss`), enabled by `REDLIB_ENABLE_RSS`.
 
 use crate::config;
+use crate::model::{get_post_url, Post};
 use crate::server::RequestExt;
 use crate::subreddit::subreddit;
-use crate::utils::{self, error, format_url, rewrite_urls, to_absolute_url, Post};
+use crate::utils::{error, format_url, rewrite_urls, to_absolute_url};
 use chrono::DateTime;
 use htmlescape::decode_html;
 use hyper::{Body, Request, Response};
@@ -44,7 +45,7 @@ pub async fn rss(req: Request<Body>) -> Result<Response<Body>, String> {
 				.map(|post| {
 					let mut item = Item {
 						title: Some(post.title.to_string()),
-						link: Some(format_url(&utils::get_post_url(&post))),
+						link: Some(format_url(&get_post_url(&post))),
 						author: Some(post.author.name.to_string()),
 						content: Some(rewrite_urls(&decode_html(&post.body).unwrap())),
 						pub_date: Some(DateTime::from_timestamp(post.created_ts as i64, 0).unwrap_or_default().to_rfc2822()),

@@ -1,9 +1,10 @@
 //! Handler for post duplicates.
 
 use crate::client::json;
+use crate::model::{filter_posts, parse_post, Post};
 use crate::server::RequestExt;
 use crate::subreddit::{can_access_quarantine, quarantine};
-use crate::utils::{error, filter_posts, get_filters, nsfw_landing, parse_post, template, Post, Preferences};
+use crate::utils::{error, get_filters, nsfw_landing, template, Preferences};
 
 use askama::Template;
 use hyper::{Body, Request, Response};

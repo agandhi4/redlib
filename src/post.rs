@@ -2,12 +2,10 @@
 use crate::client::json;
 use crate::config::get_setting;
 use crate::db;
+use crate::model::{parse_post, Author, Awards, Comment, Flair, FlairPart, Post, Subreddit};
 use crate::server::RequestExt;
 use crate::subreddit::{can_access_quarantine, quarantine};
-use crate::utils::{
-	error, format_num, get_filters, nsfw_landing, param, parse_post, redirect, rewrite_emotes, setting, template, time, val, Author, Awards, Comment, Flair, FlairPart, Post,
-	Preferences, Subreddit,
-};
+use crate::utils::{error, format_num, get_filters, nsfw_landing, param, redirect, rewrite_emotes, setting, template, time, val, Preferences};
 use askama::Template;
 use cached::{Cached, TimedSizedCache};
 use hyper::{Body, Request, Response};

@@ -15,7 +15,7 @@
     "source": "rust-app"
   },
   "size.app.max_lines": {
-    "bound": 1775,
+    "bound": 1221,
     "direction": "lower",
     "source": "size-app"
   },

@@ -1,7 +1,8 @@
 #![allow(clippy::cmp_owned)]
 use crate::client::json;
+use crate::model::{filter_posts, get_post_url, Post, User};
 use crate::server::RequestExt;
-use crate::utils::{error, filter_posts, format_url, get_filters, nsfw_landing, param, setting, template, Post, Preferences, User};
+use crate::utils::{error, format_url, get_filters, nsfw_landing, param, setting, template, Preferences};
 use crate::{config, utils};
 use askama::Template;
 use chrono::DateTime;
@@ -163,7 +164,7 @@ pub async fn rss(req: Request<Body>) -> Result<Response<Body>, String> {
 				.into_iter()
 				.map(|post| Item {
 					title: Some(post.title.to_string()),
-					link: Some(format_url(&utils::get_post_url(&post))),
+					link: Some(format_url(&get_post_url(&post))),
 					author: Some(post.author.name),
 					pub_date: Some(DateTime::from_timestamp(post.created_ts as i64, 0).unwrap_or_default().to_rfc2822()),
 					content: Some(rewrite_urls(&decode_html(&post.body).unwrap_or_else(|_| post.body.clone()))),
