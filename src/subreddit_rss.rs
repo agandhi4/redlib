@@ -2,9 +2,10 @@
 
 use crate::config;
 use crate::model::{get_post_url, Post};
+use crate::rewrite::{format_url, rewrite_urls};
 use crate::server::RequestExt;
 use crate::subreddit::subreddit;
-use crate::utils::{error, format_url, rewrite_urls, to_absolute_url};
+use crate::utils::{error, to_absolute_url};
 use chrono::DateTime;
 use htmlescape::decode_html;
 use hyper::{Body, Request, Response};
