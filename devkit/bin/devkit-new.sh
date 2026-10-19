@@ -26,19 +26,20 @@
 #      symlink to AGENTS.md (owner decision 2026-10-12). A stack's .gitignore is appended to
 #      the common one (every other stack file with a common path replaces it).
 #   4. the parts that already exist elsewhere in devkit, copied, never re-typed: the git hooks
-#      (templates/githooks), the Renovate consumer file (renovate/consumer.example.json), the
+#      (the vendored devkit/templates/githooks: pre-commit, pre-push, commit-msg), the Renovate consumer file (renovate/consumer.example.json), the
 #      quick-check caller (templates/workflows; the reusable workflow sets up Node only when
 #      .nvmrc exists, so a Python-only repo needs no input; a stack whose ci-quick cannot run on
 #      Linux names its target in STACK_QUICK_CHECK_TARGET, passed as the caller's make-target)
 #   5. the stack's lock command (uv lock, npm install --package-lock-only), so the frozen
 #      install in ci-quick has a lockfile to be frozen to; none for a stack without one
-#   6. metrics_collect.sh rebaseline: the collectors scripts/ci/metrics.conf declares fill
+#   6. make metrics-rebaseline: the collectors scripts/ci/metrics.conf declares fill
 #      docs/metrics/ratchet.json, so `make ci-metrics` holds from the first commit
-#   7. core.hooksPath=.githooks, then ONE commit with everything. pre-commit runs
+#   7. scorecard.py --mode rebaseline: docs/metrics/scorecard.json, the WIRED share's first bound
+#   8. core.hooksPath=.githooks, then ONE commit with everything. pre-commit runs
 #      `make ci-quick` on the scaffold: devkit-check (index tree), toolchain-check, docs-check,
 #      release-check, workflows-check, the stack's own guards and linters. A scaffold the hooks
 #      refuse is a devkit bug, not a repo to fix by hand.
-#   8. the repo is registered in this checkout's github/repos.json (`"<name>": {}`, sorted as the
+#   9. the repo is registered in this checkout's github/repos.json (`"<name>": {}`, sorted as the
 #      file is): the fleet scorecard and the monthly audit iterate that file, so the repo is
 #      measured from its first commit (owner, 2026-10-18). Commit it to devkit in a PR.
 # The follow-ups that act on GitHub (creating the repo, settings and labels sync, Renovate
@@ -52,6 +53,8 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DEVKIT=$(cd "$HERE/.." && pwd)
 # shellcheck source=/dev/null  # bin/toolchain_path.sh: toolchain_path, shared with the gate and hooks
 . "$HERE/toolchain_path.sh"
+# shellcheck source=bin/_trailer_lib.sh  # devkit_commit_trailer, shared with devkit-sync and the commit-msg hook
+. "$HERE/_trailer_lib.sh"
 TEMPLATES=$DEVKIT/templates/new
 STACKS=$TEMPLATES/stacks
 
@@ -193,8 +196,12 @@ render_tree "$TEMPLATES/common"
 render_tree "$STACK_DIR"
 
 mkdir -p .githooks .github/workflows
-cp "$DEVKIT/templates/githooks/pre-commit" "$DEVKIT/templates/githooks/pre-push" .githooks/
-chmod +x .githooks/pre-commit .githooks/pre-push
+# From the vendored copy, not this checkout: the hooks source devkit/bin/hook_steps.sh, so they
+# must be the templates of the tree just vendored (DEVKIT_REF may name another commit).
+for hook in devkit/templates/githooks/*; do
+  cp "$hook" .githooks/
+  chmod +x ".githooks/${hook##*/}"
+done
 cp "$DEVKIT/renovate/consumer.example.json" renovate.json
 cp "$DEVKIT/templates/workflows/quick-check-caller.yml" .github/workflows/quick-check.yml
 # The caller's only input that varies by stack; the template ends inside the job, at its indent.
@@ -220,24 +227,41 @@ fi
 
 # The bounds for the first commit: metrics.conf's collectors (whatever the stack declares) run
 # once and fill docs/metrics/ratchet.json, so `make ci-metrics` holds on this tree. On the
-# pins, as the lock step: a collector may need the stack's node.
-echo "devkit-new: devkit/bin/metrics_collect.sh rebaseline"
+# pins, as the lock step: a collector may need the stack's node. The stack's own make target,
+# not the script: its prerequisite installs what the collectors run (the rust stack's
+# metrics-deps: jscpd in tools/metrics; a real `devkit new --stack rust` failed "jscpd is not
+# installed" when this called metrics_collect.sh directly). TIGHTEN_RUN_TIERS=1: a collector
+# that reads a tier's output (the rust stack's coverage) gets that tier run first, so the first
+# commit bounds coverage too instead of the rebaseline stopping on a missing report.
+echo "devkit-new: make metrics-rebaseline"
 (
   toolchain_path "$PWD" || die "$TOOLCHAIN_ERROR"
-  devkit/bin/metrics_collect.sh rebaseline
-) || die "metrics_collect.sh rebaseline failed; the stack's metrics.conf names a collector its scaffold cannot run"
+  TIGHTEN_RUN_TIERS=1 make --no-print-directory metrics-rebaseline
+) || die "make metrics-rebaseline failed; the stack's metrics.conf names a collector its scaffold cannot run"
 
 # Set directly rather than through hooks_check.sh --fix: that script is a no-op under CI, and
 # the first commit must run the hooks there too (the bats contract test runs in Actions).
 git config core.hooksPath .githooks
 git add -A
+# The WIRED ratchet's first bound, over the staged tree (scorecard.py reads the index), so the
+# scorecard_file check passes and ci-metrics holds the share from the first gate on. A new
+# project must read wired n/n; the share it commits is what a later PR may not lower.
+echo "devkit-new: devkit/bin/scorecard.py . --mode rebaseline"
+python3 -I devkit/bin/scorecard.py . --mode rebaseline || die "scorecard.py --mode rebaseline failed"
+git add docs/metrics/scorecard.json
 echo "devkit-new: first commit, through the hooks (pre-commit runs make ci-quick)"
+# The trailer from the chain the commit-msg hook's trailer step reads (_trailer_lib.sh), so an
+# agent's scaffold passes its own hook and a human's (DEVKIT_COMMIT_TRAILER= or devkit.trailer)
+# carries what they chose.
+TRAILER=$(devkit_commit_trailer)
 git commit -q -m "Create $NAME with devkit new ($STACK, devkit $DEVKIT_SHA7)
 
 Scaffolded by devkit/bin/devkit-new.sh: vendored devkit/, the standard ci-* Makefile,
 scripts/ci/gate_plan.sh, git hooks, the quick-check caller, Renovate's shared preset and
 the standard docs (README.md, AGENTS.md, docs/decisions.md, docs/architecture.md). This
-commit passed make ci-quick in its pre-commit hook."
+commit passed make ci-quick in its pre-commit hook.${TRAILER:+
+
+$TRAILER}"
 
 # Register last: a scaffold that failed above is not a repo the fleet should measure.
 if jq -e --arg n "$NAME" '.repos | keys | map(ascii_downcase) | index($n | ascii_downcase)' "$REPOS_FILE" >/dev/null; then

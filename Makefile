@@ -47,9 +47,16 @@ ci-typecheck: ## pre-push: clippy -D warnings, cognitive complexity 15
 # removes tests, saying why in docs/decisions.md. Both feed build/metrics/tier-unit.json.
 UNIT_BUDGET_SECONDS ?= 60
 UNIT_MIN_TESTS ?= 78
-ci-unit: ## cargo test, offline (live-Reddit tests are #[ignore]d), under the tier guard
-	devkit/bin/tier_guard.sh unit --budget $(UNIT_BUDGET_SECONDS) --floor cargo=$(UNIT_MIN_TESTS) \
-	  -- $(CARGO) test --locked
+# The unit tier produces line coverage (devkit docs/decisions.md 2026-10-18): cargo llvm-cov runs
+# the same `cargo test` instrumented and writes build/coverage.json, which metrics.conf's cov-app
+# converts. cargo-llvm-cov is no rustup component, so COV_TOOL is its one pin, installed once per
+# machine by cargo_tool.sh (llvm-tools comes from rust-toolchain.toml). The install runs before
+# the guard, so it is not the tier's time. llvm-cov writes into an existing directory only.
+COV_TOOL ?= devkit/bin/cargo_tool.sh cargo-llvm-cov@0.9.1 --
+ci-unit: ## cargo test with line coverage, offline (live-Reddit tests are #[ignore]d), under the tier guard
+	@mkdir -p build
+	$(COV_TOOL) devkit/bin/tier_guard.sh unit --budget $(UNIT_BUDGET_SECONDS) --floor cargo=$(UNIT_MIN_TESTS) \
+	  -- $(CARGO) llvm-cov --locked --json --summary-only --output-path build/coverage.json
 
 # Not part of any gate. Serial on purpose: client::CLIENT is one process-wide pooled HTTP client,
 # and every #[tokio::test] owns its own runtime. In parallel, a test's runtime shuts down while

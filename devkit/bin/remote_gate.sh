@@ -32,6 +32,15 @@
 # checkout with the same worktree names, and a worktree left by a killed run in one checkout
 # would make `worktree add` fail in the other. The machine-wide lock is still shared.
 #
+# The ledger comes back: after the host's gate exits (any code but ssh's own 255 and an
+# interrupt), a second short ssh call (remote_ledger) prints the host's runs.tsv rows of this PR
+# and its logs/<pr>/gate.json, and `gate_record.py import` merges them into this machine's
+# state dir (${XDG_STATE_HOME:-~/.local/state}/<GATE_STATE_NAME>), deduped by pr + head +
+# finished, so a rerun copies nothing twice. Without it a remote run's record stayed on the
+# host: gate_bite.py read no gates for a repo that gates remotely (locus), and pr_merge.sh fell
+# back to the status text for the gated main. A failed copy is one stderr line and never
+# changes the exit code.
+#
 # Interrupts: ssh's stdin is a pipe this script holds open and never writes. When this side
 # goes away (Ctrl-C, a killed agent, a closed connection) the host sees EOF and sends TERM to
 # local_gate.sh, whose EXIT trap stops the job, posts `error` and removes the worktree. Without
@@ -90,12 +99,9 @@ SLUG=$(gate_plan_literal "$PLAN" GATE_SLUG)
 # exactly the code shellcheck linted here.
 # shellcheck disable=SC2329  # invoked on the host, shipped via `declare -f`
 remote_main() {
-  local pr=$1 slug=$2 root=$3 dir repo url gate gate_pid watch_pid rc
+  local pr=$1 slug=$2 root dir repo url gate gate_pid watch_pid rc
+  root=$(remote_root_dir "$3")
   shift 3
-  case "$root" in
-    \~) root=$HOME ;;
-    \~/*) root=$HOME/${root#\~/} ;;
-  esac
   repo=${slug#*/}
   dir=$root/$repo
   for tool in git gh flock make; do
@@ -160,8 +166,31 @@ remote_main() {
   exit "$rc"
 }
 
-REMOTE_SCRIPT="$(declare -f remote_main); remote_main \"\$@\""
-case "$REMOTE_SCRIPT$REMOTE_ROOT" in
+# remote_root_dir <root>: GATE_REMOTE_ROOT with a leading `~` expanded on the host.
+# shellcheck disable=SC2329  # invoked on the host, shipped via `declare -f`
+remote_root_dir() {
+  case "$1" in
+    \~) echo "$HOME" ;;
+    \~/*) echo "$HOME/${1#\~/}" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# Runs on the host as `bash -c <this function> remote_gate <pr> <root> <state name>`: the
+# ledger gate_record.py import reads (its LEDGER_SEPARATOR is the `--- gate.json` line).
+# shellcheck disable=SC2329  # invoked on the host, shipped via `declare -f`
+remote_ledger() {
+  local pr=$1 state
+  state=$(remote_root_dir "$2")/.state/$3
+  if [ -f "$state/runs.tsv" ]; then awk -F "\t" -v pr="$pr" "\$2 == pr" "$state/runs.tsv"; fi
+  echo "--- gate.json"
+  if [ -f "$state/logs/$pr/gate.json" ]; then cat "$state/logs/$pr/gate.json"; fi
+}
+
+SHARED_SCRIPT=$(declare -f remote_root_dir)
+REMOTE_SCRIPT="$SHARED_SCRIPT; $(declare -f remote_main); remote_main \"\$@\""
+LEDGER_SCRIPT="$SHARED_SCRIPT; $(declare -f remote_ledger); remote_ledger \"\$@\""
+case "$REMOTE_SCRIPT$LEDGER_SCRIPT$REMOTE_ROOT" in
   *"'"*) echo "remote_gate: the remote command must not contain a single quote" >&2; exit 2 ;;
 esac
 REMOTE_CMD="bash -c '$REMOTE_SCRIPT' remote_gate $PR $SLUG '$REMOTE_ROOT' ${FORWARD[*]+"${FORWARD[*]}"}"
@@ -243,4 +272,26 @@ if [ "$rc" = 255 ]; then
   ssh_failure_hint "$HOST" "$last" >&2
   exit 2
 fi
+
+# copy_ledger: the host's record of this PR into this machine's state dir (header: The ledger
+# comes back). Every failure is a warning: the verdict above stands.
+copy_ledger() {
+  local state_name state
+  state_name=$(gate_plan_literal "$PLAN" GATE_STATE_NAME)
+  if [ -z "$state_name" ]; then
+    echo "remote_gate: WARNING: ledger not copied: $PLAN has no literal GATE_STATE_NAME= line" >&2
+    return
+  fi
+  state=${XDG_STATE_HOME:-$HOME/.local/state}/$state_name
+  # shellcheck disable=SC2029  # built here on purpose, as REMOTE_CMD
+  if ! ssh "${SSH_OPTS[@]}" "$HOST" "bash -c '$LEDGER_SCRIPT' remote_gate $PR '$REMOTE_ROOT' $state_name" \
+    </dev/null >"$TMP/ledger" 2>"$TMP/ledger.err"; then
+    echo "remote_gate: WARNING: ledger not copied from $HOST: $(tail -n 1 "$TMP/ledger.err")" >&2
+    return
+  fi
+  python3 -I "$HERE/gate_record.py" import --pr "$PR" --runs "$state/runs.tsv" \
+    --logdir "$state/logs/$PR" <"$TMP/ledger" >&2 \
+    || echo "remote_gate: WARNING: ledger from $HOST not merged into $state (above)" >&2
+}
+copy_ledger
 exit "$rc"

@@ -5,4 +5,4 @@
 # aarch64, by TARGETARCH), so nothing else downloads musl std it never builds.
 [toolchain]
 channel = "1.99.0"
-components = ["rustfmt", "clippy"]
+components = ["rustfmt", "clippy", "llvm-tools"]

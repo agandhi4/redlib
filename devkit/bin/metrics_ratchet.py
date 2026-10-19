@@ -56,10 +56,22 @@ to today's value (a skipped collector's keys aside) and seeds and drops keys, so
 meant to loosen one bundle bound loosened unrelated ones; five lanes (finplat #663 #665 #669,
 Orbit #84, locus #127) hand-edited ratchet.json instead. With `--keys K1,K2` only the named
 bounds move, each only when the snapshot is WORSE than it (loosened to the value); a named key
-that is SAME or BETTER is left and reported (`tighten` locks in a better one), and a key that
-is not a gated bound, or that the snapshot did not measure, is exit 2. Nothing is seeded or
-dropped. Without `--keys` the whole file is rewritten as before, ending with a WARNING that
-names every bound it loosened.
+that is SAME or BETTER is left and reported (`tighten` locks in a better one). A named key with
+no bound yet is seeded at its value (`ratchet <key> SEEDED <value>`), as `tighten --seed` would.
+A report-only or never-seeded key, or one the snapshot did not measure, is exit 2. Nothing else
+is seeded or dropped. Without `--keys` the whole file is rewritten as before, ending with a
+WARNING that names every bound it loosened: that path is for a label-approved loosening only
+(a tool change that moves everything), never to add a bound.
+
+Why `tighten --seed` (2026-10-18): adding a bound for a key the collectors started emitting is
+a tightening (`check` reads it as ADDED, no label), yet the only command that wrote one was the
+whole-file rebaseline, which also loosens; rollcall #74 rebaselined every bound to add two
+bundle keys. With `--seed` (`make metrics-tighten SEED=1`), every snapshot key without a bound
+is added at its value with its domain's direction (seed_bounds, the rule rebaseline seeds by),
+printing `ratchet <key> SEEDED <value>`. Without it, tighten counts the seedable keys and names
+the flag; `check` still reports them as untracked and passes, and its MISSING failure names the
+flag, since a renamed key is a MISSING old name plus an untracked new one. First adoption from
+`{}` or the starter's nulls is `tighten --seed` too.
 
 What the label permits (Orbit #78/#79): COMMITTING bounds looser than main's, nothing else.
 Every measured value is still held to the PR's own bounds file in both modes, so a key the PR
@@ -71,7 +83,7 @@ for a number the file does not admit.
 Usage:
   metrics_ratchet.py check --snapshot S --bounds B [--base-ref REF | --base-bounds F]
                            [--rebaseline-ok] [--show-untracked]
-  metrics_ratchet.py tighten --snapshot S --bounds B [--report-only F]
+  metrics_ratchet.py tighten --snapshot S --bounds B [--report-only F] [--seed]
   metrics_ratchet.py rebaseline --snapshot S --bounds B [--report-only F] [--keys K1,K2]
   metrics_ratchet.py merge --out OUT [--skipped NAME]... [--] [INPUT.json...]
 
@@ -411,6 +423,38 @@ def is_report_only(metric: str) -> bool:
     return parts[0] in REPORT_ONLY_DOMAINS or (parts[0], parts[-1]) in REPORT_ONLY_STATS
 
 
+def seedable(metric: str) -> bool:
+    """A key `rebaseline` and `tighten --seed` may add a bound for: not a never-seeded domain,
+    not report-only."""
+    return metric.partition(".")[0] not in NEVER_SEEDED_DOMAINS and not is_report_only(metric)
+
+
+def seed_bound(metric: str, snapshot: Snapshot, bounds_path: Path) -> Bound:
+    """A first bound for a seedable key, at its value, with the direction its domain fixes. A
+    key of a domain the table lacks is an error naming it: the repo adds it by hand."""
+    domain = metric.partition(".")[0]
+    direction = DOMAIN_DIRECTIONS.get(domain)
+    if direction is None:
+        raise InputError(
+            f"snapshot key {metric}: domain {domain!r} has no direction in "
+            f"docs/metrics-keys.md; add the key to {bounds_path} by hand with its direction"
+        )
+    return Bound(direction, snapshot.values[metric], snapshot.sources.get(metric))
+
+
+def seed_bounds(snapshot: Snapshot, bounds: dict[str, Bound], bounds_path: Path) -> dict[str, Bound]:
+    """A first bound for every seedable snapshot key the bounds do not track (rebaseline, and
+    tighten under --seed), in key order."""
+    return {
+        metric: seed_bound(metric, snapshot, bounds_path)
+        for metric in sorted(set(snapshot.values) - set(bounds))
+        if seedable(metric)
+    }
+
+
+SEED_HINT = "`make metrics-tighten SEED=1`"
+
+
 def _drop_report_only(metric: str, bound: Bound) -> None:
     """The line `tighten` and `rebaseline` print for a report-only bound they drop."""
     print(f"ratchet {metric} {_fmt(bound.bound)} -> - (dropped: report-only, never gated)")
@@ -569,7 +613,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     if counts["MISSING"]:
         _fail(
             f"ratchet FAIL: {counts['MISSING']} tracked metric(s) absent from the snapshot; "
-            f"remove or rename them in {bounds_path}"
+            f"remove or rename them in {bounds_path} (a renamed key's new name: run {SEED_HINT})"
         )
         failed = True
     if worse and args.rebaseline_ok:
@@ -606,11 +650,14 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 def cmd_tighten(args: argparse.Namespace) -> int:
     """Move every bound the snapshot beats to the snapshot value; never loosen any. A
-    report-only bound is dropped (no label needed: check ignores it against main). Every WORSE
-    and MISSING key prints check's line and makes the exit 1, after the write."""
+    report-only bound is dropped (no label needed: check ignores it against main). With --seed,
+    every seedable key without a bound gains one at its value. Every WORSE and MISSING key prints
+    check's line and makes the exit 1, after the write."""
     snapshot = load_snapshot(Path(args.snapshot), allow_empty=True)
     bounds_path = Path(args.bounds)
     bounds = load_bounds(bounds_path)
+    # Resolved before anything is written: an unknown domain is exit 2 with the file untouched.
+    seeds = seed_bounds(snapshot, bounds, bounds_path) if args.seed else {}
     tightened = dict(bounds)
     changed = dropped = 0
     failing = {"WORSE": 0, "MISSING": 0}
@@ -639,10 +686,23 @@ def cmd_tighten(args: argparse.Namespace) -> int:
             failing[status] += 1
         if status == "WORSE":
             worse.append(metric)
-    if changed or dropped:
+    for metric, seed in seeds.items():
+        tightened[metric] = seed
+        print(f"ratchet {metric} SEEDED {_fmt(seed.bound)}")
+    if changed or dropped or seeds:
         write_bounds(bounds_path, tightened)
-    dropped_note = f" ({dropped} report-only dropped)" if dropped else ""
-    print(f"ratchet tightened {changed} bound(s) in {bounds_path}{dropped_note}")
+    notes = [f"{len(seeds)} seeded"] if seeds else []
+    if dropped:
+        notes.append(f"{dropped} report-only dropped")
+    notes_s = f" ({', '.join(notes)})" if notes else ""
+    print(f"ratchet tightened {changed} bound(s) in {bounds_path}{notes_s}")
+    if not args.seed:
+        unbounded = [m for m in sorted(set(snapshot.values) - set(bounds)) if seedable(m)]
+        if unbounded:
+            print(
+                f"ratchet untracked {len(unbounded)} key(s) without a bound "
+                f"({', '.join(unbounded)}); {SEED_HINT} adds them at today's value"
+            )
     if args.report_only:
         write_report_only(Path(args.report_only), snapshot)
     if not any(failing.values()):
@@ -651,7 +711,8 @@ def cmd_tighten(args: argparse.Namespace) -> int:
         f"ratchet FAIL: {failing['WORSE']} metric(s) worse than their bound and "
         f"{failing['MISSING']} absent from the snapshot; `make ci-metrics` and the gate will "
         "fail on them. Fix each WORSE regression (build/metrics/*.findings.txt names the code), "
-        f"remove or rename a MISSING key in {bounds_path}, or, if a tool change moved the "
+        f"remove or rename a MISSING key in {bounds_path} ({SEED_HINT} bounds a renamed key's new "
+        "name), or, if a tool change moved the "
         f"numbers, run {_rebaseline_command(worse)}, commit the bounds and label the PR "
         "metrics-rebaseline"
     )
@@ -670,21 +731,33 @@ def _parse_keys(text: str) -> list[str]:
 def rebaseline_keys(
     keys: list[str], snapshot: Snapshot, bounds: dict[str, Bound], bounds_path: Path
 ) -> dict[str, Bound] | None:
-    """Loosen exactly `keys` to their measured values where WORSE; None when none moved."""
+    """Loosen exactly `keys` to their measured values where WORSE, and seed a named key that has
+    no bound yet; None when none moved."""
     for key in keys:
-        if key not in bounds:
-            raise InputError(f"--keys {key}: not a bound in {bounds_path}")
         if is_report_only(key):
             raise InputError(f"--keys {key}: report-only, never gated; nothing to loosen")
-        if key not in snapshot.values:
+        if key not in bounds:
+            if key not in snapshot.values:
+                raise InputError(
+                    f"--keys {key}: not a bound in {bounds_path} and not in the snapshot"
+                )
+            if not seedable(key):
+                raise InputError(f"--keys {key}: its domain is never bounded (gate, tier, tests)")
+        elif key not in snapshot.values:
             collector = skipped_collector(key, bounds[key], snapshot)
             why = f"collector {collector} did not run" if collector else "absent from it"
             raise InputError(f"--keys {key}: the snapshot did not measure it ({why})")
     rebased = dict(bounds)
     loosened = 0
+    seeded = 0
     for key in keys:
-        bound = bounds[key]
         value = snapshot.values[key]
+        if key not in bounds:
+            rebased[key] = seed_bound(key, snapshot, bounds_path)
+            seeded += 1
+            print(f"ratchet {key} SEEDED {_fmt(value)}")
+            continue
+        bound = bounds[key]
         status = "WORSE" if bound.bound is None else classify(value, bound.bound, bound.direction)
         if status == "WORSE":
             rebased[key] = _with_value(key, bound, snapshot)
@@ -695,9 +768,10 @@ def rebaseline_keys(
                 f"ratchet {key} {_fmt(value)} vs {_fmt(bound.bound)} {status} (not worse; "
                 "left as is: `make metrics-tighten` locks in a better number)"
             )
-    print(f"ratchet rebaselined {loosened} of {len(keys)} named bound(s) in {bounds_path}; "
-          "no other bound moved")
-    return rebased if loosened else None
+    seeded_note = f", seeded {seeded}" if seeded else ""
+    print(f"ratchet rebaselined {loosened} of {len(keys)} named bound(s) in {bounds_path}"
+          f"{seeded_note}; no other bound moved")
+    return rebased if loosened or seeded else None
 
 
 def cmd_rebaseline(args: argparse.Namespace) -> int:
@@ -755,20 +829,11 @@ def cmd_rebaseline(args: argparse.Namespace) -> int:
     # Seed what the snapshot has and the bounds do not, so adoption starts from `{}`: every
     # key except the never-seeded domains and the report-only keys, with the direction its
     # domain fixes.
-    seeded = 0
-    for metric in sorted(set(snapshot.values) - set(bounds)):
-        domain = metric.partition(".")[0]
-        if domain in NEVER_SEEDED_DOMAINS or is_report_only(metric):
-            continue
-        direction = DOMAIN_DIRECTIONS.get(domain)
-        if direction is None:
-            raise InputError(
-                f"snapshot key {metric}: domain {domain!r} has no direction in "
-                f"docs/metrics-keys.md; add the key to {bounds_path} by hand with its direction"
-            )
-        rebased[metric] = Bound(direction, snapshot.values[metric], snapshot.sources.get(metric))
-        seeded += 1
-        print(f"ratchet {metric} - -> {_fmt(snapshot.values[metric])} (seeded, {direction})")
+    seeds = seed_bounds(snapshot, bounds, bounds_path)
+    for metric, seed in seeds.items():
+        rebased[metric] = seed
+        print(f"ratchet {metric} - -> {_fmt(seed.bound)} (seeded, {seed.direction})")
+    seeded = len(seeds)
     write_bounds(bounds_path, rebased)
     if args.report_only:
         write_report_only(Path(args.report_only), snapshot)
@@ -853,6 +918,12 @@ def build_parser() -> argparse.ArgumentParser:
     tighten.add_argument("--snapshot", required=True, help="metrics snapshot JSON")
     tighten.add_argument("--bounds", required=True, help="bounds JSON to rewrite")
     tighten.add_argument("--report-only", metavar="FILE", help=REPORT_ONLY_HELP)
+    tighten.add_argument(
+        "--seed",
+        action="store_true",
+        help="also add a bound at today's value for every snapshot key without one (the "
+        "direction from its domain); never seeds gate, tier, tests or report-only keys",
+    )
     tighten.set_defaults(func=cmd_tighten)
 
     rebaseline = sub.add_parser(

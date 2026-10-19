@@ -9,14 +9,20 @@ collector only converts it. One line in scripts/ci/metrics.conf, for example:
   cov-frontend job:unit-frontend python3 -I devkit/metrics/coverage.py --scope frontend \\
       --istanbul-summary frontend/coverage/coverage-summary.json \\
       --out build/metrics/cov-frontend.json
+  cov-app      job:unit          python3 -I devkit/metrics/coverage.py --scope app \\
+      --llvm-cov-json build/coverage.json --out build/metrics/cov-app.json
 
 Keys (docs/metrics-keys.md, direction higher), percentages with two decimals as the tools
 give them:
-  coverage.<scope>.lines      coverage.py: covered_lines / num_statements; istanbul: lines.pct
+  coverage.<scope>.lines      coverage.py: covered_lines / num_statements; istanbul: lines.pct;
+                              llvm-cov: lines.covered / lines.count
   coverage.<scope>.branches   coverage.py: covered_branches / num_branches; istanbul:
-                              branches.pct. Omitted when the run measured no branches (branch
-                              coverage off), so a tracked branches bound then reads MISSING:
-                              turn branch coverage on in the tier rather than drop the bound.
+                              branches.pct; llvm-cov: branches.covered / branches.count. Omitted
+                              when the run measured no branches (branch coverage off), so a
+                              tracked branches bound then reads MISSING: turn branch coverage on
+                              in the tier rather than drop the bound. Rust on a stable toolchain
+                              never has branches: rustc's branch instrumentation is nightly-only
+                              (`-Z coverage-options=branch`), so a Rust tier emits lines alone.
 
 A missing report is exit 2 with "run make ci-unit-<scope> first": outside the gate the author
 runs the tier first. In the gate the `job:<tier job>` area makes metrics_collect.sh run this
@@ -105,6 +111,37 @@ def from_istanbul(path: Path, scope: str) -> dict[str, float]:
     return out
 
 
+def from_llvm_cov(path: Path, scope: str) -> dict[str, float]:
+    """`cargo llvm-cov --json [--summary-only]` (llvm-cov's export): `data[0].totals.<kind>`
+    with `count` and `covered`. Recomputed from the counts like coverage.py's, since `percent`
+    is an unrounded float. One `data` entry per export; a second would be a merged report this
+    collector does not read. Gotcha: inline `#[cfg(test)] mod tests` lines are in the counts
+    (llvm-cov sees one file), so test code counts as covered lines."""
+    doc = _read_report(path, scope)
+    if not isinstance(doc, dict) or doc.get("type") != "llvm.coverage.json.export":
+        raise CollectorError(f"{path}: not an llvm-cov export (type llvm.coverage.json.export)")
+    data = doc.get("data")
+    if not isinstance(data, list) or len(data) != 1:
+        held = len(data) if isinstance(data, list) else "no"
+        raise CollectorError(f"{path}: the export holds {held} `data` entries, not one")
+    totals = data[0].get("totals") if isinstance(data[0], dict) else None
+    if not isinstance(totals, dict):
+        raise CollectorError(f"{path}: the export has no `totals`")
+
+    def counts(kind: str) -> tuple[object, object]:
+        entry = totals.get(kind)
+        return (entry.get("covered"), entry.get("count")) if isinstance(entry, dict) else (0, 0)
+
+    lines = _percent(*counts("lines"), "line", path)
+    if lines is None:
+        raise CollectorError(f"{path}: the export measured no lines")
+    out = {f"coverage.{scope}.lines": lines}
+    branches = _percent(*counts("branches"), "branch", path)
+    if branches is not None:
+        out[f"coverage.{scope}.branches"] = branches
+    return out
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="coverage.py", description="A tier's coverage report as coverage.<scope>.* keys."
@@ -114,6 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--coverage-json", metavar="FILE", help="coverage.py `coverage json`")
     source.add_argument("--istanbul-summary", metavar="FILE", help="istanbul coverage-summary.json")
+    source.add_argument("--llvm-cov-json", metavar="FILE", help="cargo llvm-cov --json export")
     return parser
 
 
@@ -124,8 +162,10 @@ def main(argv: list[str] | None = None) -> int:
             raise CollectorError(f"--scope {args.scope!r} must match [A-Za-z0-9_-]+")
         if args.coverage_json:
             doc = from_coverage_py(Path(args.coverage_json), args.scope)
-        else:
+        elif args.istanbul_summary:
             doc = from_istanbul(Path(args.istanbul_summary), args.scope)
+        else:
+            doc = from_llvm_cov(Path(args.llvm_cov_json), args.scope)
     except CollectorError as exc:
         print(f"metrics/coverage.py: {exc}", file=sys.stderr)
         return EXIT_USAGE

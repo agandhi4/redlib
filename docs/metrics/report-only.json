@@ -1,5 +1,6 @@
 {
   "metrics": {
+    "coupling.app.fan_in_max": 12,
     "size.app.max_lines": 572,
     "size.app.over_600": 0,
     "vuln.app.critical": 0,
@@ -10,6 +11,7 @@
   "schema_version": 2,
   "skipped": [],
   "sources": {
+    "coupling.app.fan_in_max": "rust-app",
     "size.app.max_lines": "size-app",
     "size.app.over_600": "size-app",
     "vuln.app.critical": "vuln-app",

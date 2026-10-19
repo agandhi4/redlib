@@ -11,7 +11,8 @@
 #   base_copies
 #       "<base path in devkit> <repo path>" for each tracked file that must be a byte copy of a
 #       vendored base: every swift_format_copies line, and .githooks/<hook> for each hook in
-#       templates/githooks (the monthly audit's hook-differs). Read by devkit-sync.sh.
+#       templates/githooks (the monthly audit's hook-differs), tracked or not once the repo
+#       tracks any of them (devkit-sync.sh then creates it). Read by devkit-sync.sh.
 #
 #   vendor_filter_tree <tree> <manifest text>
 #       Print the hash of a tree holding only <tree>'s entries under the manifest's paths (modes,
@@ -54,13 +55,17 @@ base_copies() {
   while IFS= read -r copy; do
     [ -z "$copy" ] || echo "lint/swift-format.json $copy"
   done <<<"$(swift_format_copies)"
-  # The template names come from the repo's own vendored devkit/ (the index): a hook upstream
-  # adds is not tracked yet, so it has no copy to refresh either way.
+  # The template names come from the repo's own vendored devkit/ (the index, which a sync has
+  # just replaced). A repo that tracks one hook copy has adopted the hooks, so a hook upstream
+  # adds is listed too and the sync creates it; a repo with none gets none.
+  local templates adopted=0
+  templates=$(git ls-files -- devkit/templates/githooks/)
   while IFS= read -r hook; do
     [ -n "$hook" ] || continue
-    hook=${hook##*/}
-    if git ls-files --error-unmatch -- ".githooks/$hook" >/dev/null 2>&1; then
-      echo "templates/githooks/$hook .githooks/$hook"
-    fi
-  done <<<"$(git ls-files -- devkit/templates/githooks/)"
+    ! git ls-files --error-unmatch -- ".githooks/${hook##*/}" >/dev/null 2>&1 || adopted=1
+  done <<<"$templates"
+  [ "$adopted" = 1 ] || return 0
+  while IFS= read -r hook; do
+    [ -z "$hook" ] || echo "templates/githooks/${hook##*/} .githooks/${hook##*/}"
+  done <<<"$templates"
 }

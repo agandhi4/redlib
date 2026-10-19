@@ -132,3 +132,9 @@ Consequence: WIRED still misses jscpd duplication (no Rust key yet), contract_pr
 Why: devkit 86c0f93 (#147). A hand-run `make ci-quick` failed "cargo: No such file or directory" on the Mac, which has no Rust, while the gate and hooks passed. WIRED counted contract_probe as a miss though the image-smoke delta already rules it out.
 Decision: `CARGO ?= devkit/bin/toolchain_exec.sh cargo`, the same pinned PATH the gate and hooks build. The "No image smoke" delta now carries `scorecard: contract_probe`: no listener answers without live Reddit OAuth, so there is nothing to probe. WIRED share 0.833 to 0.917.
 Consequence: WIRED misses only duplication, which stays unwired because jscpd would bring npm tooling into a Rust repo (owner delta 2026-10-17).
+
+## 2026-10-18 — Rust coverage, module cycles and fan measured
+Why: devkit ff4e765 (#151 to #153) ships Rust collectors for line coverage and the module graph; WIRED read 16/20 with ratchet.coverage, .cycles and .fan_out failing.
+Decision: ci-unit runs the same tests under `cargo llvm-cov` (pinned by `COV_TOOL`, `llvm-tools` in rust-toolchain.toml) and writes build/coverage.json; metrics.conf adds `cov-app` and `rust.py --cycles --fan`. Seeded coverage.app.lines 34.1, coupling.app.cycles 1, fan_out_max 9 (post.rs); fan_in_max 12 (server.rs) is report-only. Unit budget stays 60 s: the instrumented tier is 27 s cold, 5 s warm (28 s and 1 s before).
+Cycle (a signal, not refactored here; a future lane decides): client.rs and oauth.rs/oauth_device.rs need each other (the pooled CLIENT versus the token), and client.rs reaches model.rs, which pulls utils.rs and media.rs back to `client::json`.
+Consequence: WIRED 16/20 to 19/20, missing only duplication (owner delta). The image build's toolchain layer now also downloads llvm-tools.
