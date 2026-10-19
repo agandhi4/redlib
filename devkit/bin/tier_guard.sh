@@ -48,7 +48,7 @@ set -uo pipefail
 # shellcheck source=bin/_load_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_load_lib.sh"
 
-RUNNERS="pytest vitest playwright cargo"
+RUNNERS="pytest vitest playwright cargo bats"
 
 usage() {
   echo "usage: $0 <tier> --budget <seconds> [--floor <runner>=<min>]... -- <command...>" >&2
@@ -61,7 +61,10 @@ die() { echo "tier_guard: $*" >&2; exit 2; }
 # tests that ran, or nothing when no summary line for that runner appeared. The patterns are
 # anchored so one runner's summary never matches another's (locus runs pytest then vitest in
 # one command): pytest's ends in " in <n>s", vitest's starts with "Tests", Playwright's is
-# indented exactly two spaces, cargo's starts with "test result:".
+# indented exactly two spaces, cargo's starts with "test result:". bats has no summary in its
+# TAP output (what it prints when stdout is no terminal, as here): its plan line `1..<n>` marks
+# a run and every `ok`/`not ok` line without `# skip` is a test that ran; its pretty formatter's
+# "<n> tests, <f> failures, <s> skipped" line is read too.
 tier_count() {
   awk -v runner="$1" '
     { sub(/\r$/, "") }
@@ -94,6 +97,19 @@ tier_count() {
       # "  1 failed" / "  1 flaky" / "  2 passed (935ms)"; skipped and "did not run" are left out
       seen = 1
       total += $1
+      next
+    }
+    runner == "bats" && /^1\.\.[0-9]+$/ { seen = 1; next }
+    runner == "bats" && /^(ok|not ok) [0-9]+( |$)/ {
+      # "ok 2 skips # skip not here" ran nothing; "not ok 3 fails" ran and failed
+      if ($0 !~ / # [Ss][Kk][Ii][Pp]( |$)/) total += 1
+      next
+    }
+    runner == "bats" && /^[0-9]+ tests?, [0-9]+ failures?/ {
+      # "4 tests, 1 failure, 1 skipped" (--formatter pretty)
+      seen = 1
+      total += $1
+      if (match($0, /, [0-9]+ skipped/)) total -= substr($0, RSTART + 2, RLENGTH - 10)
       next
     }
     runner == "cargo" && /^test result: / {

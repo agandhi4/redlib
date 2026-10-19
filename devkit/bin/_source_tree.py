@@ -9,9 +9,10 @@ double-quoted string that holds spaces or `#` (guard_check's only-text PATTERN: 
 there is no escape, so a pattern holding `"` is written as a /REGEX/ with `\x22`. The keys every
 section takes:
 
-  lang     python | ts
+  lang     python | ts | compose (guards.conf only: the compose-* rules)
   root     DIR          the tree's directory, relative to the repo root; globs are relative to it
-  src      PATH ...     what to scan (python: as metrics/python.py --src)
+  src      PATH ...     what to scan (python: as metrics/python.py --src; compose: the
+                        compose files under it, bin/_compose.py COMPOSE_NAMES)
   exclude  GLOB ...     files to leave out (tests colocated in src/)
   alias    PREFIX DIR   ts: a specifier prefix and the directory it stands for (`@/ src/`)
 
@@ -38,7 +39,9 @@ from typing import TypeVar
 
 SECTION_NAME = re.compile(r"[A-Za-z0-9_-]+")
 GLOB_CHARS = re.compile(r"[*?\[]")
-LANGS = ("python", "ts")
+LANGS = ("python", "ts")  # the code languages: every rule kind that reads both
+# What `lang` takes: compose is guard_check's alone (the compose-* rules); layer_check refuses it.
+TREE_LANGS = (*LANGS, "compose")
 TS_EXTS = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
 # A specifier written with the emitted extension names the TypeScript source (`./x.js` -> x.ts).
 TS_EMITTED = {".js": (".ts", ".tsx"), ".jsx": (".tsx",), ".mjs": (".mts",), ".cjs": (".cts",)}
@@ -86,6 +89,10 @@ def python_metrics() -> ModuleType:
 
 def ts_lex() -> ModuleType:
     return load("bin/_ts_lex.py", "devkit_ts_lex")
+
+
+def compose() -> ModuleType:
+    return load("bin/_compose.py", "devkit_compose")
 
 
 # ------------------------------------------------------------------------------------ conf
@@ -169,8 +176,8 @@ def _tree_key(tree: SourceTree, word: str, args: list[str], where: str) -> None:
     if word in ("lang", "root"):
         if len(args) != 1:
             raise ConfError(f"{where}: `{word}` takes one value")
-        if word == "lang" and args[0] not in LANGS:
-            raise ConfError(f"{where}: lang is one of {', '.join(LANGS)}")
+        if word == "lang" and args[0] not in TREE_LANGS:
+            raise ConfError(f"{where}: lang is one of {', '.join(TREE_LANGS)}")
         setattr(tree, word, args[0])
     elif word in ("src", "exclude"):
         if not args:
@@ -238,6 +245,25 @@ def ts_files(tree: SourceTree, root: Path) -> list[str]:
             if (
                 path.is_file()
                 and path.suffix in (*TS_EXTS, *SFC_EXTS)
+                and not any(p.startswith(".") or p in ALWAYS_SKIPPED_DIRS for p in rel.parts[:-1])
+                and not tree.excluded(rel.as_posix())
+            ):
+                found.add(rel.as_posix())
+    return sorted(found)
+
+
+def compose_files(tree: SourceTree, root: Path) -> list[str]:
+    """Root-relative compose files of the tree (`compose.yaml`, `docker-compose.yml`, their
+    `.override`/`.<env>` variants); dot-directories and node_modules skipped."""
+    is_compose = compose().is_compose_file
+    found: set[str] = set()
+    for entry in tree.src:
+        base = root / entry
+        for path in base.rglob("*") if base.is_dir() else [base]:
+            rel = path.relative_to(root)
+            if (
+                path.is_file()
+                and is_compose(path.name)
                 and not any(p.startswith(".") or p in ALWAYS_SKIPPED_DIRS for p in rel.parts[:-1])
                 and not tree.excluded(rel.as_posix())
             ):

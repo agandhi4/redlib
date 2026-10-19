@@ -17,7 +17,7 @@ import io
 import itertools
 import re
 import tokenize
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 from typing import Protocol
@@ -1398,3 +1398,95 @@ def ts_call_arg_ban(file: TsFile, patterns: Sequence[CalleePattern], shapes: Seq
         if hit is not None:
             hits.append(hit)
     return _keep_first(hits)
+
+
+# ------------------------------------------------------------------------------- compose
+
+
+class ComposeImage(Protocol):
+    @property
+    def unpinned(self) -> bool: ...
+
+
+class ComposeService(Protocol):
+    """bin/_compose.py's Service: `extends` resolved, anchors and merge keys expanded."""
+
+    name: str
+    line: int
+    spec: dict
+
+    @property
+    def image(self) -> ComposeImage | None: ...
+
+
+@dataclass(frozen=True)
+class ComposeFile:
+    services: Sequence[ComposeService]
+
+
+def _service_hits(
+    file: ComposeFile, selects: tuple[str, ...], fails: Callable[[ComposeService], str | None]
+) -> Judged:
+    """A Hit per judged service that `fails`, which returns the message template (its
+    `{names}` is the service) or None. A service is judged when it holds one of `selects`
+    (every service when empty); the count is the rule's units, so none anywhere is inert."""
+    judged = [s for s in file.services if not selects or any(k in s.spec for k in selects)]
+    hits = []
+    for service in judged:
+        template = fails(service)
+        if template is not None:
+            hits.append(Hit.naming(service.line, [service.name], template))
+    return Judged(hits, units=len(judged))
+
+
+def _no_healthcheck(service: ComposeService) -> str | None:
+    check = service.spec.get("healthcheck")
+    if isinstance(check, dict) and check.get("disable") is not True:
+        if check.get("test") not in ("NONE", ["NONE"]):
+            return None
+    return "service {names} has no healthcheck"
+
+
+def compose_healthcheck(file: ComposeFile) -> Judged:
+    """Every service that runs something (an `image:` or a `build:`) declares a healthcheck. A
+    `healthcheck:` block that sets no `test` (immich's `disable: false`) keeps the image's own
+    HEALTHCHECK and passes. Not seen: an image's own HEALTHCHECK when the file declares none
+    (the rule reads no image): that service is an `except` site."""
+    return _service_hits(file, ("image", "build"), _no_healthcheck)
+
+
+def _unpinned(service: ComposeService) -> str | None:
+    if service.image is None or not service.image.unpinned:
+        return None
+    shown = str(service.spec["image"]).replace("{", "{{").replace("}", "}}")
+    return f"service {{names}} runs image {shown}, which has no version tag or digest"
+
+
+def compose_pinned_image(file: ComposeFile) -> Judged:
+    """Every `image:` has a digest or a tag other than `latest` (no tag is latest). A
+    `${VAR:-default}` reads as its default; a variable with no default in the tag is the
+    operator's pin (an .env value) and passes."""
+    return _service_hits(file, ("image",), _unpinned)
+
+
+def _privileged(service: ComposeService) -> str | None:
+    return "service {names} is privileged" if service.spec.get("privileged") is True else None
+
+
+def compose_no_privileged(file: ComposeFile) -> Judged:
+    """No service sets `privileged: true`, which hands it every capability and device of the
+    host. Not seen: `cap_add: [ALL]` or a device list, which are visible in review."""
+    return _service_hits(file, (), _privileged)
+
+
+def _no_restart(service: ComposeService) -> str | None:
+    deploy = service.spec.get("deploy")
+    if "restart" in service.spec or (isinstance(deploy, dict) and "restart_policy" in deploy):
+        return None
+    return "service {names} has no restart policy (compose's default `no` leaves it down after a reboot)"
+
+
+def compose_restart_policy(file: ComposeFile) -> Judged:
+    """Every service declares `restart:` (or swarm's `deploy.restart_policy`). An explicit
+    `restart: "no"` (a one-shot job) is a declared choice and passes."""
+    return _service_hits(file, (), _no_restart)

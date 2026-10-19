@@ -90,6 +90,7 @@ def _load_sibling(filename: str, module_name: str) -> ModuleType:
 ratchet_mod = _load_sibling("metrics_ratchet.py", "devkit_metrics_ratchet")
 identity = _load_sibling("_repo_identity.py", "devkit_repo_identity")
 bite_mod = _load_sibling("gate_bite.py", "devkit_gate_bite")
+compose_mod = _load_sibling("_compose.py", "devkit_compose")  # its compose file names
 BOUNDS_FILE = "docs/metrics/ratchet.json"
 REPORT_ONLY_FILE = "docs/metrics/report-only.json"
 TREND_FILES = (BOUNDS_FILE, REPORT_ONLY_FILE)
@@ -347,10 +348,20 @@ def pins_tools_only(repo: Repo, manifest: str) -> bool:
     return all(p.parent == parent and (p.name == Path(manifest).name or p.name in LOCKFILES) for p in inside)
 
 
+SHELL_SUFFIXES = (".sh", ".bash")
+
+
 def stacks(repo: Repo) -> set[str]:
+    """The stacks the tracked tree holds: a manifest names python, ts, rust or swift; a shell
+    script names shell and a compose project file compose (homelab's code), the vendored
+    devkit/ aside, since its scripts are devkit's."""
     found: set[str] = set()
     for f in repo.tracked:
         parts = Path(f).parts
+        if parts[0] != "devkit" and f.endswith(SHELL_SUFFIXES):
+            found.add("shell")
+        if parts[0] != "devkit" and compose_mod.is_compose_file(parts[-1]):
+            found.add("compose")
         if parts[-1] in STACK_MANIFESTS:
             if not pins_tools_only(repo, f):
                 found.add(STACK_MANIFESTS[parts[-1]])
@@ -372,12 +383,12 @@ class Domain:
     mechanism: str
 
 
-CODE_STACKS = frozenset({"python", "ts", "rust", "swift"})
+CODE_STACKS = frozenset({"python", "ts", "rust", "swift", "shell"})
 RATCHET_DOMAINS = (
-    Domain("ratchet.complexity", frozenset({"python", "ts", "rust"}), r"^complexity\.",
-           "python.py --mccabe --cognitive / ts.mjs --cyclomatic --cognitive / rust.py --cognitive"),
+    Domain("ratchet.complexity", frozenset({"python", "ts", "rust", "shell"}), r"^complexity\.",
+           "python.py --mccabe --cognitive / ts.mjs --cyclomatic --cognitive / rust.py --cognitive / shell.py --complexity"),
     Domain("ratchet.duplication", frozenset({"python", "ts", "rust"}), r"^duplication\.[^.]+\.clones$", "jscpd.mjs"),
-    Domain("ratchet.dead", frozenset({"python", "ts", "rust"}), r"^dead\.", "python.py --vulture / ts.mjs --knip / rust.py --dead"),
+    Domain("ratchet.dead", frozenset({"python", "ts", "rust", "shell"}), r"^dead\.", "python.py --vulture / ts.mjs --knip / rust.py --dead / shell.py --dead"),
     Domain("ratchet.cycles", frozenset({"python", "ts", "rust"}), r"^coupling\.[^.]+\.cycles$", "python.py / ts.mjs / rust.py --cycles"),
     Domain("ratchet.fan_out", frozenset({"python", "ts", "rust"}), r"^coupling\.[^.]+\.fan_out_max$", "python.py / ts.mjs / rust.py --fan"),
     Domain("ratchet.coverage", frozenset({"python", "ts", "rust"}), r"^coverage\.", "coverage.py over the unit tier (Rust: --llvm-cov-json)"),
@@ -395,7 +406,7 @@ def wired_ratchet(repo: Repo, stack: set[str]) -> None:
         if stack & d.stacks:
             repo.add(d.cid, bool(keys), f"{len(keys)} key(s)" if keys else f"no key; wire {d.mechanism}")
         elif stack & CODE_STACKS:
-            repo.add(d.cid, None, f"stack {', '.join(sorted(stack & CODE_STACKS))}", mechanism=f"a {d.cid.split('.')[1]} collector for {', '.join(sorted(stack - d.stacks))}")
+            repo.add(d.cid, None, f"stack {', '.join(sorted(stack & CODE_STACKS))}", mechanism=f"a {d.cid.split('.')[1]} collector for {', '.join(sorted((stack & CODE_STACKS) - d.stacks))}")
         else:
             repo.na(d.cid, "no code stack")
     if has_db(repo):
@@ -409,8 +420,8 @@ def wired_ratchet(repo: Repo, stack: set[str]) -> None:
     else:
         repo.na("ratchet.bundle", "no frontend")
     locks = [f for f in repo.tracked if Path(f).name in ("uv.lock", "package-lock.json", "pnpm-lock.yaml", "Cargo.lock")]
-    if not locks:
-        repo.na("ratchet.vuln", "no lockfile")
+    if not locks and "compose" not in stack:
+        repo.na("ratchet.vuln", "no lockfile and no compose file")
         return
     vuln = [k for k in repo.metrics if k.startswith("vuln.")]
     # vuln.py's own count of what it queried: every scope at 0 is a dev-only lockfile, nothing to
@@ -419,17 +430,19 @@ def wired_ratchet(repo: Repo, stack: set[str]) -> None:
     if packages and not any(packages):
         repo.na("ratchet.vuln", f"0 locked production packages in {len(packages)} vuln scope(s) (dev-only lockfiles)")
     else:
-        repo.add("ratchet.vuln", bool(vuln), f"{len(vuln)} vuln.* key(s) (report-only)" if vuln else f"no vuln.* keys; wire metrics/vuln.py, then `make metrics-tighten` commits {REPORT_ONLY_FILE}")
+        repo.add("ratchet.vuln", bool(vuln), f"{len(vuln)} vuln.* key(s) (report-only)" if vuln else f"no vuln.* keys; wire metrics/vuln.py (--compose for image tags), then `make metrics-tighten` commits {REPORT_ONLY_FILE}")
 
 
 def wired_guards(repo: Repo, stack: set[str]) -> None:
+    if not stack & {"python", "ts", "compose"}:
+        repo.na("guards", "guard_check reads Python, TypeScript and compose files")
+    else:
+        guards = (repo.root / "scripts/ci/guards.conf").is_file()
+        gk = [k for k in repo.metrics if k.startswith("guards.")]
+        repo.add("guards", guards and bool(gk), f"guards.conf {'yes' if guards else 'no'}, {len(gk)} guards.* key(s)")
     if not stack & {"python", "ts"}:
-        repo.na("guards", "guard_check reads Python and TypeScript")
         repo.na("layers", "layer_check reads Python and TypeScript")
         return
-    guards = (repo.root / "scripts/ci/guards.conf").is_file()
-    gk = [k for k in repo.metrics if k.startswith("guards.")]
-    repo.add("guards", guards and bool(gk), f"guards.conf {'yes' if guards else 'no'}, {len(gk)} guards.* key(s)")
     layers = (repo.root / "scripts/ci/layers.conf").is_file()
     lv = [k for k in repo.metrics if k.endswith(".layer_violations")]
     repo.add("layers", layers and bool(lv), f"layers.conf {'yes' if layers else 'no'}, {len(lv)} layer_violations key(s)")

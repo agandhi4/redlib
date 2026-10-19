@@ -18,6 +18,10 @@
 #     `on main <sha>` its local-gate status names (a remote gate's record is on its host), against
 #     GitHub's main now. A moved main prints `re-gate: main moved <sha>→<sha>`: the gate tested
 #     the merge into a main that no longer exists. Neither source naming a main is a refusal.
+# A draft that passes every check above is marked ready (`gh pr ready`, one `merge: … marked it
+# ready` line) and then merged: the fleet Workflow gates a PR while it is a draft, and GitHub
+# refuses to merge one (locus #136 needed a hand `gh pr ready`). A draft that fails a check is
+# refused like any PR and stays a draft.
 # Then runs `gh pr merge <n> --squash --match-head-commit <head> --delete-branch`, so a push
 # between the check and the merge makes GitHub refuse it, and exits with gh's code.
 # That one gh call, and only it, carries DEVKIT_MERGE_VERIFIED=<the full head sha>: no paid
@@ -58,9 +62,9 @@ extra=$(gate_plan_literal "$PLAN" GATE_MERGE_REQUIRES)
 
 refuse() { echo "merge: refused: $*" >&2; exit 1; }
 
-info=$(gh pr view "$PR" --repo "$SLUG" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv') \
+info=$(gh pr view "$PR" --repo "$SLUG" --json state,headRefOid,isDraft --jq '[.state, .headRefOid, .isDraft] | @tsv') \
   || { echo "merge: cannot read PR #$PR of $SLUG (gh above)" >&2; exit 2; }
-IFS=$'\t' read -r state head <<<"$info"
+IFS=$'\t' read -r state head draft <<<"$info"
 [ "$state" = OPEN ] || refuse "PR #$PR is ${state:-unknown}, not OPEN"
 [[ "$head" =~ ^[0-9a-f]{40}$ ]] || { echo "merge: gh gave no head commit for PR #$PR ('$head')" >&2; exit 2; }
 
@@ -97,5 +101,10 @@ case "$main_now" in
   *) refuse "re-gate: main moved ${gated_main:0:12}→${main_now:0:12}; run make gate PR=$PR" ;;
 esac
 
+if [ "$draft" = true ]; then
+  gh pr ready "$PR" --repo "$SLUG" >/dev/null \
+    || { echo "merge: cannot mark draft PR #$PR ready (gh above)" >&2; exit 2; }
+  echo "merge: PR #$PR was a draft; its gate passed on head ${head:0:12}, so marked it ready"
+fi
 echo "merge: PR #$PR head ${head:0:12}: $REQUIRED success on main ${main_now:0:12}; squash-merging"
 exec env DEVKIT_MERGE_VERIFIED="$head" gh pr merge "$PR" --repo "$SLUG" --squash --match-head-commit "$head" --delete-branch

@@ -1,0 +1,5 @@
+# devkit's shellcheck base (lint/README.md "shellcheck"). bin/shellcheck.sh hands shellcheck this
+# file with the repo's own .shellcheckrc appended, so a repo line adds to or overrides a base one.
+# Follow `source`/`.` into files not named on the command line, resolved beside the script.
+external-sources=true
+source-path=SCRIPTDIR

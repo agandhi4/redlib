@@ -29,16 +29,25 @@
 # refreshed from upstream's tree when the repo tracks it and it differs; never created. Without
 # this a base change made every consumer's sync commit fail its own devkit-check (or the audit's
 # hook-differs) until someone copied the file by hand. It also runs when devkit/ is already
-# current, because the first sync to a new base runs the previous, vendored copy of this script.
+# current, the recovery for a repo synced by a copy older than the re-exec below.
+#
+# Re-exec: this script and the libs it sourced are the PREVIOUS vendored copy, so a new base
+# rule or hook template (base_copies) used to land only on the second sync: eight repos needed
+# two syncs for .githooks/commit-msg (2026-10-18/19). So once devkit/ is replaced, the script
+# execs the freshly vendored devkit/bin/devkit-sync.sh with the same arguments and
+# DEVKIT_SYNC_REEXEC=<upstream commit>, which does everything after the fetch with the new code:
+# it uses that commit instead of fetching again, and never re-execs a second time. A vendored
+# copy older than this rule ignores the variable and syncs again from scratch, which is
+# idempotent and does not re-exec either.
 #
 # A hook copy the repo lacks is created when it already tracks another .githooks/ copy of a
 # template (a repo that adopted the hooks gets every hook devkit adds: commit-msg, 2026-10-18),
 # executable when its base is; a repo with no .githooks/ gets none.
 #
 # Trailer: both commits end with devkit_commit_trailer (bin/_trailer_lib.sh: DEVKIT_COMMIT_TRAILER,
-# set even empty wins, else `git config devkit.trailer`, else the fleet's agent trailer), the
-# chain the commit-msg hook's trailer step requires, so a sync's commit passes its own hook.
-# Agents run every sync and the repos' commit rules require the trailer.
+# set even empty wins, else `git config devkit.trailer`, else the model-agnostic
+# `Co-Authored-By: Claude <noreply@anthropic.com>`). An agent sets the env to the trailer naming
+# its own model; the commit-msg hook accepts any Claude trailer, so the default passes it too.
 set -euo pipefail
 # shellcheck source=bin/_vendor_paths.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_vendor_paths.sh"
@@ -71,10 +80,15 @@ commit_sync() {
   [ -z "$TRAILER" ] || message+=$'\n\n'"$TRAILER"
   git commit -q -m "$message" "$@"
 }
-git fetch -q "$DEVKIT_URL" "$REF"
-UPSTREAM=$(git rev-parse FETCH_HEAD)
-UPSTREAM_TREE=$(git rev-parse "FETCH_HEAD^{tree}")
-if MANIFEST=$(git show FETCH_HEAD:VENDOR_PATHS 2>/dev/null); then
+if [ -n "${DEVKIT_SYNC_REEXEC:-}" ]; then
+  UPSTREAM=$(git rev-parse -q --verify "$DEVKIT_SYNC_REEXEC^{commit}") \
+    || { echo "devkit-sync: DEVKIT_SYNC_REEXEC='$DEVKIT_SYNC_REEXEC' is not a commit here" >&2; exit 2; }
+else
+  git fetch -q "$DEVKIT_URL" "$REF"
+  UPSTREAM=$(git rev-parse FETCH_HEAD)
+fi
+UPSTREAM_TREE=$(git rev-parse "$UPSTREAM^{tree}")
+if MANIFEST=$(git show "$UPSTREAM:VENDOR_PATHS" 2>/dev/null); then
   UPSTREAM_TREE=$(vendor_filter_tree "$UPSTREAM_TREE" "$MANIFEST") || exit 2
 fi
 CURRENT=0
@@ -86,6 +100,10 @@ else
   git read-tree --prefix=devkit/ -u "$UPSTREAM_TREE"
   printf '%s %s\n' "$UPSTREAM" "$UPSTREAM_TREE" > .devkit-rev
   git add .devkit-rev devkit
+  if [ -z "${DEVKIT_SYNC_REEXEC:-}" ] && [ -f devkit/bin/devkit-sync.sh ]; then
+    echo "devkit-sync: continuing with the vendored devkit/bin/devkit-sync.sh at ${UPSTREAM:0:7}"
+    exec env DEVKIT_SYNC_REEXEC="$UPSTREAM" bash devkit/bin/devkit-sync.sh "$@"
+  fi
 fi
 # The base comes from upstream's tree, not the index: on the CURRENT path devkit/ may hold
 # uncommitted edits, which a sync never vouches for.
