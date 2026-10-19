@@ -143,3 +143,8 @@ Consequence: WIRED 16/20 to 19/20, missing only duplication (owner delta). The i
 Why: the cycle seeded in #31 was drift, not design. client.rs held three things that belong elsewhere: the pooled transport oauth_device needed (so oauth_device imported client), the token-session singleton oauth.rs read back, and main-only startup diagnostics that were client's only reason to import model::Post.
 Decision: pure moves. `src/transport.rs` takes `CLIENT` and `build_client`; `oauth.rs` takes `OAUTH_SESSION`, `init_oauth_client`, `oauth_session`, `oauth_client`; `src/startup_check.rs` takes `self_check`, `rate_limit_check` and their two live tests. Layer order: transport, then oauth_device and oauth, then client, then model/utils/media, then pages, with main.rs as the entry. coupling.app.cycles 1 to 0; fan unchanged (out 9 post.rs, in 12 server.rs).
 Consequence: devkit's layer_check has no Rust support, so the cycles ratchet at 0 is the only guard: a new back-import fails the metrics job, not a named layer rule.
+
+## 2026-10-18 — devkit 6943df5; no compose file, so no compose guards
+Why: devkit #158 fails the scorecard's guards check for a repo that tracks a compose project file without `[compose]` rules. redlib's docker-compose.yml left in #6: homelab `stacks/redlib` owns the stack.
+Decision: adopt devkit 6943df5 (any-model commit trailer #154, commit-msg required #155, `make merge` readies a gated draft #156). No `[compose]` section and no `scorecard: guards` delta: guards reads NA for a Rust-only tree, and a delta for an absent file is noise.
+Consequence: re-adding a `compose*.yml` turns guards on; that PR adds the four compose rules in a `lang compose` section of scripts/ci/guards.conf. WIRED stays 19/20.
