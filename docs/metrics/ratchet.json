@@ -9,6 +9,21 @@
     "direction": "lower",
     "source": "rust-app"
   },
+  "coupling.app.cycles": {
+    "bound": 1,
+    "direction": "lower",
+    "source": "rust-app"
+  },
+  "coupling.app.fan_out_max": {
+    "bound": 9,
+    "direction": "lower",
+    "source": "rust-app"
+  },
+  "coverage.app.lines": {
+    "bound": 34.1,
+    "direction": "higher",
+    "source": "cov-app"
+  },
   "dead.app.rustc": {
     "bound": 0,
     "direction": "lower",

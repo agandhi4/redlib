@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Copy unchanged to .githooks/commit-msg. Checks are devkit's (COMMIT_MSG_STEPS in
+# scripts/ci/hooks.conf); the format and behaviour are in devkit/bin/hook_steps.sh. Created by
+# devkit new and by devkit-sync in a repo that tracks the other hooks.
+set -uo pipefail
+ROOT=$(git rev-parse --show-toplevel) || exit 1
+# shellcheck source=/dev/null
+. "$ROOT/devkit/bin/quiet_run.sh" && . "$ROOT/devkit/bin/hook_steps.sh" || exit 1
+run_hook_steps commit-msg "$@"

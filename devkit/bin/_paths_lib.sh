@@ -36,21 +36,22 @@ DEVKIT_TOOLING_BIN="local_gate.sh gate.sh remote_gate.sh _gate_env.sh _paths_lib
   hook_steps.sh quiet_run.sh push_ranges.sh hooks_check.sh
   devkit-check.sh _vendor_paths.sh docs_check.sh toolchain_check.sh ci_targets_check.sh
   _makefile_lib.sh workflows_check.sh _workflows_lib.sh release_check.sh _dockerfile_lib.sh
-  _gitattributes_lib.sh own_commit_check.py _dockerignore.py py_cognitive_lint.py
+  _gitattributes_lib.sh _trailer_lib.sh own_commit_check.py _dockerignore.py py_cognitive_lint.py
   devkit-sync.sh devkit-new.sh monthly_audit.sh dead_alert_audit.py ship_tag.sh scorecard.py agent_cost.py secrets_check.sh migration_check.py
   gate_record.py pr_merge.sh gate_bite.py _repo_identity.py install_gh_shim.sh"
 # What the image group exercises (ci-smoke/ci-image boot through them): tooling, but a change
 # to one runs the image group even when nothing else would.
 DEVKIT_IMAGE_BIN="boot_image.sh contract_probe.sh"
 # Executed by unit/db/e2e/build/metrics jobs (tier budgets, throwaway Postgres for db tiers
-# and smokes, Playwright browsers, toolchains a Makefile provisions (toolchain_exec.sh); layer_check.py
+# and smokes, Playwright browsers, toolchains and cargo tools a Makefile provisions (toolchain_exec.sh,
+# cargo_tool.sh: the unit tier's cargo-llvm-cov); layer_check.py
 # and guard_check.py, ci-quick guards that are also the metrics job's `layers` and `guards`
 # collectors, and the modules they load, _source_tree.py, _ts_lex.py and _guard_rules.py; the
 # timeout and load libs, and docker_bounded.sh, which a recipe's docker call runs through): other. Only
 # a record of the decision; the classification needs no lookup for other.
 # shellcheck disable=SC2034  # read by tests/gate_contract.bats (every bin/ file listed once)
 DEVKIT_JOB_BIN="tier_guard.sh throwaway_pg.sh playwright_browsers.sh node_toolchain.sh
-  rust_toolchain.sh toolchain_path.sh toolchain_exec.sh metrics_ratchet.py metrics_collect.sh layer_check.py
+  rust_toolchain.sh toolchain_path.sh toolchain_exec.sh cargo_tool.sh metrics_ratchet.py metrics_collect.sh layer_check.py
   guard_check.py _source_tree.py _ts_lex.py _guard_rules.py _timeout_lib.sh _load_lib.sh
   docker_bounded.sh"
 

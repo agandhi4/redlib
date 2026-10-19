@@ -118,11 +118,14 @@ if [ -f "$CONF" ]; then
   }
   # One subshell sources the conf: "error <reason>" lines fail the check, other lines are warnings.
   conf_report=$(
-    PRE_COMMIT_STEPS=() PRE_PUSH_STEPS=()
+    PRE_COMMIT_STEPS=() PRE_PUSH_STEPS=() COMMIT_MSG_STEPS=()
     # shellcheck source=/dev/null
     . "$CONF" || { echo "error cannot be sourced"; exit 0; }
     check_steps PRE_COMMIT_STEPS ${PRE_COMMIT_STEPS[@]+"${PRE_COMMIT_STEPS[@]}"}
     check_steps PRE_PUSH_STEPS ${PRE_PUSH_STEPS[@]+"${PRE_PUSH_STEPS[@]}"}
+    for step in ${COMMIT_MSG_STEPS[@]+"${COMMIT_MSG_STEPS[@]}"}; do
+      _hook_parse_msg_step "$step" || { echo "error COMMIT_MSG_STEPS: $HOOK_STEP_ERROR"; break; }
+    done
     slow_precommit_steps ${PRE_COMMIT_STEPS[@]+"${PRE_COMMIT_STEPS[@]}"}
   )
   conf_error=$(grep -m1 '^error ' <<<"$conf_report" || true)

@@ -1,13 +1,25 @@
 # shellcheck shell=bash
-# The body of every repo's .githooks/pre-commit and pre-push (templates/githooks/). Sourced
-# after quiet_run.sh, whose run_step it uses; defines run_hook_steps and runs nothing.
+# The body of every repo's .githooks/pre-commit, pre-push and commit-msg (templates/githooks/).
+# Sourced after quiet_run.sh, whose run_step it uses; defines run_hook_steps and runs nothing.
 #
-#   run_hook_steps <pre-commit|pre-push> "$@"     # the hook's own args; returns the hook's code
+#   run_hook_steps <pre-commit|pre-push|commit-msg> "$@"   # the hook's own args; returns its code
 #
 # The per-repo part is scripts/ci/hooks.conf, a sourced file:
 #   PRE_COMMIT_STEPS=("backend: static=ci-static-backend" "frontend: static=ci-static-frontend")
 #   PRE_PUSH_STEPS=("backend: unit=ci-unit-backend")
 #   ENV_REQUIRED_HOOKS="pre-push"   # hooks to skip when the worktree has no .env (optional)
+#   COMMIT_MSG_STEPS=("trailer:off")   # commit-msg checks; default ("trailer") (optional)
+#
+# commit-msg runs devkit's own message checks, never make targets: a message is not a tree a
+# ci-* target can read. Each COMMIT_MSG_STEPS entry is `<check>` or `<check>:off`; the one check:
+#   trailer  an agent's commit (devkit_is_agent, bin/_trailer_lib.sh: CLAUDECODE or CLAUDE_CODE_*
+#            in the environment, or `git config devkit.agent true`) must hold the required line
+#            (devkit_commit_trailer: DEVKIT_COMMIT_TRAILER, else `git config devkit.trailer`, else
+#            the fleet default; devkit-sync's own commits read the same chain) as a line of its
+#            own. It fails printing the exact line to add. A human's commit, a merge commit (git
+#            writes its message) and an empty required line pass untouched. Why a hook (owner,
+#            2026-10-18): two lanes committed another model's trailer against their brief.
+# A check that applied writes its ledger rows (header: Timings), so gate_bite.py counts it.
 # Each step is "<label>=<make target>[:<override>]". Steps call the gate's own ci-* targets,
 # never raw tools, so a hook cannot drift from the gate. They run in order and stop at the
 # first failure. A conf lists steps only: devkit decides which of them a change needs.
@@ -97,15 +109,18 @@
 . "$(dirname "${BASH_SOURCE[0]}")/_paths_lib.sh"
 # shellcheck source=bin/_load_lib.sh  # devkit_load_scale, shared with local_gate.sh and tier_guard.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_load_lib.sh"
+# shellcheck source=bin/_trailer_lib.sh  # the commit-msg trailer chain, shared with devkit-sync.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_trailer_lib.sh"
 
 run_hook_steps() {
   local hook=$1
   shift
   local root conf step rc env_file push_input='' uses_lfs=0
-  local PRE_COMMIT_STEPS PRE_PUSH_STEPS ENV_REQUIRED_HOOKS
+  local PRE_COMMIT_STEPS PRE_PUSH_STEPS ENV_REQUIRED_HOOKS COMMIT_MSG_STEPS
   PRE_COMMIT_STEPS=()
   PRE_PUSH_STEPS=()
   ENV_REQUIRED_HOOKS=
+  COMMIT_MSG_STEPS=(trailer)
   root=$(git rev-parse --show-toplevel) || return 1
 
   if [ "$hook" = pre-push ]; then
@@ -123,6 +138,10 @@ run_hook_steps() {
   [ -f "$conf" ] || { echo "$hook: scripts/ci/hooks.conf is missing (format: devkit/bin/hook_steps.sh)"; return 1; }
   # shellcheck source=/dev/null
   . "$conf"
+  if [ "$hook" = commit-msg ]; then
+    _hook_commit_msg "$root" "${1:-}"
+    return
+  fi
 
   local steps=()
   case "$hook" in
@@ -137,7 +156,7 @@ run_hook_steps() {
       export PUSH_RANGES
       steps=(${PRE_PUSH_STEPS[@]+"${PRE_PUSH_STEPS[@]}"})
       ;;
-    *) echo "run_hook_steps: unknown hook '$hook' (expected pre-commit or pre-push)"; return 2 ;;
+    *) echo "run_hook_steps: unknown hook '$hook' (expected pre-commit, pre-push or commit-msg)"; return 2 ;;
   esac
 
   export VITEST_MAX_WORKERS=${VITEST_MAX_WORKERS:-4}
@@ -234,6 +253,63 @@ run_hook_steps() {
 
   echo "✓ $hook passed"
   _hook_allow_push "$uses_lfs" "$push_input" "$@"
+}
+
+# <root> <message file>: run COMMIT_MSG_STEPS (header: commit-msg); stops at the first failure.
+_hook_commit_msg() {
+  local root=$1 msg=$2 step start rc
+  [ -f "$msg" ] || { echo "commit-msg: no message file '$msg' (git passes it as the hook's argument)"; return 2; }
+  for step in ${COMMIT_MSG_STEPS[@]+"${COMMIT_MSG_STEPS[@]}"}; do
+    _hook_parse_msg_step "$step" || { echo "commit-msg: $HOOK_STEP_ERROR in scripts/ci/hooks.conf"; return 1; }
+    [ "$HOOK_MSG_OFF" = 0 ] || continue
+    start=$(date +%s)
+    rc=0
+    case "$HOOK_MSG_CHECK" in
+      trailer)
+        _hook_trailer_applies || continue
+        _hook_msg_trailer "$msg" || rc=1 ;;
+    esac
+    _hook_record "$root" commit-msg "$HOOK_MSG_CHECK" "$start" "$rc"
+    _hook_record "$root" commit-msg total "$start" "$rc"
+    [ "$rc" -eq 0 ] || return 1
+  done
+}
+
+# <step>: split a COMMIT_MSG_STEPS entry into HOOK_MSG_CHECK and HOOK_MSG_OFF (1 for `:off`).
+# Returns 1 with HOOK_STEP_ERROR naming it when malformed. Used by: _hook_commit_msg, and
+# hooks_check.sh to validate the conf.
+_hook_parse_msg_step() {
+  HOOK_MSG_CHECK=${1%%:*} HOOK_MSG_OFF=0 HOOK_STEP_ERROR=''
+  case "$1" in
+    *:off) HOOK_MSG_OFF=1 ;;
+    *:*) HOOK_STEP_ERROR="bad commit-msg step '$1' (want <check> or <check>:off)"; return 1 ;;
+  esac
+  case "$HOOK_MSG_CHECK" in
+    trailer) ;;
+    *) HOOK_STEP_ERROR="bad commit-msg step '$1' (unknown check '$HOOK_MSG_CHECK', want trailer)"; return 1 ;;
+  esac
+}
+
+# Does the trailer check apply to this commit (header: commit-msg)? Sets HOOK_TRAILER, the
+# required line.
+_hook_trailer_applies() {
+  HOOK_TRAILER=$(devkit_commit_trailer)
+  [ -n "$HOOK_TRAILER" ] && devkit_is_agent && ! git rev-parse -q --verify MERGE_HEAD >/dev/null
+}
+
+# <message file>: the trailer check; returns 1 after printing the line to add.
+_hook_msg_trailer() {
+  local msg=$1 want=$HOOK_TRAILER found
+  # CR and trailing blanks dropped: an editor's line ending is not a different trailer.
+  if tr -d '\r' <"$msg" | sed 's/[[:space:]]*$//' | grep -qxF -- "$want"; then
+    return 0
+  fi
+  echo "✗ commit-msg: an agent's commit must carry the fleet trailer. Add this line, after a blank line, at the end of the message:"
+  echo "  $want"
+  found=$(grep -iE '^co-authored-by:' "$msg" | head -1)
+  [ -z "$found" ] || echo "  (the message has '$found' instead)"
+  echo "  The line comes from DEVKIT_COMMIT_TRAILER, else git config devkit.trailer, else devkit's default; COMMIT_MSG_STEPS=(\"trailer:off\") in scripts/ci/hooks.conf turns the check off."
+  return 1
 }
 
 # <root> <hook> <label> <start epoch> <rc> [note]: one timing line in the per-machine hooks
