@@ -148,3 +148,8 @@ Consequence: devkit's layer_check has no Rust support, so the cycles ratchet at 
 Why: devkit #158 fails the scorecard's guards check for a repo that tracks a compose project file without `[compose]` rules. redlib's docker-compose.yml left in #6: homelab `stacks/redlib` owns the stack.
 Decision: adopt devkit 6943df5 (any-model commit trailer #154, commit-msg required #155, `make merge` readies a gated draft #156). No `[compose]` section and no `scorecard: guards` delta: guards reads NA for a Rust-only tree, and a delta for an absent file is noise.
 Consequence: re-adding a `compose*.yml` turns guards on; that PR adds the four compose rules in a `lang compose` section of scripts/ci/guards.conf. WIRED stays 19/20.
+
+## 2026-10-19 — devkit 367dc33; make's SHELL is toolchain_shell.sh
+Why: devkit #166 warns on a Makefile in a repo pinning Rust without `SHELL := devkit/bin/toolchain_shell.sh`; `CARGO ?= devkit/bin/toolchain_exec.sh cargo` covered cargo only, not `$(shell …)` or the other tools a recipe runs.
+Decision: SHELL is toolchain_shell.sh and `CARGO ?= cargo`; one mechanism, so the per-command wrapper goes (toolchain_exec.sh stays for a hand-typed cargo). No changed-file lint line (#161/#164): it has ruff and eslint rules only, and redlib has no Python env or Node; clippy already lints the whole tree.
+Consequence: devkit-check reads zero warnings; a hand-run `make ci-quick` with no cargo on PATH passes. Metrics SAME, WIRED stays 19/20 (duplication is the declared delta).

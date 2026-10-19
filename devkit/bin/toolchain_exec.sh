@@ -18,5 +18,8 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=bin/toolchain_path.sh
 . "$here/toolchain_path.sh"
 root=$(cd "$here/../.." && pwd)
-toolchain_path "$root" || { echo "toolchain_exec: $TOOLCHAIN_ERROR" >&2; exit 2; }
+# Already on this tree's pins (the gate, a hook, a toolchain_shell.sh recipe): nothing to provide.
+if [ "${DEVKIT_TOOLCHAIN_TREE:-}" != "$(cd "$root" && pwd -P)" ]; then
+  toolchain_path "$root" || { echo "toolchain_exec: $TOOLCHAIN_ERROR" >&2; exit 2; }
+fi
 exec "$@"

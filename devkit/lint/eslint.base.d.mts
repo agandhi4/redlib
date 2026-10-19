@@ -20,3 +20,4 @@ export default base;
 
 export declare const sonarjsRules: RulesRecord;
 export declare const sonarjsTestRules: RulesRecord;
+export declare const sonarjsChangedRules: RulesRecord;

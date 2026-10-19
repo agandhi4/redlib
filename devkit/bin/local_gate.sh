@@ -40,11 +40,15 @@
 #   Every job must be a Makefile target the CI workflows also call: parity is structural.
 #   Change a check in the Makefile, never in the plan.
 #
-# Watchdog: a job whose log has not grown for GATE_SILENT_MINUTES (default 15; decimals allowed;
+# Watchdog: a job whose log has not grown for GATE_SILENCE_SECONDS (default 300; whole seconds;
 #   0 disables) is hung, not slow. OrbStack paused its VM mid-update and a pytest waited on
-#   Postgres with no timeout for an hour, holding the machine-wide lock (2026-10-13). The job's
-#   process group gets TERM (KILL after 10s), the status is `error`, the EXIT trap cleans up, and
-#   the run stops with GATE <job> WATCHDOG, VERDICT FAIL and exit 2: the box failed, not the code.
+#   Postgres with no timeout for an hour, holding the machine-wide lock (2026-10-13); a bats shard
+#   then hung twice in one night and each time parked its lane for the old 15 minutes
+#   (2026-10-19). A job that legitimately works quietly for minutes prints progress instead (devkit's
+#   own tests/shards.sh does). The job's process group gets TERM (KILL after 10s), the status is
+#   `error`, the outcome record gives the job verdict `error` and rule `silence:<job>`, the EXIT
+#   trap cleans up, and the run stops with GATE <job> WATCHDOG, VERDICT FAIL and exit 2: the box
+#   failed, not the code.
 #   The watchdog sees only jobs; the plan's gate_cleanup (EXIT trap) is bounded by
 #   GATE_CLEANUP_SECONDS (default 120) instead, and the docker scripts a job runs
 #   (throwaway_pg.sh, boot_image.sh) probe the daemon and bound every docker call themselves
@@ -108,8 +112,11 @@
 #   one is `GATE head FAIL` with no status posted: a verdict on a commit the caller did not mean
 #   is worse than none. Both settings are environment-only test hooks.
 #
+# Sleep: on macOS the gate holds a caffeinate assertion for its own lifetime (bin/_awake_lib.sh),
+#   since its budgets and watchdog read wall time; DEVKIT_CAFFEINATE=0 turns it off.
+#
 # Per-machine defaults: ${XDG_CONFIG_HOME:-$HOME/.config}/devkit/gate.env, if present, holds
-#   GATE_SLOTS, GATE_SILENT_MINUTES, GATE_CLEANUP_SECONDS, GATE_JOB_BUDGET_MINUTES, GATE_BUDGET_MINUTES,
+#   GATE_SLOTS, GATE_SILENCE_SECONDS, GATE_CLEANUP_SECONDS, GATE_JOB_BUDGET_MINUTES, GATE_BUDGET_MINUTES,
 #   GATE_BUDGET_ENFORCE, GATE_LOAD_MAX and GATE_LOAD_WAIT_MINUTES `KEY=value` lines (blank lines and full-line `#` comments
 #   allowed; GATE_REMOTE* lines are gate.sh's and skipped). It is parsed, never sourced: any other
 #   key, quoting, `export` or other shell syntax is a usage error (exit 2) naming the line. An explicit environment variable wins over the
@@ -120,7 +127,7 @@
 # Output contract, parsed by the merge queues and worker.py — keep it (the informational
 # `GATE slot|areas|note|scope|waiting ...` lines are never job lines):
 #   GATE <job> PASS|FAIL|SKIPPED [(...)]            one line per job
-#   GATE <job> WATCHDOG (silent for <n> min; log: <path>)   then the run stops
+#   GATE <job> WATCHDOG (silent for <n>s; log: <path>)      then the run stops
 #   GATE <job>|total OVERBUDGET (<n>s > <budget>s)  after the job's PASS|FAIL line / before VERDICT
 #   VERDICT PASS|FAIL head=<pr-head-sha> main=<origin/main-sha>
 # A queue merges only when both SHAs are still current, so the squash-merged tree is exactly
@@ -162,6 +169,11 @@ done
 [ -n "$PR" ] || { usage >&2; exit 2; }
 GATE_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 readonly GATE_STARTED
+# Awake from here to exit, the slot wait included: a sleeping box stalls every queued gate too
+# (bin/_awake_lib.sh; Linux: run the gate under systemd-inhibit, as that file says).
+# shellcheck source=bin/_awake_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_awake_lib.sh"
+devkit_stay_awake
 
 # Per-machine defaults (header). An allowlist, not GATE_*: GATE_LOCK or GATE_PLAN in a file would
 # silently split this box's lock from the queues' or swap the plan, which is no per-machine
@@ -180,11 +192,16 @@ minutes_to_secs() {
 readonly CLEANUP_SECS=${GATE_CLEANUP_SECONDS:-120}
 [[ "$CLEANUP_SECS" =~ ^[1-9][0-9]*$ ]] \
   || { echo "local_gate: GATE_CLEANUP_SECONDS must be a whole number of seconds >= 1 (got '$CLEANUP_SECS')" >&2; exit 2; }
-readonly SILENT_MINUTES=${GATE_SILENT_MINUTES:-15}
-SILENT_SECS=$(minutes_to_secs GATE_SILENT_MINUTES "$SILENT_MINUTES") || exit 2
+# How often job_went_silent and stop_job look at a running job. A finished job is noticed within
+# one poll, so a whole second cost every job up to 1 s: gate_contract.bats ran ~200 jobs, most of
+# its 264 s wall at 58 s CPU (2026-10-19). Fractional sleep is BSD's and GNU's alike.
+readonly WATCH_POLL_SECS=0.2
+readonly SILENT_SECS=${GATE_SILENCE_SECONDS:-300}
+[[ "$SILENT_SECS" =~ ^[0-9]+$ ]] \
+  || { echo "local_gate: GATE_SILENCE_SECONDS must be a whole number of seconds, 0 to disable (got '$SILENT_SECS')" >&2; exit 2; }
 JOB_BUDGET_SECS=$(minutes_to_secs GATE_JOB_BUDGET_MINUTES "${GATE_JOB_BUDGET_MINUTES:-5}") || exit 2
 GATE_BUDGET_SECS=$(minutes_to_secs GATE_BUDGET_MINUTES "${GATE_BUDGET_MINUTES:-10}") || exit 2
-readonly SILENT_SECS JOB_BUDGET_SECS GATE_BUDGET_SECS
+readonly JOB_BUDGET_SECS GATE_BUDGET_SECS
 readonly BUDGET_ENFORCE=${GATE_BUDGET_ENFORCE:-1}
 [[ "$BUDGET_ENFORCE" =~ ^[01]$ ]] \
   || { echo "local_gate: GATE_BUDGET_ENFORCE must be 0 or 1 (got '$BUDGET_ENFORCE')" >&2; exit 2; }
@@ -245,7 +262,7 @@ OVER_NAMES=""   # jobs (and `total`) over an ENFORCED budget, space-separated, f
 RECORD=0        # 1 once $LOGDIR exists: from then on every exit leaves an outcome record
 RUN_VERDICT=error   # pass|fail once verdict() or a FAIL step decides; error if neither does
 
-# record_job <name> <pass|fail|skip|budget> <seconds|->: the job's line for the outcome record;
+# record_job <name> <pass|fail|skip|budget|error> <seconds|->: the job's line for the outcome record;
 # a job the plan runs again replaces its earlier line, as in JOB_SECONDS.
 record_job() {
   JOB_OUTCOMES=$(awk -v n="$1 " 'index($0, n) != 1' <<<"$JOB_OUTCOMES"; echo "$1 $2 $3")
@@ -364,11 +381,10 @@ post_status() { # <state> <description>; three attempts, a GitHub timeout used t
 # whatever is left after 10s, then reap the leader quietly.
 stop_job() {
   [ -n "$JOB_PGID" ] || return 0
-  local waited=0
+  local deadline=$((SECONDS + 10))
   kill -TERM -- "-$JOB_PGID" 2>/dev/null
-  while kill -0 -- "-$JOB_PGID" 2>/dev/null && [ "$waited" -lt 10 ]; do
-    sleep 1
-    waited=$((waited + 1))
+  while kill -0 -- "-$JOB_PGID" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+    sleep "$WATCH_POLL_SECS"
   done
   kill -KILL -- "-$JOB_PGID" 2>/dev/null
   wait "$JOB_PGID" 2>/dev/null
@@ -387,7 +403,7 @@ job_went_silent() { # <log>
     elif [ "$SILENT_SECS" -gt 0 ] && [ $((SECONDS - since)) -ge "$SILENT_SECS" ]; then
       return 0
     fi
-    sleep 1
+    sleep "$WATCH_POLL_SECS"
   done
   return 1
 }
@@ -477,9 +493,9 @@ job() { # <name> <make target> [VAR=val...]
   set +m
   if job_went_silent "$log"; then
     stop_job
-    echo "GATE $name WATCHDOG (silent for $SILENT_MINUTES min; log: $log)"
-    record_job "$name" fail $((SECONDS - t0))
-    post_status error "Job $name silent for $SILENT_MINUTES min; stopped by the watchdog"
+    echo "GATE $name WATCHDOG (silent for ${SILENT_SECS}s; log: $log)"
+    record_job "$name" error $((SECONDS - t0))
+    post_status error "Job $name silent for ${SILENT_SECS}s; stopped by the watchdog"
     STATUS_OPEN=0
     echo "VERDICT FAIL head=$HEAD_SHA main=$MAIN_SHA"
     exit 2

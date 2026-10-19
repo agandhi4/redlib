@@ -34,6 +34,19 @@
 # sits in a code fence, or `run`/`then` leads into it. A ban ("never `gh pr merge --auto`",
 # closet) is the rule this enforces, not a breach. AGENTS.md is read like the plan: the working
 # tree, or the index under --staged.
+#
+# Also (WARNINGS, exit 0): a throwaway Postgres container name or host port the Makefile fixes
+# to a literal (makefile_fixed_pg): every worktree then shares one container, and concurrent
+# lanes' `up` removed each other's databases mid-suite (2026-10-19). throwaway_pg.sh `name` and
+# `port` derive both from the checkout. And a Makefile that does not run its recipes on the
+# repo's pinned Node or Rust (no `SHELL := devkit/bin/toolchain_shell.sh` while .nvmrc or
+# rust-toolchain.toml is tracked): a hand-run `make metrics-*` then used PATH's Node 25, which
+# the gate never does (finplat, 2026-10-19).
+#
+# Also (WARNINGS, exit 0): the repo's Renovate config extends devkit's preset and automerges
+# nothing beyond the declared digest hole (bin/_renovate.py, which the scorecard's `renovate`
+# check shares). Renovate merges server-side, so this is the only place a self-merge that skips
+# the gate is caught before it is live (homelab #109/#110, 2026-10-19).
 set -euo pipefail
 STAGED=0
 case "${1:-}" in
@@ -131,6 +144,17 @@ fi
 while IFS= read -r raw; do
   [ -z "$raw" ] || echo "devkit-check: WARNING: ${raw%%: *}: docker runs unbounded (no daemon probe, no per-call timeout); use devkit/bin/docker_bounded.sh: ${raw#*: }" >&2
 done <<<"$(makefile_raw_docker)"
+while IFS= read -r raw; do
+  [ -n "$raw" ] || continue
+  kind=${raw#*: }; value=${kind#* }; kind=${kind%% *}
+  echo "devkit-check: WARNING: ${raw%%: *}: throwaway Postgres $kind $value is fixed, so every worktree shares it and concurrent lanes break each other; derive it: \$(shell devkit/bin/throwaway_pg.sh $kind <base name>)" >&2
+done <<<"$(makefile_fixed_pg)"
+mk_files=()
+while IFS= read -r f; do mk_files+=("$f"); done < <(makefile_files)
+if [ -n "$(git ls-files .nvmrc rust-toolchain.toml rust-toolchain)" ] && [ "${#mk_files[@]}" -gt 0 ] \
+  && ! grep -qE '^SHELL[[:space:]]*:?=[[:space:]]*devkit/bin/toolchain_shell\.sh[[:space:]]*$' "${mk_files[@]}"; then
+  echo "devkit-check: WARNING: Makefile: a hand-run make uses PATH's node/cargo, not the repo's pins; add: SHELL := devkit/bin/toolchain_shell.sh" >&2
+fi
 targets=$(makefile_targets)
 if [[ "$targets" == *" gate "* && "$targets" != *" merge "* ]]; then
   # shellcheck disable=SC2016  # $(PR) is make's variable, printed literally
@@ -157,4 +181,9 @@ workflow_merge_lines() {
 while IFS= read -r line; do
   [ -z "$line" ] || echo "devkit-check: WARNING: AGENTS.md:$line: the Workflow section merges with gh pr merge; say make merge PR=<n> (it refuses a head without a local-gate success)" >&2
 done <<<"$(workflow_merge_lines <<<"$agents_src")"
+renovate_args=(audit)
+[ "$STAGED" = 0 ] || renovate_args+=(--staged)
+while IFS= read -r issue; do
+  [ -z "$issue" ] || echo "devkit-check: WARNING: $issue (README \"Renovate\": every Renovate PR waits for make merge)" >&2
+done <<<"$(python3 -I "$(dirname "${BASH_SOURCE[0]}")/_renovate.py" "${renovate_args[@]}")"
 echo "devkit-check: ok (${_commit:0:7})"

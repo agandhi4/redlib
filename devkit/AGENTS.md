@@ -48,7 +48,8 @@ is README.md "Architecture". Invariants of the design:
 ```sh
 make ci-quick                  # shellcheck, python + template unit tests (npm), devkit's own guards on itself
 make ci-unit                   # bats tests/ (~2 min)
-make gate PR=<n>               # both, on the PR merged into origin/main; posts `local-gate`
+make ci-metrics                # the ratchet over devkit's own shell (scripts/ci/metrics.conf, docs/metrics/ratchet.json)
+make gate PR=<n>               # all three, on the PR merged into origin/main; posts `local-gate`
 make merge PR=<n>              # squash-merge, refused unless the current head has local-gate success
 bin/docs_check.sh --report .   # the docs numbers behind the diet rules; --fix does the mechanical moves
 python3 -I bin/gate_bite.py --days 30 <repo>   # BITE: gate fails by rule, hook fails, unguarded merges
@@ -57,6 +58,8 @@ make agent-cost                # append this project's merged-PR costs to docs/a
 ```
 
 ## Workflow
+- `make install` once per checkout (core.hooksPath=.githooks): pre-commit runs shellcheck, the
+  guards and the staged secrets scan, pre-push the python tests (scripts/ci/hooks.conf).
 - Branch, PR, `make gate PR=<n>` green (the `local-gate` status is the merge signal; Actions is
   a second opinion and has been billing-blocked), `make merge PR=<n>` with a descriptive
   sentence title. Consumers pick it up with

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Shared shell metrics collector: shellcheck findings, branches per function, dead functions.
+"""Shared shell metrics collector: shellcheck findings, branches per function, dead functions,
+and the cycles and fan of the `source` graph.
 
 One line in scripts/ci/metrics.conf, run by devkit/bin/metrics_collect.sh, for example:
   shell-infra repo python3 -I devkit/metrics/shell.py --root . --scope infra \\
-      --src '**/*.sh' --src '.githooks/*' --shellcheck --complexity --dead \\
+      --src '**/*.sh' --src '.githooks/*' --shellcheck --complexity --dead --cycles --fan \\
       --list-out build/metrics/shell-infra.findings.txt --out build/metrics/shell-infra.json
 
 Files: every file under --root matching a --src glob (root-relative, `**` crosses directories;
@@ -21,6 +22,8 @@ Keys (docs/metrics-keys.md), each behind its flag; `<scope>` is `--scope`:
                                                   lint/shellcheckrc plus the repo's .shellcheckrc.
                                                   `info` and `style` are not counted: they are
                                                   advice, and SC2086 alone would swamp the key.
+                                                  The warnings also count devkit's own
+                                                  `stdin-in-read-loop` (below).
   --complexity  complexity.<scope>.branches_max   decision points per function: `if`, `elif`,
                 complexity.<scope>.branches_over_15  `case`, `for`, `while`, `until` in command
                                                   position and every `&&`/`||` (inside `[[ ]]`
@@ -40,6 +43,33 @@ Keys (docs/metrics-keys.md), each behind its flag; `<scope>` is `--scope`:
                                                   The plan hooks bin/local_gate.sh calls
                                                   (gate_plan, gate_plan_extra, gate_cleanup)
                                                   are entry points, never dead.
+  --cycles      coupling.<scope>.cycles           files that source each other: strongly
+                                                  connected components of the `source` graph
+                                                  (more than one file, or a file sourcing
+                                                  itself), python.py's Tarjan
+  --fan         coupling.<scope>.fan_in_max       over the same graph, python.py's definition:
+                coupling.<scope>.fan_out_max      how many files source a file, how many it
+                                                  sources (fan_in_max is report-only)
+
+The `source` graph: files are nodes; `source X` or `. X` in command position is an edge to the
+measured file X names. X is resolved lexically, never run. A `# shellcheck source=<path>` on the
+comment lines right above names it first (root-relative, then beside the file); `/dev/null`
+(shellcheck told not to follow) falls through to the argument, since the file is still
+sourced. Otherwise the argument, quotes dropped, keeps its literal tail after the last expansion:
+`"$(dirname "${BASH_SOURCE[0]}")/_lib.sh"`, `"$HERE/_lib.sh"` and `${DIR}/_lib.sh` all read `/_lib.sh`, looked up beside the sourcing file, then at the root. A literal path is
+looked up at the root, then beside the file. An argument with no `/…` literal tail (`. "$1"`,
+`"$dir/$name.sh"`) or a target outside the measured set (the vendored devkit/, a system file)
+is no edge. Blind spots: a path built at run time, and bats' `load`.
+
+stdin-in-read-loop (with --shellcheck): a command that reads its stdin, inside the body of a
+`while`/`until` loop whose condition is `read` (no `-u`), with its stdin neither redirected
+(`<`, `<<`, `<<<`, `<&`, `0<`) nor piped in. The loop's input is its stdin too, so the command
+drains it and the loop ends after one pass: homelab #108's pihole import inserted only the first
+adlist. The readers: `ssh` without `-n`/`-f`, `docker exec|run` and `kubectl exec` with `-i`, and
+`ffmpeg` without `-nostdin`. Why devkit's own (2026-10-19): shellcheck 0.11.0 drops SC2095
+whenever the line carries any `disable` directive, and SC2029 forces one on most ssh lines; it
+also misses `read … || [ -n … ]` conditions. It honours no disable comment: the fix is the flag
+or the redirect.
 
 The function scanner is lexical and stdlib-only: it tracks quotes, `$(...)`, `${...}`,
 backticks, heredocs, `[[ ]]`, `case` patterns and `{ }`/`( )` nesting, which is what finding a
@@ -48,9 +78,12 @@ quote, brace or heredoc it misreads) is exit 2 naming <path>:<line>, never a gue
 
 --list-out FILE: python.py's format (`# <key>` then one line per finding, keys sorted; empty
 when there are none). Paths are --root joined with the root-relative path.
-  shellcheck_errors, shellcheck_warnings   <path>:<line> SC<code> <message>, by path and line
+  shellcheck_errors, shellcheck_warnings   <path>:<line> SC<code> <message>, or <path>:<line>
+                                           stdin-in-read-loop <message>, by path and line
   branches_over_15                         <path>:<line> <function> branches=<n>, worst first
   unused                                   <path>:<line> <function> function, by path and line
+  cycles                                   one line per cycle: its files, space-separated, largest first
+  fan_in_max, fan_out_max                  <path> fan_in=<n> | fan_out=<n>, the top 10 (python.py's)
 
 Deterministic. Output: a flat JSON object to --out (default stdout). Exit: 0 ok, 2 a missing
 tool, a shellcheck that failed to run, a file the scanner cannot balance or a bad call.
@@ -60,12 +93,15 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import importlib.util
 import json
+import posixpath
 import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
 
 EXIT_USAGE = 2
 BRANCHES_THRESHOLD = 15
@@ -88,6 +124,13 @@ NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_:.-]*")
 OPERATORS = (";;&", ";;", ";&", "&&", "||", "|&", "<<<", "<<-", "<<", "&>>", "&>", ">>", ">&", "<&",
              "<>", ">|", ";", "&", "|", "(", ")", "<", ">")  # fmt: skip
 WORD_END = frozenset(" \t\n;&|()<>")
+# A word that assigns (`IFS=`, `a[0]+=x`) before a command: it keeps command position.
+ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^]]*\])?\+?=")
+STDIN_REDIRECTS = frozenset({"<", "<<", "<<-", "<<<", "<&", "<>"})
+OUTPUT_REDIRECTS = frozenset({">", ">>", ">|", ">&", "&>", "&>>"})
+UNIT_FLAG = re.compile(r"-[a-zA-Z]*u.*")  # read -u <fd>, or -ru3
+SSH_ARG_FLAGS = frozenset("BbcDEeFIiJLlmOoPpQRSWw")  # ssh options that take a value
+STDIN_CHECK = "stdin-in-read-loop"
 
 
 class CollectorError(Exception):
@@ -116,6 +159,28 @@ class Frame:
 
 
 @dataclass
+class Loop:
+    """A `while`/`until`/`for`/`select` loop the scanner is inside (stdin-in-read-loop)."""
+
+    state: str  # cond (while/until), head (for/select), body (after `do`)
+    reads: bool = False  # the condition's first command is `read` without -u
+    cond_seen: bool = False
+
+
+@dataclass
+class Command:
+    """One simple command's words, for the stdin-in-read-loop check."""
+
+    word: str
+    line: int
+    in_loop: bool  # inside the body of a loop that reads stdin
+    piped: bool  # the stdin is a pipe: `x | ssh …`
+    args: list[str] = field(default_factory=list)
+    redirected: bool = False
+    loop: Loop | None = None  # set for the `read` that is a loop's condition
+
+
+@dataclass
 class Context:
     """One code_until's parse state: each `$(...)` gets its own, as bash parses it apart."""
 
@@ -124,9 +189,18 @@ class Context:
     dbl: bool = False  # inside [[ ]]
     last: str = ""  # the previous token (`for ((` is arithmetic)
     pending_fn: Function | None = None  # `name()` read, its body not yet opened
+    sourcing: bool = False  # `source`/`.` read: the next word is the file it sources
+    command: Command | None = None  # the simple command being read
+    assigned: bool = False  # an assignment word opened this command: the next word is its name
 
     def case(self) -> Frame | None:
         return self.frames[-1] if self.frames and self.frames[-1].kind == "case" else None
+
+
+@dataclass(frozen=True)
+class Source:
+    arg: str  # the argument as written, quotes and all
+    line: int
 
 
 @dataclass
@@ -134,6 +208,8 @@ class Scanned:
     shown: str
     code: str  # the text with comments blanked, offsets preserved
     units: list[Function]  # the functions, then the file's top level as MAIN
+    sources: list[Source]  # every `source`/`.` in command position, in file order
+    stdin_readers: list[tuple[int, str]]  # (line, message): stdin-in-read-loop findings
 
 
 # ----------------------------------------------------------------------------- scanner
@@ -149,6 +225,9 @@ class Scanner:
         self.open: list[Function] = []
         self.comments: list[tuple[int, int]] = []
         self.heredocs: list[tuple[str, bool, int]] = []  # pending (delimiter, strip tabs, line)
+        self.sources: list[Source] = []
+        self.loops: list[Loop] = []
+        self.stdin_readers: list[tuple[int, str]] = []
 
     def fail(self, what: str, line: int | None = None) -> CollectorError:
         return CollectorError(f"{self.shown}:{line or self.line}: {what}")
@@ -158,7 +237,7 @@ class Scanner:
         chars = list(self.s)
         for a, b in self.comments:
             chars[a:b] = " " * (b - a)
-        return Scanned(self.shown, "".join(chars), [*self.functions, self.main])
+        return Scanned(self.shown, "".join(chars), [*self.functions, self.main], self.sources, self.stdin_readers)
 
     def branch(self) -> None:
         (self.open[-1] if self.open else self.main).branches += 1
@@ -189,6 +268,7 @@ class Scanner:
                 self.i += 1
                 self.newline()
             elif c == "\n":
+                self.end_command(ctx)
                 self.newline()
                 ctx.cmd = True
             elif c == "#":  # only at a token boundary: a word consumes its own `#`
@@ -215,6 +295,7 @@ class Scanner:
                 word = self.word()
                 self.on_word(ctx, word, start, line)
                 ctx.last = word
+        self.end_command(ctx)
         if closer is not None:
             raise self.fail("`$(` or `<(` never closed", start_line)
         if ctx.frames or ctx.pending_fn is not None:
@@ -223,6 +304,10 @@ class Scanner:
 
     def operator(self, ctx: Context, op: str, closer: str | None) -> bool:
         """Apply one operator; True when it is the `)` that ends this code_until."""
+        if op in STDIN_REDIRECTS:
+            self.redirect(ctx, op)
+        elif op not in OUTPUT_REDIRECTS:
+            self.end_command(ctx)
         case = ctx.case()
         if case is not None and case.state == "pattern" and not ctx.dbl and op in ("(", "|", ")"):
             if op == ")":  # a pattern's optional leading paren and its alternation are no-ops
@@ -265,8 +350,12 @@ class Scanner:
             elif case.state == "pattern" and word == "esac":
                 ctx.frames.pop()
                 ctx.cmd = False
+        elif ctx.sourcing and not ctx.cmd:
+            self.sources.append(Source(word, line))
+            ctx.sourcing = False
         elif not ctx.cmd:
-            pass
+            if ctx.command is not None:
+                ctx.command.args.append(word)
         elif ctx.pending_fn is not None:
             if word != "{":
                 raise self.fail(f"function {ctx.pending_fn.name}: a body other than {{ }} or ( )", line)
@@ -276,6 +365,15 @@ class Scanner:
 
     def command_word(self, ctx: Context, word: str, start: int, line: int) -> None:
         """A word in command position: a reserved word, a function definition or a command."""
+        ctx.sourcing = False  # a `.` with no argument before the next command sources nothing
+        if ASSIGNMENT.match(word) and ctx.pending_fn is None:
+            ctx.assigned = True  # `IFS= read …`: the command is the next word
+            return
+        if ctx.assigned:  # bash reads no reserved word after an assignment: `a=1 if` runs `if`
+            ctx.cmd = False
+            self.begin_command(ctx, word, line)
+            return
+        self.track_loop(word)
         if word == "function":
             self.skip_blanks()
             name_start, name_line = self.i, self.line
@@ -300,10 +398,60 @@ class Scanner:
             ctx.cmd = False
         elif word == "[[":
             ctx.dbl, ctx.cmd = True, False
+        elif word in ("source", "."):
+            ctx.sourcing, ctx.cmd = True, False
         elif self.empty_parens():
             ctx.pending_fn = Function(word, line, start)
         else:
             ctx.cmd = False
+            self.begin_command(ctx, word, line)
+
+    # -- stdin-in-read-loop -------------------------------------------------------------
+
+    def track_loop(self, word: str) -> None:
+        """Keep the loop stack: `while`/`until` open a condition, `do` a body, `done` closes."""
+        top = self.loops[-1] if self.loops else None
+        if word in ("while", "until"):
+            self.loops.append(Loop("cond"))
+        elif word in ("for", "select"):
+            self.loops.append(Loop("head"))
+        elif word == "do" and top is not None and top.state != "body":
+            top.state = "body"
+        elif word == "done" and top is not None:
+            self.loops.pop()
+
+    def begin_command(self, ctx: Context, word: str, line: int) -> None:
+        top = self.loops[-1] if self.loops else None
+        cond = top if top is not None and top.state == "cond" and not top.cond_seen else None
+        if cond is not None:
+            cond.cond_seen = True
+            cond.reads = word == "read"
+        ctx.command = Command(
+            word, line, in_loop=any(lp.reads and lp.state == "body" for lp in self.loops),
+            piped=ctx.last in ("|", "|&"), loop=cond if word == "read" else None,
+        )  # fmt: skip
+
+    def redirect(self, ctx: Context, op: str) -> None:
+        """A `<`-family redirect: the command's stdin, unless a digit other than 0 prefixes it."""
+        command = ctx.command
+        if command is None:
+            return
+        at = self.i - len(op) - 1
+        if at >= 0 and self.s[at].isdigit() and command.args and command.args[-1].isdigit():
+            if command.args.pop() != "0":
+                return
+        command.redirected = True
+
+    def end_command(self, ctx: Context) -> None:
+        command, ctx.command, ctx.assigned = ctx.command, None, False
+        if command is None:
+            return
+        if command.loop is not None and any(UNIT_FLAG.fullmatch(a) for a in command.args):
+            command.loop.reads = False  # `read -u 3`: the loop reads fd 3, not stdin
+        if command.in_loop and not command.piped and not command.redirected:
+            message = stdin_reader(command.word, command.args)
+            if message is not None:
+                self.stdin_readers.append((command.line, message))
 
     def push(self, ctx: Context, kind: str) -> None:
         """Open a `{`/`(` frame; a pending definition's opens the function's body."""
@@ -445,6 +593,41 @@ class Scanner:
                     break
 
 
+def _short_flags(args: list[str], takes_value: frozenset[str]) -> set[str]:
+    """The single-letter options before the first operand (`ssh -nT -i key host cmd` -> n T i)."""
+    seen: set[str] = set()
+    it = iter(args)
+    for arg in it:
+        if not arg.startswith("-") or arg == "-" or arg.startswith("--"):
+            if arg.startswith("--"):
+                seen.add(arg)
+                continue
+            break
+        for k, letter in enumerate(arg[1:]):
+            seen.add(letter)
+            if letter in takes_value:
+                if k == len(arg) - 2:
+                    next(it, None)
+                break
+    return seen
+
+
+def stdin_reader(word: str, args: list[str]) -> str | None:
+    """Why this command reads its stdin, or None (module docstring: stdin-in-read-loop)."""
+    tool = posixpath.basename(word)
+    if tool == "ssh":
+        flags = _short_flags(args, SSH_ARG_FLAGS)
+        return None if {"n", "f"} & flags else "ssh reads the loop's stdin; add -n or </dev/null"
+    if tool in ("docker", "kubectl") and args[:1] == ["exec"] or (tool == "docker" and args[:1] == ["run"]):
+        flags = _short_flags(args[1:], frozenset())
+        if "i" in flags or "--interactive" in flags:
+            return f"{tool} {args[0]} -i reads the loop's stdin; drop -i or add </dev/null"
+        return None
+    if tool == "ffmpeg" and "-nostdin" not in args:
+        return "ffmpeg reads the loop's stdin; add -nostdin or </dev/null"
+    return None
+
+
 # ------------------------------------------------------------------------------- files
 
 
@@ -523,7 +706,78 @@ def dead(scanned: list[Scanned], scope: str) -> Collected:
     )
 
 
-def shellcheck(root: Path, files: list[Path], scope: str) -> Collected:
+# A shellcheck directive naming the file the next command sources.
+SOURCE_DIRECTIVE = re.compile(r"#\s*shellcheck\s+(?:[a-z-]+=\S+\s+)*source=(\S+)")
+# The last expansion in an argument: what follows it is the literal tail.
+LAST_EXPANSION = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|[0-9@#?*!$-])(?!.*[$)}])|[)}](?!.*[$)}])")
+
+
+def _python() -> ModuleType:
+    """metrics/python.py, for coupling_keys (`python3 -I` keeps this directory off sys.path)."""
+    name = "devkit_metrics_python"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().parent / "python.py")
+        if spec is None or spec.loader is None:
+            raise CollectorError("cannot load metrics/python.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module  # before exec: dataclasses look their module up
+        sys.dont_write_bytecode = True  # a consumer's vendored devkit/ stays byte-identical
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+def directive_above(lines: list[str], line: int) -> str | None:
+    """The `# shellcheck source=` path on the comment lines right above `line` (1-based)."""
+    i = line - 2
+    while i >= 0 and lines[i].lstrip().startswith("#"):
+        m = SOURCE_DIRECTIVE.search(lines[i])
+        if m:
+            return m.group(1)
+        i -= 1
+    return None
+
+
+def source_candidates(arg: str, here: str, directive: str | None) -> list[str]:
+    """Root-relative paths `source <arg>` may name, most likely first (module docstring)."""
+    if directive is not None and directive != "/dev/null":
+        return [directive, posixpath.join(here, directive)]
+    text = arg.replace('"', "").replace("'", "")
+    m = None
+    for m in LAST_EXPANSION.finditer(text):
+        pass
+    tail = text[m.end():] if m else text
+    # After an expansion only a `/…` tail is a path: `$name.sh` builds the file name at run time.
+    if not tail or "$" in tail or "`" in tail or (m and not tail.startswith("/")):
+        return []
+    if m:
+        rel = tail.lstrip("/")
+        return [posixpath.join(here, rel), rel]
+    return [tail, posixpath.join(here, tail)]
+
+
+def source_graph(root: Path, scanned: list[Scanned], files: list[Path]) -> dict[str, set[str]]:
+    """Shown path -> the measured files it sources."""
+    by_rel = {posixpath.normpath(f.as_posix()): shown(root, f.as_posix()) for f in files}
+    graph: dict[str, set[str]] = {s.shown: set() for s in scanned}
+    for s, rel in zip(scanned, files, strict=True):
+        lines = (root / rel).read_text(encoding="utf-8").splitlines()
+        here = posixpath.dirname(rel.as_posix())
+        for src in s.sources:
+            for cand in source_candidates(src.arg, here, directive_above(lines, src.line)):
+                target = by_rel.get(posixpath.normpath(cand))
+                if target is not None:
+                    graph[s.shown].add(target)
+                    break
+    return graph
+
+
+def coupling(root: Path, scanned: list[Scanned], files: list[Path], scope: str, *, cycles: bool, fan: bool) -> Collected:
+    keys, findings = _python().coupling_keys(source_graph(root, scanned, files), scope, cycles=cycles, fan=fan)
+    return Collected(keys, findings)
+
+
+def shellcheck(root: Path, files: list[Path], scanned: list[Scanned], scope: str) -> Collected:
+    """shellcheck's errors and warnings, plus devkit's stdin-in-read-loop as warnings."""
     proc = subprocess.run(
         [str(SHELLCHECK), "--format=json1", *(f.as_posix() for f in files)],
         cwd=root, capture_output=True, text=True, check=False,
@@ -539,11 +793,15 @@ def shellcheck(root: Path, files: list[Path], scope: str) -> Collected:
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise CollectorError(f"unparseable shellcheck json1 output: {exc}") from exc
     out = Collected()
+    own = [(s.shown, line, f"{STDIN_CHECK} {msg}") for s in scanned for line, msg in s.stdin_readers]
     for level, stat in COUNTED_LEVELS.items():
-        hits = sorted((f, line, col, code, msg) for lv, f, line, col, code, msg in seen if lv == level)
+        hits = sorted(
+            (shown(root, f), line, col, f"SC{code} {msg}") for lv, f, line, col, code, msg in seen if lv == level
+        )
+        rows = [(path, line, text) for path, line, _, text in hits] + (own if level == "warning" else [])
         key = f"lint.{scope}.{stat}"
-        out.keys[key] = len(hits)
-        out.findings[key] = [f"{shown(root, f)}:{line} SC{code} {msg}" for f, line, _, code, msg in hits]
+        out.keys[key] = len(rows)
+        out.findings[key] = [f"{path}:{line} {text}" for path, line, text in sorted(rows)]
     return out
 
 
@@ -564,6 +822,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--shellcheck", action="store_true", help="shellcheck errors and warnings")
     parser.add_argument("--complexity", action="store_true", help="branches per function")
     parser.add_argument("--dead", action="store_true", help="functions nothing calls")
+    parser.add_argument("--cycles", action="store_true", help="files that source each other")
+    parser.add_argument("--fan", action="store_true", help="how many files a file sources, and is sourced by")
     parser.add_argument(
         "--list-out",
         metavar="FILE",
@@ -578,15 +838,16 @@ def collect(args: argparse.Namespace) -> Collected:
         raise CollectorError(f"--root {root} is not a directory")
     if SCOPE.fullmatch(args.scope) is None:
         raise CollectorError(f"--scope {args.scope!r} must match [A-Za-z0-9_-]+")
-    if not (args.shellcheck or args.complexity or args.dead):
-        raise CollectorError("nothing to collect: pass --shellcheck, --complexity or --dead")
+    if not (args.shellcheck or args.complexity or args.dead or args.cycles or args.fan):
+        raise CollectorError("nothing to collect: pass --shellcheck, --complexity, --dead, --cycles or --fan")
     files = source_files(root, args.src or list(DEFAULT_SRC), args.exclude)
     parts: list[Collected] = []
-    if args.complexity or args.dead:
-        scanned = scan_files(root, files)
-        parts += [m(scanned, args.scope) for w, m in ((args.complexity, complexity), (args.dead, dead)) if w]
+    scanned = scan_files(root, files)
+    parts += [m(scanned, args.scope) for w, m in ((args.complexity, complexity), (args.dead, dead)) if w]
+    if args.cycles or args.fan:
+        parts.append(coupling(root, scanned, files, args.scope, cycles=args.cycles, fan=args.fan))
     if args.shellcheck:
-        parts.append(shellcheck(root, files, args.scope))
+        parts.append(shellcheck(root, files, scanned, args.scope))
     out = Collected()
     for part in parts:
         out.keys.update(part.keys)

@@ -7,7 +7,7 @@
 //       --cyclomatic --cognitive --knip --cycles --bundle --out build/metrics/ts-frontend.json
 //
 // Usage: ts.mjs --root <dir> --src <subdir> --scope <name> [--out FILE]
-//               [--tsconfig tsconfig.app.json] [--test-glob <glob>]... [--list-out FILE]
+//               [--tsconfig tsconfig.app.json] [--test-glob <glob>]... [--exclude <glob>]... [--list-out FILE]
 //               [--cyclomatic] [--cognitive] [--knip [--knip-base]] [--cycles] [--bundle [--bundle-entry index.html]]
 //   --root       the package: holds package.json and node_modules/.bin, where every tool comes
 //                from (never PATH: the lockfile's version measures). A requested tool that is
@@ -21,6 +21,16 @@
 //   --test-glob  what is a test or test scaffolding, besides the defaults below; repeatable.
 //                Globs are relative to --src, `**` crosses directories, a bare `*.x` matches
 //                at any depth
+//   --exclude    a production file the repo does not own (finplat's vendored shadcn
+//                components/ui/chart.tsx); repeatable. Globs are relative to --root (the
+//                `src/...` form the production set uses; --test-glob's syntax), so a literal
+//                path or `dir/*` reads the same as in python.py and rust.py. An excluded file is
+//                not linted, is no graph node, and its unused exports and its own unused-file
+//                finding leave the knip keys; dependency findings stay (a missing or unused
+//                package is the manifest's, whoever imports it). The bundle still counts its
+//                bytes: it ships. A glob matching no production file is exit 2 (stale). The
+//                count is meta.<scope>.excluded_files (report-only), printed as `excluded N
+//                files` on stderr
 //   --tsconfig   for dependency-cruiser's path aliases (default tsconfig.app.json, then
 //                tsconfig.json; none is fine for a project without aliases)
 //
@@ -55,10 +65,20 @@
 //                                                     and excluded. The build runs with a clean
 //                                                     environment (PATH, HOME only), so values a
 //                                                     vite `define` bakes in do not vary per machine
-//                A Next app (a .next/ dir or a next.config.*) is read, not built: kb_total is
-//                .next/static, kb_entry build-manifest.json's rootMainFiles, polyfillFiles and
-//                pages/_app (the shared first load). `next build` (the repo's build tier) must
-//                have run; a missing manifest is exit 2 saying so (bundleNext)
+//                A Next app (a .next/ dir or a next.config.*) is read, not built: kb_entry is
+//                build-manifest.json's rootMainFiles, polyfillFiles and pages/_app (the shared
+//                first load), and
+//                bundle.<scope>.kb_route_max        the largest route's client payload: the
+//                                                     shared first load plus every JS and CSS
+//                                                     file its client reference manifest lists
+//                                                     (server/app/**/*_client-reference-manifest.js),
+//                                                     each file once; --list-out lists each route
+//                kb_total (.next/static) is declared report-only for a Next build (the output's
+//                `report_only` list, metrics_ratchet.py): Turbopack copies a module two routes
+//                import into each route's chunk, so the total sums those copies and grows with
+//                every new importer while no route's payload does (rollcall #35). `next build`
+//                (the repo's build tier) must have run; a missing manifest is exit 2 saying so
+//                (bundleNext)
 //
 // --list-out FILE: the findings behind the counts (metrics/python.py's format, written by
 // _lib.mjs writeFindings): `# <key>`, then one line per finding; empty when there are none.
@@ -137,6 +157,7 @@ function parse(argv) {
       "list-out": { type: "string" },
       tsconfig: { type: "string" },
       "test-glob": { type: "string", multiple: true, default: [] },
+      exclude: { type: "string", multiple: true, default: [] },
       cyclomatic: { type: "boolean", default: false },
       cognitive: { type: "boolean", default: false },
       knip: { type: "boolean", default: false },
@@ -200,6 +221,21 @@ function productionFiles(opts) {
   }
   if (found.length === 0) throw new CollectorError(`no production source files under ${srcDir}`);
   return found;
+}
+
+// excludedFiles: the production files the --exclude globs name, each glob matching at least one.
+// The same contract as metrics/python.py's Exclusions; keep the two in step.
+function excludedFiles(opts, files) {
+  const dropped = new Set();
+  for (const glob of opts.exclude) {
+    const re = globToRegExp(glob);
+    const hits = files.filter((f) => re.test(f));
+    if (hits.length === 0) {
+      throw new CollectorError(`--exclude ${glob} matches no production file under ${opts.root}; drop the stale exclusion`);
+    }
+    for (const f of hits) dropped.add(f);
+  }
+  return dropped;
 }
 
 // shown: a root-relative path as a lane opens it (repo-relative in a gate run, cwd = repo root).
@@ -311,7 +347,10 @@ const KNIP_KEYS = {
   },
 };
 
-function collectKnip(opts) {
+// A file's own findings, which an --exclude drops; the dependency kinds are the manifest's.
+const KNIP_FILE_KINDS = new Set(["exports", "types", "files"]);
+
+function collectKnip(opts, excluded) {
   const knip = requireBin(opts.root, "knip", "knip");
   // knip resolves --directory against its cwd, so the absolute path is passed.
   const args = ["--directory", resolve(opts.root), "--no-progress", "--reporter", "json"];
@@ -327,6 +366,7 @@ function collectKnip(opts) {
     const found = [];
     for (const issue of report.issues) {
       for (const [kind, label] of Object.entries(kinds)) {
+        if (KNIP_FILE_KINDS.has(kind) && excluded.has(issue.file)) continue;
         for (const item of Array.isArray(issue[kind]) ? issue[kind] : []) {
           found.push({ path: shown(opts, issue.file), line: item.line, name: item.name, label });
         }
@@ -421,7 +461,7 @@ function dirBytes(dir, skip = new Set()) {
 }
 
 function bundleKeys(scope, totalBytes, entryBytes) {
-  return { keys: { [`bundle.${scope}.kb_total`]: kib(totalBytes), [`bundle.${scope}.kb_entry`]: kib(entryBytes) }, findings: {} };
+  return { keys: { [`bundle.${scope}.kb_total`]: kib(totalBytes), [`bundle.${scope}.kb_entry`]: kib(entryBytes) }, findings: {}, reportOnly: [] };
 }
 
 function bundleVite(opts) {
@@ -466,12 +506,47 @@ function bundleVite(opts) {
   }
 }
 
+// nextFileBytes: the size of a file a Next manifest names (relative to .next/); a name the build
+// does not hold is a partial or stale build, never a smaller bundle.
+function nextFileBytes(nextDir, manifestPath, file) {
+  const path = join(nextDir, file);
+  if (!existsSync(path)) throw new CollectorError(`${manifestPath} names ${file}, which is not under ${nextDir}: a partial or stale build`);
+  return statSync(path).size;
+}
+
+// clientManifests: every App Router route's client reference manifest under server/app/, a
+// script `next build` writes as `globalThis.__RSC_MANIFEST["/about/page"] = {...json...};`. Read
+// as text and JSON-parsed, never evaluated. [] when there is no server/app/ (a pages-only app).
+function clientManifests(dir) {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { recursive: true })
+    .filter((rel) => rel.endsWith("_client-reference-manifest.js"))
+    .sort()
+    .map((rel) => join(dir, rel));
+}
+
+const RSC_ASSIGNMENT = /__RSC_MANIFEST\[("(?:[^"\\]|\\.)*")\]\s*=\s*/;
+
+// routeFiles: the route name and the client files (JS and CSS, relative to .next/) one client
+// reference manifest lists, across every layer (layout, page, the builtin global-error).
+function routeFiles(path) {
+  const text = readFileSync(path, "utf8");
+  const match = RSC_ASSIGNMENT.exec(text);
+  if (match === null) throw new CollectorError(`${path} holds no __RSC_MANIFEST[...] = {...} assignment: not a Next client reference manifest`);
+  const body = text.slice(match.index + match[0].length).trim().replace(/;$/, "");
+  const manifest = parseJson(body, `client reference manifest ${path}`);
+  const files = new Set();
+  for (const list of Object.values(manifest.entryJSFiles ?? {})) for (const file of list) files.add(file);
+  for (const list of Object.values(manifest.entryCSSFiles ?? {})) for (const css of list) files.add(css.path);
+  return { route: JSON.parse(match[1]), files };
+}
+
 // bundleNext: the build `next build` already wrote, never a build of its own: Next's build needs
 // the app's env (a placeholder DATABASE_URL, secrets) that the repo's build tier sets, and takes
-// that tier's minutes. Total is .next/static, everything a browser can fetch; entry is
-// build-manifest.json's shared first load (rootMainFiles, polyfillFiles, pages/_app), which every
-// route loads. Next 16 (Turbopack) writes no per-route client manifest beside it, so route
-// chunks are in the total only.
+// that tier's minutes. Entry is build-manifest.json's shared first load (rootMainFiles,
+// polyfillFiles, pages/_app), which every route loads; a route's payload is that plus the files
+// its client reference manifest lists, and kb_route_max the largest. Total is .next/static,
+// declared report-only (header, --bundle).
 function bundleNext(opts, nextDir) {
   const manifestPath = join(nextDir, "build-manifest.json");
   if (!existsSync(manifestPath)) {
@@ -482,12 +557,26 @@ function bundleNext(opts, nextDir) {
   const manifest = parseJson(readFileSync(manifestPath, "utf8"), "next build-manifest.json");
   const entryFiles = new Set([...(manifest.rootMainFiles ?? []), ...(manifest.polyfillFiles ?? []), ...(manifest.pages?.["/_app"] ?? [])]);
   if (entryFiles.size === 0) throw new CollectorError(`${manifestPath} names no rootMainFiles, polyfillFiles or pages/_app files`);
-  const entryBytes = [...entryFiles].reduce((n, f) => {
-    const path = join(nextDir, f);
-    if (!existsSync(path)) throw new CollectorError(`${manifestPath} names ${f}, which is not under ${nextDir}: a partial or stale build`);
-    return n + statSync(path).size;
-  }, 0);
-  return bundleKeys(opts.scope, dirBytes(join(nextDir, "static")), entryBytes);
+  const entryBytes = [...entryFiles].reduce((n, f) => n + nextFileBytes(nextDir, manifestPath, f), 0);
+  const appDir = join(nextDir, "server", "app");
+  const manifests = clientManifests(appDir);
+  if (manifests.length === 0) {
+    throw new CollectorError(`${appDir} holds no *_client-reference-manifest.js: kb_route_max reads the App Router's per-route client manifests, which next build (16+) writes there`);
+  }
+  const routes = manifests.map((path) => {
+    const { route, files } = routeFiles(path);
+    const own = [...files].filter((f) => !entryFiles.has(f));
+    return { route, bytes: entryBytes + own.reduce((n, f) => n + nextFileBytes(nextDir, path, f), 0) };
+  });
+  routes.sort((a, b) => b.bytes - a.bytes || (a.route < b.route ? -1 : 1));
+  const { keys } = bundleKeys(opts.scope, dirBytes(join(nextDir, "static")), entryBytes);
+  const maxKey = `bundle.${opts.scope}.kb_route_max`;
+  keys[maxKey] = kib(routes[0].bytes);
+  return {
+    keys,
+    findings: { [maxKey]: routes.map(({ route, bytes }) => `${kib(bytes)} KiB ${route}`) },
+    reportOnly: [`bundle.${opts.scope}.kb_total`],
+  };
 }
 
 const NEXT_CONFIGS = ["next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs"];
@@ -503,15 +592,23 @@ function collectBundle(opts) {
 // collect: every requested collector's { keys, findings } merged: keys are the JSON, findings
 // (key -> --list-out lines) explain them.
 function collect(opts) {
-  const out = { keys: {}, findings: {} };
-  const add = ({ keys, findings }) => {
+  const out = { keys: {}, findings: {}, reportOnly: [] };
+  const add = ({ keys, findings, reportOnly = [] }) => {
     Object.assign(out.keys, keys);
     Object.assign(out.findings, findings);
+    out.reportOnly.push(...reportOnly);
   };
-  const files = opts.cyclomatic || opts.cognitive || opts.cycles || opts.fan ? productionFiles(opts) : [];
+  const usesFiles = opts.cyclomatic || opts.cognitive || opts.cycles || opts.fan || opts.exclude.length > 0;
+  const production = usesFiles ? productionFiles(opts) : [];
+  const excluded = excludedFiles(opts, production);
+  const files = production.filter((f) => !excluded.has(f));
+  if (opts.exclude.length > 0) {
+    process.stderr.write(`metrics/${SCRIPT}: excluded ${excluded.size} files: ${[...excluded].map((f) => shown(opts, f)).join(" ")}\n`);
+    add({ keys: { [`meta.${opts.scope}.excluded_files`]: excluded.size }, findings: {} });
+  }
   if (opts.cyclomatic) add(collectCyclomatic(opts, files));
   if (opts.cognitive) add(collectCognitive(opts, files));
-  if (opts.knip) add(collectKnip(opts));
+  if (opts.knip) add(collectKnip(opts, excluded));
   const graph = opts.cycles || opts.fan ? importGraph(opts, files) : null;
   if (opts.cycles) add(collectCycles(opts, graph));
   if (opts.fan) add(collectFan(opts, graph));
@@ -521,8 +618,10 @@ function collect(opts) {
 
 try {
   const opts = parse(process.argv.slice(2));
-  const { keys, findings } = collect(opts);
-  writeOutput(keys, opts.out);
+  const { keys, findings, reportOnly } = collect(opts);
+  // The ratchet's `report_only` declaration (metrics_ratchet.py docstring); absent when empty,
+  // so a vite package's output is the bytes it always was.
+  writeOutput(reportOnly.length > 0 ? { ...keys, report_only: reportOnly.sort() } : keys, opts.out);
   if (opts["list-out"] !== undefined) writeFindings(findings, opts["list-out"]);
 } catch (err) {
   if (err instanceof CollectorError || (typeof err.code === "string" && err.code.startsWith("ERR_PARSE_ARGS"))) {

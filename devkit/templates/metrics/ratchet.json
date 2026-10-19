@@ -75,6 +75,14 @@
     "direction": "lower",
     "bound": null
   },
+  "coupling.infra.cycles": {
+    "direction": "lower",
+    "bound": null
+  },
+  "coupling.infra.fan_out_max": {
+    "direction": "lower",
+    "bound": null
+  },
   "coverage.backend.branches": {
     "direction": "higher",
     "bound": null
