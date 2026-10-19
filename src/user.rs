@@ -193,7 +193,7 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "hits live reddit"]
 	async fn test_fetching_user() {
-		crate::client::init_oauth_client().await;
+		crate::oauth::init_oauth_client().await;
 		let user = user("spez").await;
 		assert!(user.is_ok());
 		assert!(user.unwrap().karma > 100);

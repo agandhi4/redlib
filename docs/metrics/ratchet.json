@@ -10,7 +10,7 @@
     "source": "rust-app"
   },
   "coupling.app.cycles": {
-    "bound": 1,
+    "bound": 0,
     "direction": "lower",
     "source": "rust-app"
   },
