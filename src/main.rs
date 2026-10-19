@@ -9,10 +9,13 @@ use std::sync::LazyLock;
 use futures_lite::FutureExt;
 use hyper::{header::HeaderValue, Body, Request, Response};
 use log::{info, warn};
-use redlib::client::{canonical_path, init_oauth_client, rate_limit_check, CLIENT};
+use redlib::client::canonical_path;
 use redlib::media_proxy::proxy;
+use redlib::oauth::init_oauth_client;
 use redlib::preferences::ThemeAssets;
 use redlib::server::{self, RequestExt};
+use redlib::startup_check::rate_limit_check;
+use redlib::transport::CLIENT;
 use redlib::utils::{error, redirect};
 use redlib::{config, db, duplicates, headers, instance_info, post, search, settings, subreddit, subreddit_rss, user};
 
@@ -150,7 +153,7 @@ async fn main() {
 
 	// The OAuth client must exist before the rate limit check (which uses it) and before the
 	// server accepts requests. Bootstrapped here, in the runtime, rather than lazily from a
-	// blocking static initializer — see the note on `OAUTH_CLIENT` in client.rs.
+	// blocking static initializer — see the note on `OAUTH_SESSION` in oauth.rs.
 	info!("Creating OAUTH client.");
 	init_oauth_client().await;
 

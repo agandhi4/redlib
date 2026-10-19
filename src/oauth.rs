@@ -1,7 +1,4 @@
-use crate::{
-	client::oauth_session,
-	oauth_device::{AuthError, MobileSpoofAuth, OauthBackend},
-};
+use crate::oauth_device::{AuthError, MobileSpoofAuth, OauthBackend};
 use arc_swap::ArcSwap;
 use log::{error, info, trace, warn};
 use std::{
@@ -13,6 +10,7 @@ use std::{
 	},
 	time::{Duration, Instant},
 };
+use tokio::sync::OnceCell;
 use tokio::time::{error::Elapsed, timeout};
 
 const OAUTH_MAX_ATTEMPTS: u32 = 10;
@@ -23,7 +21,7 @@ const OAUTH_TIMEOUT: Duration = Duration::from_secs(5);
 const BLOCKED_TOKEN_REFRESH_COOLDOWN: Duration = Duration::from_secs(60);
 
 // Requests a freshly minted token may make before `client::fetch_json` rolls it over early.
-// `client::rate_limit_check` asserts a fresh token reports exactly this after one request.
+// `startup_check::rate_limit_check` asserts a fresh token reports exactly this after one request.
 pub(crate) const FRESH_TOKEN_BUDGET: u16 = 99;
 
 // The daemon rotates this long before expiry, but never sooner than the floor after a mint, so a
@@ -130,7 +128,7 @@ pub(crate) enum Rotation {
 
 /// Owns the live token and every rule for replacing it: single-flight rotation, the per-token
 /// request budget, and the blocked-token cooldown. One process-wide instance lives behind
-/// `client::oauth_session()`; tests build their own over a fake `Minter`.
+/// `oauth_session()`; tests build their own over a fake `Minter`.
 pub(crate) struct TokenManager<M> {
 	current: ArcSwap<Oauth>,
 	rolling_over: AtomicBool,
@@ -219,6 +217,38 @@ pub(crate) fn exit_for_restart(reason: &str) -> ! {
 	std::process::exit(1);
 }
 
+// Populated once by `init_oauth_client()` at startup. This used to be a `LazyLock` whose
+// initializer ran `futures_lite::block_on(Oauth::new())` from inside the tokio runtime; a
+// nested foreign executor never resets tokio's cooperative budget, so on a slow/degraded
+// network every timer and socket returned Pending+wake forever and the main thread spun at
+// 100% CPU before the server ever listened (Sept 2026 outage). Bootstrapping must stay async.
+static OAUTH_SESSION: OnceCell<TokenManager<MobileSpoofMinter>> = OnceCell::const_new();
+
+/// Bootstraps the OAuth client and starts the token-refresh daemon. Must complete, inside the
+/// tokio runtime, before anything calls `oauth_client()`. Idempotent: concurrent or repeated
+/// calls (tests) share the first initialization. Exits the process if every mint attempt fails.
+pub async fn init_oauth_client() {
+	OAUTH_SESSION
+		.get_or_init(|| async {
+			let session = TokenManager::bootstrap(MobileSpoofMinter).await.unwrap_or_else(|e| exit_for_restart(&e));
+			tokio::spawn(token_daemon());
+			session
+		})
+		.await;
+}
+
+/// The live token manager: current token, request budget, rotation. Panics if
+/// `init_oauth_client()` has not completed — that is a startup-ordering bug in `main`, never a
+/// runtime condition.
+pub(crate) fn oauth_session() -> &'static TokenManager<MobileSpoofMinter> {
+	OAUTH_SESSION.get().expect("OAuth client used before init_oauth_client() completed")
+}
+
+/// The live OAuth client (token + spoofed device headers).
+pub fn oauth_client() -> &'static ArcSwap<Oauth> {
+	oauth_session().current()
+}
+
 fn exit_on_failed_mint(outcome: Rotation) {
 	if let Rotation::Failed(e) = outcome {
 		exit_for_restart(&e);
@@ -251,7 +281,6 @@ pub async fn refresh_blocked_token() {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::client::{init_oauth_client, oauth_client};
 
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "hits live reddit"]

@@ -1,23 +1,19 @@
 use crate::dbg_msg;
-use crate::model::Post;
-use crate::oauth::{exit_for_restart, force_refresh_token, refresh_blocked_token, token_daemon, MobileSpoofMinter, Oauth, TokenManager, FRESH_TOKEN_BUDGET};
+use crate::oauth::{force_refresh_token, oauth_client, oauth_session, refresh_blocked_token};
 use crate::reddit_response::{interpret_response, TokenAction};
 use crate::rewrite::format_url;
 use crate::swr_cache::SwrCache;
-use arc_swap::ArcSwap;
+use crate::transport::CLIENT;
 use cached::proc_macro::cached;
 use futures_lite::{future::Boxed, FutureExt};
-use log::{info, trace, warn};
+use log::{trace, warn};
 use percent_encoding::{percent_encode, CONTROLS};
 use serde_json::Value;
 use std::result::Result;
 use std::sync::atomic::Ordering;
 use std::sync::LazyLock;
 use std::time::Duration;
-use tokio::sync::OnceCell;
-use wreq::redirect::Policy;
-use wreq::{header as wreq_header, Client as WreqClient, EmulationFactory, Method, Response as WreqResponse};
-use wreq_util::{Emulation, EmulationOS, EmulationOption};
+use wreq::{header as wreq_header, Method, Response as WreqResponse};
 
 const REDDIT_URL_BASE: &str = "https://oauth.reddit.com";
 const REDDIT_URL_BASE_HOST: &str = "oauth.reddit.com";
@@ -28,66 +24,10 @@ const REDDIT_SHORT_URL_BASE_HOST: &str = "redd.it";
 const ALTERNATIVE_REDDIT_URL_BASE: &str = "https://www.reddit.com";
 const ALTERNATIVE_REDDIT_URL_BASE_HOST: &str = "www.reddit.com";
 
-pub static CLIENT: LazyLock<WreqClient> = LazyLock::new(build_client);
-
-// Populated once by `init_oauth_client()` at startup. This used to be a `LazyLock` whose
-// initializer ran `futures_lite::block_on(Oauth::new())` from inside the tokio runtime; a
-// nested foreign executor never resets tokio's cooperative budget, so on a slow/degraded
-// network every timer and socket returned Pending+wake forever and the main thread spun at
-// 100% CPU before the server ever listened (Sept 2026 outage). Bootstrapping must stay async.
-static OAUTH_SESSION: OnceCell<TokenManager<MobileSpoofMinter>> = OnceCell::const_new();
-
-/// Bootstraps the OAuth client and starts the token-refresh daemon. Must complete, inside the
-/// tokio runtime, before anything calls `oauth_client()`. Idempotent: concurrent or repeated
-/// calls (tests) share the first initialization. Exits the process if every mint attempt fails.
-pub async fn init_oauth_client() {
-	OAUTH_SESSION
-		.get_or_init(|| async {
-			let session = TokenManager::bootstrap(MobileSpoofMinter).await.unwrap_or_else(|e| exit_for_restart(&e));
-			tokio::spawn(token_daemon());
-			session
-		})
-		.await;
-}
-
-/// The live token manager: current token, request budget, rotation. Panics if
-/// `init_oauth_client()` has not completed — that is a startup-ordering bug in `main`, never a
-/// runtime condition.
-pub(crate) fn oauth_session() -> &'static TokenManager<MobileSpoofMinter> {
-	OAUTH_SESSION.get().expect("OAuth client used before init_oauth_client() completed")
-}
-
-/// The live OAuth client (token + spoofed device headers).
-pub fn oauth_client() -> &'static ArcSwap<Oauth> {
-	oauth_session().current()
-}
-
 const URL_PAIRS: [(&str, &str); 2] = [
 	(ALTERNATIVE_REDDIT_URL_BASE, ALTERNATIVE_REDDIT_URL_BASE_HOST),
 	(REDDIT_SHORT_URL_BASE, REDDIT_SHORT_URL_BASE_HOST),
 ];
-
-pub fn build_client() -> WreqClient {
-	// Keeping this list short to aid in privacy.
-	// The more emulations, the more unique a fingerprint each instance has.
-	// But some emulations should increase evasiveness.
-	let emulation = [Emulation::Chrome145, Emulation::Firefox147];
-	let emulation_os = [EmulationOS::Android, EmulationOS::Windows];
-
-	let rand = fastrand::usize(..);
-	let emulation = EmulationOption::builder()
-		.emulation(emulation[rand % emulation.len()])
-		.emulation_os(emulation_os[rand % emulation_os.len()])
-		.build()
-		.emulation();
-
-	info!("Building Wreq client with random emulation {:?}", emulation);
-	WreqClient::builder()
-		.emulation(emulation)
-		.redirect(Policy::none())
-		.build()
-		.expect("Should always be able to build a client")
-}
 
 /// Gets the canonical path for a resource on Reddit. This is accomplished by
 /// making a `HEAD` request to Reddit at the path given in `path`.
@@ -355,73 +295,12 @@ async fn fetch_json(path: String, quarantine: bool) -> Result<Value, String> {
 	result
 }
 
-async fn self_check(sub: &str) -> Result<(), String> {
-	let query = format!("/r/{sub}/hot.json?&raw_json=1");
-
-	match Post::fetch(&query, true).await {
-		Ok(_) => Ok(()),
-		Err(e) => Err(e),
-	}
-}
-
-pub async fn rate_limit_check() -> Result<(), String> {
-	// First, check a subreddit.
-	self_check("reddit").await?;
-	// This will reduce the rate limit to 99. Assert this check.
-	let remaining = oauth_session().ratelimit_remaining();
-	if remaining.load(Ordering::SeqCst) != FRESH_TOKEN_BUDGET {
-		return Err(format!(
-			"Rate limit check 1 failed: expected {FRESH_TOKEN_BUDGET}, got {}",
-			remaining.load(Ordering::SeqCst)
-		));
-	}
-	// Now, we switch out the OAuth client.
-	// This checks for the IP rate limit association.
-	force_refresh_token().await;
-	// Now, check a new sub to break cache.
-	self_check("rust").await?;
-	// Again, assert the rate limit check.
-	if remaining.load(Ordering::SeqCst) != FRESH_TOKEN_BUDGET {
-		return Err(format!(
-			"Rate limit check 2 failed: expected {FRESH_TOKEN_BUDGET}, got {}",
-			remaining.load(Ordering::SeqCst)
-		));
-	}
-
-	Ok(())
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use {crate::config::get_setting, sealed_test::prelude::*};
+	use crate::oauth::init_oauth_client;
 
 	const POPULAR_URL: &str = "/r/popular/hot.json?&raw_json=1&geo_filter=GLOBAL";
-
-	#[tokio::test(flavor = "multi_thread")]
-	#[ignore = "hits live reddit"]
-	async fn test_rate_limit_check() {
-		init_oauth_client().await;
-		// The check asserts a fresh token's budget (99); other tests in this process share the
-		// client and have already spent some, so refresh first — matches main's ordering.
-		force_refresh_token().await;
-		rate_limit_check().await.unwrap();
-	}
-
-	#[test]
-	#[ignore = "hits live reddit"]
-	#[sealed_test(env = [("REDLIB_DEFAULT_SUBSCRIPTIONS", "rust")])]
-	fn test_default_subscriptions() {
-		tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(async {
-			let subscriptions = get_setting("REDLIB_DEFAULT_SUBSCRIPTIONS");
-			assert!(subscriptions.is_some());
-
-			// check rate limit
-			init_oauth_client().await;
-			force_refresh_token().await;
-			rate_limit_check().await.unwrap();
-		});
-	}
 
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "hits live reddit"]

@@ -1,8 +1,9 @@
 //! The media proxy behind `/img`, `/vid`, `/thumb` and the other media routes in `main.rs`:
 //! fetches from Reddit's CDN with the spoofed device's User-Agent and strips CDN headers.
 
-use crate::client::{oauth_client, CLIENT};
+use crate::oauth::oauth_client;
 use crate::server::RequestExt;
+use crate::transport::CLIENT;
 use hyper::{header, Body, Request as HyperRequest, Response as HyperResponse};
 use log::{error, warn};
 use wreq::{header as wreq_header, Response as WreqResponse};
