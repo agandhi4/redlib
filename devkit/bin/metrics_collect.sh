@@ -88,7 +88,7 @@
 # tiers that ran in this gate) were written before this job and are merged into the snapshot;
 # an `rm -rf build/metrics` here would silently drop them.
 #
-# Findings: a collector whose command runs devkit's metrics/python.py, ts.mjs, rust.py or jscpd.mjs gets
+# Findings: a collector whose command runs devkit's metrics/python.py, ts.mjs, rust.py, shell.py or jscpd.mjs gets
 # `--list-out build/metrics/<name>.findings.txt` appended (nothing to declare in the conf; a
 # command that names its own --list-out keeps it): the file, function, module behind every
 # count, so a lane reads what to fix instead of scripting it. Appended to the end of the
@@ -111,7 +111,7 @@ readonly GATE_JSON=build/metrics/gate.json   # local_gate.sh's job seconds: whic
 readonly SUBCOMMANDS="snapshot check tighten rebaseline"
 # A conf command that runs one of devkit's --list-out collectors (any path prefix: devkit/,
 # ../devkit/). Matched against " <command> " so the name may end the line.
-readonly LIST_OUT_COLLECTOR='[[:space:]/]metrics/(python\.py|ts\.mjs|rust\.py|jscpd\.mjs)[[:space:]]'
+readonly LIST_OUT_COLLECTOR='[[:space:]/]metrics/(python\.py|ts\.mjs|rust\.py|shell\.py|jscpd\.mjs)[[:space:]]'
 # Tier inputs (header): every devkit collector flag that reads a build or test artefact, one
 # row each; a new artefact-reading collector or flag is a new row, read by tier_inputs.
 #   collector      flag                the input checked for, and its kind

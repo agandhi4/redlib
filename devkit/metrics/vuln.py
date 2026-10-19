@@ -22,6 +22,10 @@ Sources (repeatable, mixed):
                             (never `devDependencies`) through `snapshots`, parsed by indentation
                             (no YAML library in the stdlib); a package reached both ways is production
   --cargo-lock <file>       Cargo.lock `[[package]]` entries (no dev split in the lock format)
+  --compose <file>...       compose files: the `image:` of every service (bin/_compose.py reads
+                            them, extends resolved). OSV indexes no container image, so these
+                            are counted, not queried: the image keys below, and no
+                            critical/high/total/packages keys when no lockfile is given
 
 Keys (docs/metrics-keys.md, domain `vuln`, direction lower; REPORT-ONLY, never a tracked
 bound: a new advisory moves the number without a code change, so the ratchet must not fail a
@@ -33,6 +37,12 @@ PR for it, and the scorecard reads the snapshot instead):
                           (instalite's web/), which the scorecard reads as `ratchet.vuln` NA:
                           there is no production exposure to measure
 and one `vuln: <severity> <package>@<version> <id>` line per hit on stderr, worst first.
+With --compose:
+  vuln.<scope>.images             service image references
+  vuln.<scope>.images_unpinned    neither a digest nor a tag other than `latest` (no tag is
+                                  latest): a pull may bring any version, vulnerable or not
+  vuln.<scope>.images_undigested  no `@sha256:` digest: a tag can be re-pushed, a digest cannot
+and one `vuln: unpinned <file>:<line> <service> <image>` line per unpinned image on stderr.
 
 Severity: OSV `database_specific.severity` when present, else the CVSS v3/v4 base score
 banded (>= 9 CRITICAL, >= 7 HIGH, >= 4 MODERATE, else LOW), else UNKNOWN (counted in total).
@@ -45,6 +55,7 @@ its source reports nothing rather than a clean score). OSV_URL overrides the end
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -53,6 +64,7 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import ModuleType
 
 EXIT_USAGE = 2
 OSV_URL = os.environ.get("OSV_URL", "https://api.osv.dev")
@@ -62,6 +74,43 @@ ORDER = ["CRITICAL", "HIGH", "MODERATE", "LOW", "UNKNOWN"]
 
 class CollectorError(Exception):
     """An unreadable source or an OSV failure (exit 2)."""
+
+
+def _compose_reader() -> ModuleType:
+    """bin/_compose.py by path (`python3 -I` keeps it off sys.path; VENDOR_PATHS vendors bin/
+    beside metrics/), the reader guard_check.py's compose rules use."""
+    name = "devkit_compose"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = Path(__file__).resolve().parent.parent / "bin" / "_compose.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise CollectorError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module  # before exec: its dataclasses look their module up
+    sys.dont_write_bytecode = True  # a consumer's vendored devkit/ stays byte-identical
+    spec.loader.exec_module(module)
+    return module
+
+
+def compose_images(files: list[str], scope: str) -> dict[str, int]:
+    """The image keys over the compose files' services; each unpinned one named on stderr."""
+    reader = _compose_reader()
+    refs = []
+    for f in files:
+        try:
+            refs.extend((f, s) for s in reader.services(Path(f), f) if s.image is not None)
+        except (reader.YamlError, reader.ComposeError) as exc:
+            raise CollectorError(str(exc)) from exc
+    unpinned = [(f, s) for f, s in refs if s.image.unpinned]
+    for f, s in unpinned:
+        print(f"vuln: unpinned {f}:{s.line} {s.name} {s.spec['image']}", file=sys.stderr)
+    print(f"vuln: {len(refs)} compose images, {len(unpinned)} unpinned", file=sys.stderr)
+    return {
+        f"vuln.{scope}.images": len(refs),
+        f"vuln.{scope}.images_unpinned": len(unpinned),
+        f"vuln.{scope}.images_undigested": sum(1 for _, s in refs if not s.image.digest),
+    }
 
 
 def uv_packages(project: Path) -> list[tuple[str, str, str]]:
@@ -212,6 +261,47 @@ def severity_of(vuln: dict) -> str:
     return "UNKNOWN"
 
 
+def locked_vulns(args: argparse.Namespace) -> dict[str, int]:
+    """OSV over the locked production packages: the severity keys and the packages queried."""
+    packages: list[tuple[str, str, str]] = []
+    for p in args.uv:
+        packages.extend(uv_packages(Path(p)))
+    for f in args.npm_lock:
+        packages.extend(npm_packages(Path(f)))
+    for f in args.pnpm_lock:
+        packages.extend(pnpm_packages(Path(f)))
+    for f in args.cargo_lock:
+        packages.extend(cargo_packages(Path(f)))
+    packages = sorted(set(packages))
+    # A lockfile with only dev dependencies (instalite's web/) has an empty production set:
+    # that is the answer, zero exposure, not a broken source.
+    if not packages:
+        print("vuln: 0 locked production packages (dev-only lockfile): nothing to query", file=sys.stderr)
+    hits: dict[str, set[tuple[str, str]]] = {}  # vuln id -> {(name, version)}
+    for i in range(0, len(packages), BATCH) if packages else []:
+        chunk = packages[i : i + BATCH]
+        res = osv("/v1/querybatch", {"queries": [{"package": {"name": n, "ecosystem": eco}, "version": v} for eco, n, v in chunk]})
+        for (eco, n, v), r in zip(chunk, res.get("results", [])):
+            for vuln in r.get("vulns") or []:
+                hits.setdefault(vuln["id"], set()).add((n, v))
+    rows = []
+    for vid in sorted(hits):
+        rows.append((severity_of(osv(f"/v1/vulns/{vid}")), vid))
+    counts = {s: 0 for s in ORDER}
+    for sev, _ in rows:
+        counts[sev] += 1
+    for sev, vid in sorted(rows, key=lambda r: (ORDER.index(r[0]), r[1])):
+        pk = ", ".join(f"{n}@{v}" for n, v in sorted(hits[vid]))
+        print(f"vuln: {sev} {pk} {vid}", file=sys.stderr)
+    print(f"vuln: {len(packages)} locked production packages, {len(rows)} vulnerabilities ({counts['CRITICAL']} critical, {counts['HIGH']} high)", file=sys.stderr)
+    return {
+        f"vuln.{args.scope}.critical": counts["CRITICAL"],
+        f"vuln.{args.scope}.high": counts["HIGH"],
+        f"vuln.{args.scope}.total": len(rows),
+        f"vuln.{args.scope}.packages": len(packages),
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--scope", required=True)
@@ -219,51 +309,21 @@ def main() -> int:
     ap.add_argument("--npm-lock", action="append", default=[], help="a package-lock.json")
     ap.add_argument("--pnpm-lock", action="append", default=[], help="a pnpm-lock.yaml (v9)")
     ap.add_argument("--cargo-lock", action="append", default=[], help="a Cargo.lock")
+    ap.add_argument("--compose", action="extend", nargs="+", default=[], metavar="FILE", help="compose files (image references)")
     ap.add_argument("--out", help="write the JSON here (default: stdout)")
     args = ap.parse_args()
-    if not (args.uv or args.npm_lock or args.pnpm_lock or args.cargo_lock):
-        ap.error("at least one of --uv, --npm-lock, --pnpm-lock, --cargo-lock")
+    locked = bool(args.uv or args.npm_lock or args.pnpm_lock or args.cargo_lock)
+    if not (locked or args.compose):
+        ap.error("at least one of --uv, --npm-lock, --pnpm-lock, --cargo-lock, --compose")
+    out: dict[str, int] = {}
     try:
-        packages: list[tuple[str, str, str]] = []
-        for p in args.uv:
-            packages.extend(uv_packages(Path(p)))
-        for f in args.npm_lock:
-            packages.extend(npm_packages(Path(f)))
-        for f in args.pnpm_lock:
-            packages.extend(pnpm_packages(Path(f)))
-        for f in args.cargo_lock:
-            packages.extend(cargo_packages(Path(f)))
-        packages = sorted(set(packages))
-        # A lockfile with only dev dependencies (instalite's web/) has an empty production set:
-        # that is the answer, zero exposure, not a broken source.
-        if not packages:
-            print("vuln: 0 locked production packages (dev-only lockfile): nothing to query", file=sys.stderr)
-        hits: dict[str, set[tuple[str, str]]] = {}  # vuln id -> {(name, version)}
-        for i in range(0, len(packages), BATCH) if packages else []:
-            chunk = packages[i : i + BATCH]
-            res = osv("/v1/querybatch", {"queries": [{"package": {"name": n, "ecosystem": eco}, "version": v} for eco, n, v in chunk]})
-            for (eco, n, v), r in zip(chunk, res.get("results", [])):
-                for vuln in r.get("vulns") or []:
-                    hits.setdefault(vuln["id"], set()).add((n, v))
-        rows = []
-        for vid in sorted(hits):
-            rows.append((severity_of(osv(f"/v1/vulns/{vid}")), vid))
+        if args.compose:
+            out.update(compose_images(args.compose, args.scope))
+        if locked:
+            out.update(locked_vulns(args))
     except CollectorError as e:
         print(f"vuln: {e}", file=sys.stderr)
         return EXIT_USAGE
-    counts = {s: 0 for s in ORDER}
-    for sev, _ in rows:
-        counts[sev] += 1
-    for sev, vid in sorted(rows, key=lambda r: (ORDER.index(r[0]), r[1])):
-        pk = ", ".join(f"{n}@{v}" for n, v in sorted(hits[vid]))
-        print(f"vuln: {sev} {pk} {vid}", file=sys.stderr)
-    out = {
-        f"vuln.{args.scope}.critical": counts["CRITICAL"],
-        f"vuln.{args.scope}.high": counts["HIGH"],
-        f"vuln.{args.scope}.total": len(rows),
-        f"vuln.{args.scope}.packages": len(packages),
-    }
-    print(f"vuln: {len(packages)} locked production packages, {len(rows)} vulnerabilities ({counts['CRITICAL']} critical, {counts['HIGH']} high)", file=sys.stderr)
     text = json.dumps(out, indent=2) + "\n"
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)

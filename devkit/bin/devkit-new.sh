@@ -4,11 +4,11 @@
 # Usage: devkit-new.sh <name> --stack <stack> [--dir <parent>] [--no-image]
 #   name        repo, image and container name: lowercase, digits and dashes
 #   --stack     a directory under templates/new/stacks/ (python-fastapi, node-service, rust,
-#               next-vercel, swift-app)
+#               next-vercel, swift-app, infra-compose)
 #   --dir       parent directory; the repo is <dir>/<name> (default: the current directory)
 #   --no-image  no Dockerfile, publish workflow or smoke; ci-image and ci-smoke become stubs.
 #               Implied for a stack whose stack.conf says STACK_IMAGE=0 (next-vercel: Vercel builds;
-#               swift-app: Xcode and TestFlight ship it)
+#               swift-app: Xcode and TestFlight ship it; infra-compose runs other repos' images)
 #   --list      print the stacks and exit
 #   Exit 0 ok, 1 a step failed (the directory is left for inspection), 2 usage or a missing tool.
 # Env: DEVKIT_URL and DEVKIT_REF name what to vendor (devkit-sync.sh; default upstream main).
@@ -131,9 +131,10 @@ HOOKS=$(
   PRE_COMMIT_STEPS=() PRE_PUSH_STEPS=()
   # shellcheck source=/dev/null  # format in bin/hook_steps.sh
   . "$HOOKS_CONF"
-  # One code span per hook: "pre-commit `ci-guards ci-lint`, pre-push `ci-unit`".
+  # One code span per hook: "pre-commit `ci-guards ci-lint`, pre-push `ci-unit`"; a step's
+  # path override (`ci-lint:only=*.sh`) is hooks.conf's detail, not the target's name.
   # shellcheck disable=SC2016  # the backticks are Markdown, not command substitution
-  targets() { local s out=''; for s in "$@"; do out+="${out:+ }${s#*=}"; done; if [ -n "$out" ]; then printf '`%s`' "$out"; else printf nothing; fi; }
+  targets() { local s t out=''; for s in "$@"; do t=${s#*=}; out+="${out:+ }${t%%:*}"; done; if [ -n "$out" ]; then printf '`%s`' "$out"; else printf nothing; fi; }
   printf 'pre-commit %s, pre-push %s' "$(targets ${PRE_COMMIT_STEPS[@]+"${PRE_COMMIT_STEPS[@]}"})" \
     "$(targets ${PRE_PUSH_STEPS[@]+"${PRE_PUSH_STEPS[@]}"})"
 )
@@ -250,9 +251,9 @@ echo "devkit-new: devkit/bin/scorecard.py . --mode rebaseline"
 python3 -I devkit/bin/scorecard.py . --mode rebaseline || die "scorecard.py --mode rebaseline failed"
 git add docs/metrics/scorecard.json
 echo "devkit-new: first commit, through the hooks (pre-commit runs make ci-quick)"
-# The trailer from the chain the commit-msg hook's trailer step reads (_trailer_lib.sh), so an
-# agent's scaffold passes its own hook and a human's (DEVKIT_COMMIT_TRAILER= or devkit.trailer)
-# carries what they chose.
+# devkit-sync's trailer (_trailer_lib.sh): a Claude trailer by default, so an agent's scaffold
+# passes its own commit-msg hook; a human's (DEVKIT_COMMIT_TRAILER= or devkit.trailer) carries
+# what they chose.
 TRAILER=$(devkit_commit_trailer)
 git commit -q -m "Create $NAME with devkit new ($STACK, devkit $DEVKIT_SHA7)
 

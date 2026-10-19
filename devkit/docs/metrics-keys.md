@@ -44,6 +44,7 @@ schema 1 envelope (finplat's `make metrics`) and a bare flat file, which carry n
 | `size` | lower | `size.backend.max_lines`, `size.frontend.over_600` (`metrics/size.py`: lines of the largest production file; files over 600 lines); REPORT-ONLY: size alone never justifies a split, so a long file is a signal to read, never a gate failure (owner 2026-10-18) |
 | `vuln` | lower | `vuln.backend.high`, `vuln.frontend.total` (`metrics/vuln.py`, OSV over the locked production set; REPORT-ONLY: a new advisory moves it without a code change, so never gated even with a bound in the file; the scorecard reads the snapshot, else `docs/metrics/report-only.json`) |
 | `allowlist` | lower | `allowlist.backend.own_commit` (shrink-only allow-lists) |
+| `lint` | lower | `lint.infra.shellcheck_errors`, `lint.infra.shellcheck_warnings` (a linter's findings where the stack has no editor-time gate holding them at 0) |
 | `gate` | lower | `gate.backend-unit.seconds`, `gate.total.seconds` (wall-clock seconds) |
 | `tier` | lower | `tier.unit.seconds`, `tier.db.seconds` (wall-clock seconds of the guarded command) |
 | `tests` | higher | `tests.unit.pytest`, `tests.e2e.playwright` (tests that ran, per tier and runner) |
@@ -88,15 +89,19 @@ Exactly the keys each emits, per flag; `<s>` is `--scope`. CLIs: devkit README, 
 | | `--dead` | `dead.<s>.rustc` (rustc's unused-code warnings: `dead_code`, `unused_imports`/`_variables`/`_assignments`/`_mut`/`_macros`/`_macro_rules`/`_labels`/`_extern_crates`, `unreachable_code`/`_patterns`; production targets only; a crate's `#![allow]` hides what it allows). Duplication is `jscpd.mjs` over the `.rs` dirs |
 | | `--cycles` | `coupling.<s>.cycles` (strongly connected components of more than one file in the module graph of every production target `cargo metadata --no-deps` names: files are modules; edges are `use` leaves and `crate::`/`self::`/`super::`/child-module paths, each resolved to the file defining the item, re-exports and glob re-exports followed; a `pub use` is an alias, not an edge; `mod x;` is no edge; `#[cfg(test)]` items and `#![cfg(test)]` files are not read; cross-crate paths are no edges. Lexical: `metrics/_rust_graph.py`'s header lists what it cannot see) |
 | | `--fan` | `coupling.<s>.fan_in_max` (report-only), `coupling.<s>.fan_out_max` over the same graph (the python.py definition) |
+| `shell.py` | `--shellcheck` | `lint.<s>.shellcheck_errors`, `lint.<s>.shellcheck_warnings` (shellcheck's `error` and `warning` comments, once each, from `bin/shellcheck.sh`: the release `bin/release_tool.sh` pins, over `lint/shellcheckrc` plus the repo's `.shellcheckrc`; `info` and `style` are not counted) |
+| | `--complexity` | `complexity.<s>.branches_max`, `complexity.<s>.branches_over_15` (decision points per function: `if`, `elif`, `case` (once, however many arms), `for`, `while`, `until` in command position and every `&&`/`||`; a file's top level is one more unit, `<main>`. Lexical: the scanner in the collector's header) |
+| | `--dead` | `dead.<s>.unused` (functions of the `--src` set whose name appears nowhere in the set's code outside their own body; strings and `trap` count as uses; the plan hooks `local_gate.sh` calls are entry points) |
 | `jscpd.mjs` | | `duplication.<s>.jscpd_percent` (jscpd's `statistics.total.percentage`, two decimals), `duplication.<s>.clones` |
 | `size.py` | `--scope <s> --src <dir>... --ext .py|.ts,.tsx [--exclude <glob>]...` | `size.<s>.max_lines`, `size.<s>.over_600` (production files only: tests, fixtures, generated and vendored paths excluded; any language; both report-only, not in the starter; every file over the limit is listed on stderr) |
 | `vuln.py` | `--scope <scope> --uv <dir>|--npm-lock <file>|--pnpm-lock <file>|--cargo-lock <file>...` | `vuln.<scope>.critical`, `vuln.<scope>.high`, `vuln.<scope>.total` (known vulnerabilities in the locked production packages, from OSV; report-only, not in the starter), `vuln.<scope>.packages` (the production packages queried; 0 for a dev-only lockfile, which the scorecard reads as NA) |
+| | `--compose <file>...` | `vuln.<scope>.images` (service image references in the compose files, `extends` resolved), `vuln.<scope>.images_unpinned` (neither a digest nor a tag other than `latest`), `vuln.<scope>.images_undigested` (no `@sha256:` digest); report-only like every `vuln.*` key; no severity or `packages` key when no lockfile is given, since OSV indexes no image |
 | `statements.py` (area `job:db`) | `--in <file> --out … [--min-routes N]` | `statements.<METHOD>:/<route template>` (the db tier's statement fixture writes the per-route maxima to a file outside build/metrics/; the collector validates the shape, prefixes and sorts; tolerance 0 by the ratchet; fewer than N routes is exit 2, so a fixture that recorded nothing cannot pass as clean) |
 | `coverage.py` (area `job:<tier job>`) | `--coverage-json` | `coverage.<s>.lines` (covered_lines / num_statements), `coverage.<s>.branches` (covered_branches / num_branches; omitted when no branches were measured) |
 | | `--istanbul-summary` | `coverage.<s>.lines` (`total.lines.pct`), `coverage.<s>.branches` (`total.branches.pct`; omitted when "Unknown") |
 | | `--llvm-cov-json` | `coverage.<s>.lines` (`cargo llvm-cov --json` export: `data[0].totals.lines` covered / count), `coverage.<s>.branches` (the same for `branches`; omitted at count 0, which is every stable-toolchain run: rustc's branch coverage is nightly-only). Inline `#[cfg(test)]` modules are in the counts |
 
-**Findings (`--list-out FILE`, `python.py`, `ts.mjs`, `rust.py` and `jscpd.mjs`).** The lines behind the counts, for
+**Findings (`--list-out FILE`, `python.py`, `ts.mjs`, `rust.py`, `shell.py` and `jscpd.mjs`).** The lines behind the counts, for
 a lane to work from; never a ratchet input, and the JSON is the same bytes with or without it.
 A `# <key>` header per key that has findings, then one line each; keys sorted; an empty file
 when nothing is over. Paths are `--root` joined with the tool's path, so repo-relative in a
@@ -106,7 +111,7 @@ line, so the `def` is found by name (`Class::method`); sonarjs gives no name, so
 identifier at the reported column, `<anonymous>` for an inline callback. Dead code:
 `<path>:<line> <name> <kind>` (vulture's kind, or knip's `export`, `type`, `file`,
 `dependency`, `devDependency`, `unlisted`, `unresolved`, `binary`; no `:<line>` when knip has
-none), by path and line; a vulture reachability finding prints its message; rustc's is `<path>:<line> <lint> <message>` at the macro call site for a finding inside an expansion. `cycles`: one line
+none), by path and line; a vulture reachability finding prints its message; rustc's is `<path>:<line> <lint> <message>` at the macro call site for a finding inside an expansion; shell.py's is `<path>:<line> <function> function`. shellcheck: `<path>:<line> SC<code> <message>`, by path and line; `branches_over_15`: `<path>:<line> <function> branches=<n>`, worst first. `cycles`: one line
 per cycle, its files space-separated, largest first. `fan_in_max`, `fan_out_max`:
 `<path> fan_in=<n>`, the top 10, ties by path. `clones` (jscpd.mjs, whose paths are relative
 to the working directory, the repo root): one line per clone pair,

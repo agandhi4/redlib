@@ -187,6 +187,8 @@ def _directive(section: Section, tokens: list[str], where: str, lineno: int) -> 
 
 def _validate(section: Section, path: Path) -> None:
     where = f"{path}:{section.line}: [{section.name}]"
+    if section.lang not in tree.LANGS:
+        raise ConfError(f"{where}: layers.conf reads lang {' or '.join(tree.LANGS)}, not {section.lang}")
     if not section.layers:
         raise ConfError(f"{where} has no `layer`")
     for importer, imported in section.denies:

@@ -10,8 +10,9 @@ and their parameters are the repo's `scripts/ci/guards.conf`
 Usage, from the repo root:
   guard_check.py [--conf scripts/ci/guards.conf] [--section NAME ...] [--metrics-out FILE]
 
-Conf: the section keys of layers.conf (bin/_source_tree.py: lang, root, src, exclude, alias),
-then rule lines, then `known` lines; `#` comments carry each rule's why. Globs are relative to
+Conf: the section keys of layers.conf (bin/_source_tree.py: lang, root, src, exclude, alias;
+lang compose too, whose section takes only the compose-* rules and reads the compose files
+under src through bin/_compose.py, stdlib only), then rule lines, then `known` lines; `#` comments carry each rule's why. Globs are relative to
 the section's root, and a glob also names a directory the file is under.
 
   only-import MODULE[,MODULE] GLOB...           only files under the globs import these
@@ -66,6 +67,20 @@ the section's root, and a glob also names a directory the file is under.
                                                 also carries one of DECORATORs; names match
                                                 as written on a dotted suffix (`post` names
                                                 `router.post`)
+  compose-healthcheck    [except GLOB[:SERVICE,SERVICE]...]
+                                                compose: every service with an `image:` or
+                                                `build:` declares a healthcheck (a block with
+                                                no `test` keeps the image's own; `disable:
+                                                true` or test NONE is none)
+  compose-pinned-image   [except GLOB[:SERVICE,SERVICE]...]
+                                                compose: every `image:` has a digest or a tag
+                                                other than `latest` (`${VAR:-d}` reads as d;
+                                                a variable with no default is the .env's pin)
+  compose-no-privileged  [except GLOB[:SERVICE,SERVICE]...]
+                                                compose: no service sets `privileged: true`
+  compose-restart-policy [except GLOB[:SERVICE,SERVICE]...]
+                                                compose: every service declares `restart:` or
+                                                `deploy.restart_policy` (`"no"` is a choice)
   known       PATH RULE-ID COUNT REASON         COUNT violations of the rule in PATH are debt
                                                 being paid down: shrink-only
 
@@ -204,6 +219,9 @@ rules = tree.load("bin/_guard_rules.py", "devkit_guard_rules")
 ConfError = tree.ConfError
 PY_ONLY = ("python",)
 TS_ONLY = ("ts",)
+COMPOSE_ONLY = ("compose",)
+# A compose service name, as an `except GLOB:SERVICE` names it (compose allows `.` and `-`).
+SERVICE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
 
 @dataclass(frozen=True)
@@ -309,6 +327,30 @@ KINDS = {
         named="defines {names} without the decorator",
         units=True,
     ),
+    # The compose rules judge services: `except GLOB:SERVICE,...` sanctions those services of
+    # that file, and each must still fire.
+    "compose-healthcheck": Kind(
+        "compose-healthcheck [except GLOB[:SERVICE,SERVICE]...]", COMPOSE_ONLY, False, (0, 0),
+        named="defines {names} without a healthcheck", units=True,
+    ),
+    "compose-pinned-image": Kind(
+        "compose-pinned-image [except GLOB[:SERVICE,SERVICE]...]", COMPOSE_ONLY, False, (0, 0),
+        named="runs {names} on an unpinned image", units=True,
+    ),
+    "compose-no-privileged": Kind(
+        "compose-no-privileged [except GLOB[:SERVICE,SERVICE]...]", COMPOSE_ONLY, False, (0, 0),
+        named="runs {names} privileged", units=True, forbids=True,
+    ),
+    "compose-restart-policy": Kind(
+        "compose-restart-policy [except GLOB[:SERVICE,SERVICE]...]", COMPOSE_ONLY, False, (0, 0),
+        named="defines {names} without a restart policy", units=True,
+    ),
+}  # fmt: skip
+COMPOSE_RULES = {
+    "compose-healthcheck": rules.compose_healthcheck,
+    "compose-pinned-image": rules.compose_pinned_image,
+    "compose-no-privileged": rules.compose_no_privileged,
+    "compose-restart-policy": rules.compose_restart_policy,
 }
 # The kinds whose first argument is the one GLOB they judge and whose second is the subject.
 GLOB_FIRST = ("scoped-exports", "calls-one-of", "decorated-with")
@@ -355,6 +397,9 @@ class Rule:
     @property
     def unit(self) -> str:
         """What a unit rule judges, for the vacuous message."""
+        if self.kind in COMPOSE_RULES:
+            return {"compose-healthcheck": "service with an image or build",
+                    "compose-pinned-image": "service with an image"}.get(self.kind, "service")  # fmt: skip
         if self.kind == "decorated-with":
             if not self.when:
                 return "public function"
@@ -447,14 +492,16 @@ def _site(kind: str, arg: str, names: frozenset[str], where: str, said: str) -> 
     if not KINDS[kind].named or (kind == "ban-import" and not names):
         raise ConfError(
             f"{where}: `{said}GLOB:NAME` is for a ban-import of names, calls-one-of, "
-            "decorated-with or a ts single-writer's or own-transaction's owners"
+            "decorated-with, a compose rule's services or a ts single-writer's or "
+            "own-transaction's owners"
         )
     excused = frozenset(_split(listed, where, arg))
     if kind == "ban-import" and not excused <= names:
         stray = ", ".join(sorted(excused - names))
         raise ConfError(f"{where}: {said}{arg}: {stray} is not banned by this rule")
+    shape = SERVICE if kind in COMPOSE_RULES else IDENTIFIER
     for name in excused:
-        if IDENTIFIER.fullmatch(name) is None:
+        if shape.fullmatch(name) is None:
             raise ConfError(f"{where}: {said}{arg}: {name!r} is not a name")
     return Site(glob, excused)
 
@@ -694,6 +741,14 @@ def python_file(section: Section, root: Path, rel: str) -> rules.PyFile:
     return rules.PyFile(parsed, imports, calls, source)
 
 
+def compose_file(section: Section, root: Path, rel: str) -> rules.ComposeFile:
+    compose = tree.compose()
+    try:
+        return rules.ComposeFile(compose.services(root / rel, f"{section.display}/{rel}"))
+    except (compose.YamlError, compose.ComposeError) as exc:
+        raise ConfError(f"cannot read {exc}") from exc
+
+
 def _ts_module(spec: str, importer: str, section: Section) -> str:
     """The name a TS import is matched by: a package as written, our own file root-relative
     without extension or `/index`."""
@@ -735,7 +790,10 @@ def match_targets(rule: Rule, section: Section) -> tuple[str, ...]:
 
 
 def fires(
-    rule: Rule, targets: tuple[str, ...], section: Section, parsed: rules.PyFile | rules.TsFile
+    rule: Rule,
+    targets: tuple[str, ...],
+    section: Section,
+    parsed: rules.PyFile | rules.TsFile | rules.ComposeFile,
 ) -> rules.Judged:
     """What the rule's predicate finds in one file, before sites and `known` are applied."""
     kind = rule.kind
@@ -750,6 +808,8 @@ def fires(
         )
     if kind == "decorated-with":
         return rules.py_decorated_with(parsed, targets, rule.when)
+    if kind in COMPOSE_RULES:
+        return COMPOSE_RULES[kind](parsed)
     semantic: dict[str, Callable[[], list[rules.Hit]]] = {
         "logger-name": lambda: rules.logger_name(parsed, targets[0]),
         "outbound-timeout": lambda: rules.outbound_timeout(parsed),
@@ -875,7 +935,7 @@ def _stale_known(rule: Rule, listed: dict, violations: dict[str, list], conf: Pa
 
 def check_section(section: Section, repo: Path, conf: Path) -> Result:
     root = tree.tree_root(section, repo)
-    walk = tree.python_files if section.lang == "python" else tree.ts_files
+    walk, read = READERS[section.lang]
     files = walk(section, root)
     for rule in section.rules:
         scope = () if rule.spec.sited else rule.globs
@@ -888,12 +948,19 @@ def check_section(section: Section, repo: Path, conf: Path) -> Result:
                     f"{conf}:{rule.line}: {rule.id}: {glob} matches no scanned file of "
                     f"[{section.name}], so the rule checks nothing; fix the glob or delete it"
                 )
-    read = python_file if section.lang == "python" else ts_file
     parsed = {rel: read(section, root, rel) for rel in files}  # every file parses, used or not
     result = Result(files=len(files))
     for rule in section.rules:
         _judge(rule, section, files, parsed, conf, result)
     return result
+
+
+# Per section lang: the file walk and the parse every rule of the section reads.
+READERS: dict[str, tuple[Callable, Callable]] = {
+    "python": (tree.python_files, python_file),
+    "ts": (tree.ts_files, ts_file),
+    "compose": (tree.compose_files, compose_file),
+}
 
 
 def run(args: argparse.Namespace) -> int:
