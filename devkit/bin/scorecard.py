@@ -57,6 +57,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -277,8 +278,31 @@ def makefile_rules(root: Path) -> dict[str, list[str]]:
     return rules
 
 
-def makefile_targets(root: Path) -> set[str]:
-    return set(makefile_rules(root))
+def _commands(line: str) -> list[list[str]]:
+    """A recipe line's shell commands, split on `;`/`&&`/`||` outside quotes ([] if unparseable)."""
+    lexer = shlex.shlex(line.lstrip("@-+"), posix=True, punctuation_chars=";&|")
+    commands: list[list[str]] = [[]]
+    try:
+        for word in lexer:
+            if word in (";", "&&", "||"):
+                commands.append([])
+            else:
+                commands[-1].append(word)
+    except ValueError:
+        return []
+    return [c for c in commands if c]
+
+
+def is_stub(recipe: list[str]) -> bool:
+    """A placeholder tier devkit new ships (its STACK_STUBS, "Replace, never alias"): it only
+    prints and exits 2. It runs nothing, so it is neither a tier to budget nor a database tier;
+    the gate plan skips it with a note."""
+    commands = [c for line in recipe for c in _commands(line)]
+    return (
+        bool(commands)
+        and commands[-1] == ["exit", "2"]
+        and all(c[0] in ("echo", "printf") for c in commands[:-1])
+    )
 
 
 def makefiles_text(repo: Repo) -> str:
@@ -295,8 +319,9 @@ def dockerfiles(repo: Repo) -> list[Path]:
 
 def has_db(repo: Repo) -> bool:
     files = repo.tracked
+    db = makefile_rules(repo.root).get("ci-db")
     return (
-        "ci-db" in makefile_targets(repo.root)
+        (db is not None and not is_stub(db))
         or any(f.startswith(("alembic/", "backend/alembic/", "server/alembic/", "drizzle/")) for f in files)
         or any(Path(f).name in ("drizzle.config.ts", "alembic.ini") for f in files)
     )
@@ -309,6 +334,17 @@ def has_frontend(repo: Repo) -> bool:
 
 
 STACK_MANIFESTS = {"pyproject.toml": "python", "package.json": "ts", "Cargo.toml": "rust", "Package.swift": "swift"}
+LOCKFILES = frozenset({"package-lock.json", "pnpm-lock.yaml", "yarn.lock", "uv.lock", "Cargo.lock", "Package.resolved"})
+
+
+def pins_tools_only(repo: Repo, manifest: str) -> bool:
+    """A manifest whose directory tracks nothing but it and a lockfile pins tools, not a stack:
+    the rust scaffold's tools/metrics/package.json (jscpd) is no TypeScript app."""
+    parent = Path(manifest).parent
+    if parent == Path("."):
+        return False
+    inside = [Path(f) for f in repo.tracked if parent in Path(f).parents]
+    return all(p.parent == parent and (p.name == Path(manifest).name or p.name in LOCKFILES) for p in inside)
 
 
 def stacks(repo: Repo) -> set[str]:
@@ -316,7 +352,8 @@ def stacks(repo: Repo) -> set[str]:
     for f in repo.tracked:
         parts = Path(f).parts
         if parts[-1] in STACK_MANIFESTS:
-            found.add(STACK_MANIFESTS[parts[-1]])
+            if not pins_tools_only(repo, f):
+                found.add(STACK_MANIFESTS[parts[-1]])
         elif any(p.endswith(".xcodeproj") for p in parts):
             found.add("swift")
     return found
@@ -341,9 +378,9 @@ RATCHET_DOMAINS = (
            "python.py --mccabe --cognitive / ts.mjs --cyclomatic --cognitive / rust.py --cognitive"),
     Domain("ratchet.duplication", frozenset({"python", "ts", "rust"}), r"^duplication\.[^.]+\.clones$", "jscpd.mjs"),
     Domain("ratchet.dead", frozenset({"python", "ts", "rust"}), r"^dead\.", "python.py --vulture / ts.mjs --knip / rust.py --dead"),
-    Domain("ratchet.cycles", frozenset({"python", "ts"}), r"^coupling\.[^.]+\.cycles$", "python.py / ts.mjs --cycles"),
-    Domain("ratchet.fan_out", frozenset({"python", "ts"}), r"^coupling\.[^.]+\.fan_out_max$", "python.py / ts.mjs --fan"),
-    Domain("ratchet.coverage", frozenset({"python", "ts"}), r"^coverage\.", "coverage.py over the unit tier"),
+    Domain("ratchet.cycles", frozenset({"python", "ts", "rust"}), r"^coupling\.[^.]+\.cycles$", "python.py / ts.mjs / rust.py --cycles"),
+    Domain("ratchet.fan_out", frozenset({"python", "ts", "rust"}), r"^coupling\.[^.]+\.fan_out_max$", "python.py / ts.mjs / rust.py --fan"),
+    Domain("ratchet.coverage", frozenset({"python", "ts", "rust"}), r"^coverage\.", "coverage.py over the unit tier (Rust: --llvm-cov-json)"),
 )
 
 
@@ -427,12 +464,15 @@ def wired_tiers(repo: Repo) -> None:
     guarded: set[str] = set()
     capped: list[str] = []
     aggregates: list[str] = []
+    stubs: list[str] = []
     unbudgeted: list[str] = []
     for target in tier_targets:
         recipe = rules[target]
         tiers = {t for line in recipe for t in TIER_GUARD_CALL.findall(line)}
         if not recipe:
             aggregates.append(target)
+        elif is_stub(recipe):
+            stubs.append(target)
         elif tiers:
             guarded |= tiers
         elif BOOT_TARGET.match(target) and boots_under_cap(repo, recipe):
@@ -444,6 +484,8 @@ def wired_tiers(repo: Repo) -> None:
         evidence += f"; boot-capped by boot_image.sh: {', '.join(capped)}"
     if aggregates:
         evidence += f"; aggregates: {', '.join(aggregates)}"
+    if stubs:
+        evidence += f"; stubs: {', '.join(stubs)}"
     repo.add("tiers", not unbudgeted, f"{evidence}; unbudgeted: {', '.join(unbudgeted) or 'none'}")
 
 

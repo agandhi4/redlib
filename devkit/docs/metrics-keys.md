@@ -85,13 +85,16 @@ Exactly the keys each emits, per flag; `<s>` is `--scope`. CLIs: devkit README, 
 | | `--fan` | `coupling.<s>.fan_in_max`, `coupling.<s>.fan_out_max` (the same graph; the python.py definition). Nodes are the production source set the complexity keys read (`.ts/.tsx/.js/.jsx/.mts/.cts/.mjs/.cjs` and `.vue` as above, no tests or `.d.ts`); a component registered by an auto-import `.d.ts` or used only in a `<template>` is no edge, so a stylesheet, image or `?raw`/`?url` import is no edge: an asset is not coupling |
 | | `--bundle` | `bundle.<s>.kb_total` (every file `vite build` emits, raw KiB, one decimal), `bundle.<s>.kb_entry` (the `--bundle-entry` chunk, its static-import closure and their CSS). A Next app (`.next/` or `next.config.*`) is read from its `next build` output instead: total `.next/static`, entry build-manifest.json's rootMainFiles, polyfillFiles and pages/_app |
 | `rust.py` | `--cognitive` | `complexity.<s>.cognitive_max` (clippy `cognitive_complexity` at threshold 0, so every function is scored and the max is real; clippy's own metric, comparable to itself, not to sonarjs or complexipy), `complexity.<s>.cognitive_over_15` |
-| | `--dead` | `dead.<s>.rustc` (rustc's unused-code warnings: `dead_code`, `unused_imports`/`_variables`/`_assignments`/`_mut`/`_macros`/`_macro_rules`/`_labels`/`_extern_crates`, `unreachable_code`/`_patterns`; production targets only; a crate's `#![allow]` hides what it allows). No `cycles`: a module cycle inside one crate is legal and cargo refuses one between crates. Duplication is `jscpd.mjs` over the `.rs` dirs |
+| | `--dead` | `dead.<s>.rustc` (rustc's unused-code warnings: `dead_code`, `unused_imports`/`_variables`/`_assignments`/`_mut`/`_macros`/`_macro_rules`/`_labels`/`_extern_crates`, `unreachable_code`/`_patterns`; production targets only; a crate's `#![allow]` hides what it allows). Duplication is `jscpd.mjs` over the `.rs` dirs |
+| | `--cycles` | `coupling.<s>.cycles` (strongly connected components of more than one file in the module graph of every production target `cargo metadata --no-deps` names: files are modules; edges are `use` leaves and `crate::`/`self::`/`super::`/child-module paths, each resolved to the file defining the item, re-exports and glob re-exports followed; a `pub use` is an alias, not an edge; `mod x;` is no edge; `#[cfg(test)]` items and `#![cfg(test)]` files are not read; cross-crate paths are no edges. Lexical: `metrics/_rust_graph.py`'s header lists what it cannot see) |
+| | `--fan` | `coupling.<s>.fan_in_max` (report-only), `coupling.<s>.fan_out_max` over the same graph (the python.py definition) |
 | `jscpd.mjs` | | `duplication.<s>.jscpd_percent` (jscpd's `statistics.total.percentage`, two decimals), `duplication.<s>.clones` |
 | `size.py` | `--scope <s> --src <dir>... --ext .py|.ts,.tsx [--exclude <glob>]...` | `size.<s>.max_lines`, `size.<s>.over_600` (production files only: tests, fixtures, generated and vendored paths excluded; any language; both report-only, not in the starter; every file over the limit is listed on stderr) |
 | `vuln.py` | `--scope <scope> --uv <dir>|--npm-lock <file>|--pnpm-lock <file>|--cargo-lock <file>...` | `vuln.<scope>.critical`, `vuln.<scope>.high`, `vuln.<scope>.total` (known vulnerabilities in the locked production packages, from OSV; report-only, not in the starter), `vuln.<scope>.packages` (the production packages queried; 0 for a dev-only lockfile, which the scorecard reads as NA) |
 | `statements.py` (area `job:db`) | `--in <file> --out … [--min-routes N]` | `statements.<METHOD>:/<route template>` (the db tier's statement fixture writes the per-route maxima to a file outside build/metrics/; the collector validates the shape, prefixes and sorts; tolerance 0 by the ratchet; fewer than N routes is exit 2, so a fixture that recorded nothing cannot pass as clean) |
 | `coverage.py` (area `job:<tier job>`) | `--coverage-json` | `coverage.<s>.lines` (covered_lines / num_statements), `coverage.<s>.branches` (covered_branches / num_branches; omitted when no branches were measured) |
 | | `--istanbul-summary` | `coverage.<s>.lines` (`total.lines.pct`), `coverage.<s>.branches` (`total.branches.pct`; omitted when "Unknown") |
+| | `--llvm-cov-json` | `coverage.<s>.lines` (`cargo llvm-cov --json` export: `data[0].totals.lines` covered / count), `coverage.<s>.branches` (the same for `branches`; omitted at count 0, which is every stable-toolchain run: rustc's branch coverage is nightly-only). Inline `#[cfg(test)]` modules are in the counts |
 
 **Findings (`--list-out FILE`, `python.py`, `ts.mjs`, `rust.py` and `jscpd.mjs`).** The lines behind the counts, for
 a lane to work from; never a ratchet input, and the JSON is the same bytes with or without it.
@@ -136,7 +139,7 @@ leave the bounds: with ruff C901 or eslint `complexity` on at 10, `mccabe_over_1
 `cyclomatic_max` stays at 10 or less by construction. Drop the collector flag from
 `scripts/ci/metrics.conf` (`--mccabe`, `--cyclomatic`) and its keys from `ratchet.json` in the
 PR that turns the rule on, under the `metrics-rebaseline` label (a removed bound is REMOVED).
-Deleting only the key does not stick: `rebaseline` seeds every snapshot key back. Keep
+Deleting only the key does not stick: `rebaseline` and `tighten --seed` seed every snapshot key back. Keep
 `--cognitive` running even where sonarjs holds it: the scorecard's WIRED reads the
 `complexity.*` keys (`ratchet.complexity`), and a repo with none is not wired.
 
@@ -164,14 +167,16 @@ alone changed has not moved) and is what the skipped-collector rule below reads.
 numbers:
 
 ```sh
-devkit/bin/metrics_collect.sh rebaseline     # runs scripts/ci/metrics.conf, merges, fills the bounds
+SEED=1 make metrics-tighten     # runs scripts/ci/metrics.conf, merges, fills the bounds
 ```
 
-`rebaseline` fills every tracked bound and seeds every snapshot key the bounds do not track
+`tighten --seed` (and `rebaseline`, whose whole-file form is for a label-approved loosening
+only) fills every unset bound and seeds every snapshot key the bounds do not track
 yet (except `gate.*`, `tier.*` and `tests.*`, never seeded, and the report-only keys) with the
 direction its domain fixes in the table above; a key of a domain not in that table is an error naming it, so a
 repo-specific domain is added by hand with its direction. So `{}` is a complete start: one
-`rebaseline` tracks everything the collectors emit. The starter's `null` bounds make `check`
+`SEED=1 make metrics-tighten` tracks everything the collectors emit, and later bounds a new key
+without moving any other. The starter's `null` bounds make `check`
 refuse to run until that happens, so a copied template never gates on a placeholder; the
 starter lists exactly the keys the shared collectors emit (`tests/metrics_ratchet_test.py`
 holds it to the table below). Keys in the snapshot but not in the bounds are reported as

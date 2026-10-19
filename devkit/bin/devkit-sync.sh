@@ -31,14 +31,20 @@
 # hook-differs) until someone copied the file by hand. It also runs when devkit/ is already
 # current, because the first sync to a new base runs the previous, vendored copy of this script.
 #
-# Trailer: both commits end with DEVKIT_COMMIT_TRAILER (env, set even empty wins: empty means
-# none), else `git config devkit.trailer`, else the fleet's agent trailer. Agents run every sync
-# and the repos' commit rules require the trailer, so every lane amended it in by hand.
+# A hook copy the repo lacks is created when it already tracks another .githooks/ copy of a
+# template (a repo that adopted the hooks gets every hook devkit adds: commit-msg, 2026-10-18),
+# executable when its base is; a repo with no .githooks/ gets none.
+#
+# Trailer: both commits end with devkit_commit_trailer (bin/_trailer_lib.sh: DEVKIT_COMMIT_TRAILER,
+# set even empty wins, else `git config devkit.trailer`, else the fleet's agent trailer), the
+# chain the commit-msg hook's trailer step requires, so a sync's commit passes its own hook.
+# Agents run every sync and the repos' commit rules require the trailer.
 set -euo pipefail
 # shellcheck source=bin/_vendor_paths.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_vendor_paths.sh"
+# shellcheck source=bin/_trailer_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_trailer_lib.sh"
 readonly DEVKIT_URL=${DEVKIT_URL:-https://github.com/agandhi4/devkit.git}
-readonly DEFAULT_TRAILER="Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 STAGE=0
 REF=
 for arg in "$@"; do
@@ -57,11 +63,7 @@ OWN=(-- . ':(exclude)devkit' ':(exclude).devkit-rev')
 if [ "$STAGE" = 0 ] && { ! git diff --quiet "${OWN[@]}" || ! git diff --cached --quiet "${OWN[@]}"; }; then
   echo "devkit-sync: commit or stash first; the sync makes its own commit" >&2; exit 2
 fi
-if [ -n "${DEVKIT_COMMIT_TRAILER+x}" ]; then
-  TRAILER=$DEVKIT_COMMIT_TRAILER
-else
-  TRAILER=$(git config --get devkit.trailer || echo "$DEFAULT_TRAILER")
-fi
+TRAILER=$(devkit_commit_trailer)
 # commit_sync <message> [-- <paths>...]: the sync's one way to commit, trailer appended.
 commit_sync() {
   local message=$1
@@ -92,9 +94,14 @@ while IFS=' ' read -r base copy; do
   [ -n "$base" ] || continue
   blob=$(git rev-parse -q --verify "$UPSTREAM_TREE:$base") || continue # base not in this ref
   [ "$(git rev-parse -q --verify ":$copy")" != "$blob" ] || continue
+  verb=refreshed
+  [ -e "$copy" ] || verb=created
   git cat-file blob "$blob" >"$copy" # rewrites in place: the file's mode (hooks: +x) is kept
+  if [ "$verb" = created ] && [ "$(git ls-tree "$UPSTREAM_TREE" -- "$base" | cut -d' ' -f1)" = 100755 ]; then
+    chmod +x "$copy"
+  fi
   git add -- "$copy"
-  echo "devkit-sync: refreshed $copy from devkit/$base"
+  echo "devkit-sync: $verb $copy from devkit/$base"
   REFRESHED+=("$copy")
 done <<<"$(base_copies)"
 if [ "$CURRENT" = 1 ]; then

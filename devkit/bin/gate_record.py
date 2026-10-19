@@ -8,6 +8,13 @@ Usage (local_gate.sh only; the job lines come on stdin, one `<name> <verdict> <s
                  --verdict pass|fail|error --seconds N [--over NAME]... [--total-seconds N]
 Read back (pr_merge.sh: refuse a merge after main moved past the gated main):
   gate_record.py main-of <gate.json> <head>   the main SHA the gate of <head> ran on, or nothing
+Copied back (remote_gate.sh, after the host's gate: a remote run's record is on the host, so
+without this BITE and pr_merge.sh on this machine never saw it):
+  gate_record.py import --pr N --runs F --logdir D < ledger
+    ledger is the host's runs.tsv rows, a `--- gate.json` line, then the host's gate.json of
+    PR N (possibly empty). Each row of PR N is appended to F unless F already has a row with
+    the same pr, head and finished (so a rerun copies nothing twice); the gate.json replaces
+    D/gate.json unless the local one finished later. Prints one `gate_record: imported ...` line.
 
 Two files, both documented in README "Gate record":
   <logdir>/gate.json   {"schema_version": 2, "pr", "head", "main", "started", "finished",
@@ -172,6 +179,32 @@ class Run:
     failed_jobs: tuple[str, ...]
 
 
+    @property
+    def key(self) -> tuple[int, str, datetime]:
+        """What makes a row one run: import dedupes on it."""
+        return (self.pr, self.head, self.finished)
+
+
+def parse_run(line: str) -> Run:
+    """One runs.tsv row; ValueError when it is malformed."""
+    cells = line.split("\t")
+    if len(cells) != len(RUNS_COLUMNS):
+        raise ValueError(f"{len(cells)} columns, want {len(RUNS_COLUMNS)}")
+    finished, pr, head, verdict, seconds, rules, failed = cells
+    parsed_rules = json.loads(rules)
+    if not isinstance(parsed_rules, list):
+        raise ValueError("rules is not a JSON array")
+    return Run(
+        finished=datetime.fromisoformat(finished.replace("Z", "+00:00")),
+        pr=int(pr),
+        head="" if head == "-" else head,
+        verdict=verdict,
+        seconds=int(seconds),
+        rules=tuple(str(r) for r in parsed_rules),
+        failed_jobs=() if failed == "-" else tuple(failed.split(",")),
+    )
+
+
 def read_runs(path: Path) -> list[Run]:
     """Every well-formed row of a runs.tsv; a malformed row raises ValueError naming its line."""
     runs: list[Run] = []
@@ -180,28 +213,62 @@ def read_runs(path: Path) -> list[Run]:
     for n, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
         if not line.strip():
             continue
-        cells = line.split("\t")
         try:
-            if len(cells) != len(RUNS_COLUMNS):
-                raise ValueError(f"{len(cells)} columns, want {len(RUNS_COLUMNS)}")
-            finished, pr, head, verdict, seconds, rules, failed = cells
-            parsed_rules = json.loads(rules)
-            if not isinstance(parsed_rules, list):
-                raise ValueError("rules is not a JSON array")
-            runs.append(
-                Run(
-                    finished=datetime.fromisoformat(finished.replace("Z", "+00:00")),
-                    pr=int(pr),
-                    head="" if head == "-" else head,
-                    verdict=verdict,
-                    seconds=int(seconds),
-                    rules=tuple(str(r) for r in parsed_rules),
-                    failed_jobs=() if failed == "-" else tuple(failed.split(",")),
-                )
-            )
+            runs.append(parse_run(line))
         except ValueError as exc:
             raise ValueError(f"{path}:{n}: {exc}") from exc
     return runs
+
+
+LEDGER_SEPARATOR = "--- gate.json"
+
+
+def import_ledger(ledger: str, pr: int, runs_path: Path, logdir: Path) -> str:
+    """Merge a host's ledger of PR `pr` into this machine's (module docstring); returns the
+    summary line. ValueError on a malformed row or gate.json."""
+    lines = ledger.splitlines()
+    cut = lines.index(LEDGER_SEPARATOR) if LEDGER_SEPARATOR in lines else len(lines)
+    rows, record_text = lines[:cut], "\n".join(lines[cut + 1 :])
+    seen = {run.key for run in read_runs(runs_path)}
+    new: list[str] = []
+    for n, line in enumerate(rows, 1):
+        if not line.strip():
+            continue
+        try:
+            run = parse_run(line)
+        except ValueError as exc:
+            raise ValueError(f"ledger row {n}: {exc}") from exc
+        if run.pr == pr and run.key not in seen:
+            seen.add(run.key)
+            new.append(line)
+    if new:
+        runs_path.parent.mkdir(parents=True, exist_ok=True)
+        with runs_path.open("a", encoding="utf-8") as fh:
+            fh.write("".join(f"{line}\n" for line in new))
+    copied = _import_record(record_text, pr, logdir / "gate.json")
+    return f"gate_record: imported {len(new)} run row(s){' and gate.json' if copied else ''}"
+
+
+def _import_record(text: str, pr: int, dest: Path) -> bool:
+    """Write the host's gate.json of `pr` to `dest` unless `dest` finished later; True if written."""
+    if not text.strip():
+        return False
+    try:
+        doc = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(f"ledger gate.json: {exc}") from exc
+    if not isinstance(doc, dict) or doc.get("schema_version") != SCHEMA_VERSION or doc.get("pr") != pr:
+        raise ValueError(f"ledger gate.json is not a schema {SCHEMA_VERSION} record of PR {pr}")
+    try:
+        local = json.loads(dest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        local = None
+    # ISO-8601 UTC with a Z (build_record): string order is time order.
+    if isinstance(local, dict) and str(local.get("finished", "")) > str(doc.get("finished", "")):
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    return True
 
 
 def recorded_main(path: Path, head: str) -> str:
@@ -232,6 +299,20 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _cmd_import(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="gate_record.py import")
+    p.add_argument("--pr", type=int, required=True)
+    p.add_argument("--runs", type=Path, required=True)
+    p.add_argument("--logdir", type=Path, required=True)
+    args = p.parse_args(argv)
+    try:
+        print(import_ledger(sys.stdin.read(), args.pr, args.runs, args.logdir))
+    except (OSError, ValueError) as exc:
+        print(f"gate_record: import: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["main-of"]:
@@ -240,6 +321,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(recorded_main(Path(argv[1]), argv[2]))
         return 0
+    if argv[:1] == ["import"]:
+        return _cmd_import(argv[1:])
     args = build_parser().parse_args(argv)
     args.over = set(args.over)
     try:

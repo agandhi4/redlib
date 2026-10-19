@@ -15,11 +15,14 @@
 #               A BETTER key fails too until `make metrics-tighten` is committed (gains lock in)
 #   tighten     snapshot, then lock in the BETTER numbers (commit the bounds in the same PR);
 #               exit 1 when a key is WORSE or MISSING, printed as check prints it, after
-#               writing the BETTER bounds and running the scorecard's tighten
-#   rebaseline  snapshot, then overwrite every bound (first adoption, or after a tool change).
+#               writing the BETTER bounds and running the scorecard's tighten. SEED=1
+#               (`make metrics-tighten SEED=1`) also adds a bound at today's value for every
+#               key without one (`ratchet <key> SEEDED <value>`): the way to bound a new key,
+#               since that is a tightening and needs no label
+#   rebaseline  snapshot, then overwrite every bound (a label-approved tool change only).
 #               KEYS=<key>[,<key>] (`make metrics-rebaseline KEYS=...`: make hands command-line
 #               variables to the recipe's environment) loosens only those bounds, each only
-#               when WORSE, and leaves scorecard.json alone: the scorecard runs as `check`
+#               when WORSE (a named key with no bound is seeded), and leaves scorecard.json alone: the scorecard runs as `check`
 #               under the label instead, so its verdict shows now. Without KEYS every bound
 #               moves; the ratchet and this script then WARN, naming each loosened bound and
 #               the scorecard.json rewrite (devkit decisions 2026-10-17)
@@ -60,9 +63,9 @@
 # rather than MISSING: a frontend-only PR cannot have changed backend coverage, and the unit
 # job that produces that coverage did not run either.
 #
-# Tier inputs, outside the gate: coverage.py's --coverage-json/--istanbul-summary and
-# statements.py's --in name files a test tier writes (coverage reports, the statement fixture's
-# build/statements.json). Before any collector runs, every such file of every collector that
+# Tier inputs, outside the gate: the files a build or test tier writes that a collector reads
+# (the TIER_INPUTS table: coverage reports, the statement fixture's build/statements.json, a
+# Next app's build manifest for ts.mjs --bundle). Before any collector runs, every such file of every collector that
 # will run is checked; when any is missing the run stops once (exit 2) listing each file, its
 # collector and the make target of the gate job that writes it (the collector's job:<name> area,
 # looked up in scripts/ci/gate_plan.sh: a GATE_JOBS_* entry or a `job <name> <target>` call).
@@ -109,10 +112,24 @@ readonly SUBCOMMANDS="snapshot check tighten rebaseline"
 # A conf command that runs one of devkit's --list-out collectors (any path prefix: devkit/,
 # ../devkit/). Matched against " <command> " so the name may end the line.
 readonly LIST_OUT_COLLECTOR='[[:space:]/]metrics/(python\.py|ts\.mjs|rust\.py|jscpd\.mjs)[[:space:]]'
-# devkit's collectors that read a test tier's output, and the flags that name it (header: Tier
-# inputs). A new tier-reading collector or flag is added to both.
-readonly TIER_INPUT_COLLECTOR='[[:space:]/]metrics/(coverage|statements)\.py[[:space:]]'
-readonly TIER_INPUT_FLAGS="--coverage-json --istanbul-summary --in"
+# Tier inputs (header): every devkit collector flag that reads a build or test artefact, one
+# row each; a new artefact-reading collector or flag is a new row, read by tier_inputs.
+#   collector      flag                the input checked for, and its kind
+#   coverage.py    --coverage-json     value: the flag's file (coverage.py `coverage json`)
+#   coverage.py    --istanbul-summary  value: the flag's file (istanbul coverage-summary.json)
+#   coverage.py    --llvm-cov-json     value: the flag's file (cargo llvm-cov --json export)
+#   statements.py  --in                value: the flag's file (the statement fixture's output)
+#   ts.mjs         --bundle            next-build: <--root>/.next/build-manifest.json in a Next
+#                                      app (a .next/ or a next.config.*: ts.mjs's own test);
+#                                      `next build` rewrites it every build, while the .next/
+#                                      dir's own mtime moves only when an entry is added. A vite
+#                                      app is built by ts.mjs itself and has no input
+readonly TIER_INPUTS="coverage.py --coverage-json value
+coverage.py --istanbul-summary value
+coverage.py --llvm-cov-json value
+statements.py --in value
+ts.mjs --bundle next-build"
+readonly TIER_INPUT_COLLECTOR='[[:space:]/]metrics/([a-z_]+\.(py|mjs))[[:space:]]'
 
 usage() {
   echo "usage: $0 <snapshot|check|tighten|rebaseline> [--conf FILE] [--bounds FILE] [--out FILE] [--fresh]" >&2
@@ -214,17 +231,39 @@ while [ "$i" -lt "${#NAMES[@]}" ]; do
 done
 
 # ---- tier inputs (header: Tier inputs) -------------------------------------------------------------
-# tier_inputs <command>: the files the command's tier-input flags name, one per line.
-tier_inputs() {
-  [[ " $1 " =~ $TIER_INPUT_COLLECTOR ]] || return 0
-  local words w flag prev=""
-  read -ra words <<<"$1"
-  for w in "${words[@]}"; do
-    for flag in $TIER_INPUT_FLAGS; do
-      if [ "$prev" = "$flag" ]; then echo "$w"; elif [[ "$w" == "$flag="?* ]]; then echo "${w#*=}"; fi
-    done
+# flag_values <flag> <word>...: each value the words give <flag> (`--f v` or `--f=v`).
+flag_values() {
+  local flag=$1 w prev=""
+  shift
+  for w in "$@"; do
+    if [ "$prev" = "$flag" ]; then echo "$w"; elif [[ "$w" == "$flag="?* ]]; then echo "${w#*=}"; fi
     prev=$w
   done
+}
+# next_build_input <root>: the Next build manifest under <root> when <root> is a Next app. The
+# names are ts.mjs's NEXT_CONFIGS: keep the two in step.
+next_build_input() {
+  local root=${1%/} c
+  [ -n "$root" ] || return 0
+  if [ "$root" = . ]; then root=""; else root="$root/"; fi
+  for c in .next next.config.js next.config.mjs next.config.ts next.config.cjs; do
+    if [ -e "$root$c" ]; then echo "${root}.next/build-manifest.json"; return; fi
+  done
+}
+# tier_inputs <command>: the files the command reads that a tier writes (TIER_INPUTS), one per line.
+tier_inputs() {
+  [[ " $1 " =~ $TIER_INPUT_COLLECTOR ]] || return 0
+  local collector=${BASH_REMATCH[1]} words row_collector flag kind w
+  read -ra words <<<"$1"
+  while read -r row_collector flag kind; do
+    [ "$row_collector" = "$collector" ] || continue
+    case "$kind" in
+      value) flag_values "$flag" "${words[@]}" ;;
+      next-build)
+        case " ${words[*]} " in *" $flag "*) ;; *) continue ;; esac
+        while read -r w; do next_build_input "$w"; done < <(flag_values --root "${words[@]}") ;;
+    esac
+  done <<<"$TIER_INPUTS"
 }
 # plan_job_target <job>: the make target of the plan's gate job <job>, or nothing.
 plan_job_target() {
@@ -393,6 +432,7 @@ RATCHET_ARGS=("$SUB" --snapshot "$OUT" --bounds "$BOUNDS")
 if [ "$SUB" = check ] && [ "${METRICS_REBASELINE:-0}" = 1 ]; then RATCHET_ARGS+=(--rebaseline-ok); fi
 KEYED=0
 if [ "$SUB" = rebaseline ] && [ -n "${KEYS:-}" ]; then KEYED=1; RATCHET_ARGS+=(--keys "$KEYS"); fi
+if [ "$SUB" = tighten ] && [ "${SEED:-0}" = 1 ]; then RATCHET_ARGS+=(--seed); fi
 # The modes an author commits from also refresh the committed report-only copy beside the
 # bounds; check (the gate) never writes a tracked file.
 case "$SUB" in tighten|rebaseline) RATCHET_ARGS+=(--report-only "$(dirname "$BOUNDS")/report-only.json") ;; esac
