@@ -26,9 +26,10 @@ Two files, both documented in README "Gate record":
   <runs>               one tab-separated row per run, appended (RUNS_COLUMNS); `rules` is a JSON
                        array because a test name may hold commas and spaces.
 
-A job verdict is pass | fail | skip | budget (passed but over its enforced budget). A failed job's
-rules are `kind:id` strings parsed from its log (RULE_PATTERNS), in log order, deduplicated; a
-log that names none gives `job:<name>`. `--over` names the jobs (and `total`) over an enforced
+A job verdict is pass | fail | skip | budget (passed but over its enforced budget) | error (the
+gate's silence watchdog stopped it: the box failed, not the code, so its one rule is
+`silence:<name>` and its log is not parsed). A failed job's rules are `kind:id` strings parsed
+from its log (RULE_PATTERNS), in log order, deduplicated; a log that names none gives `job:<name>`. `--over` names the jobs (and `total`) over an enforced
 gate budget: each adds `budget:gate.<name>`, distinct from a tier's own `budget:<tier>`.
 Exit: 0 written, 2 a bad call or an unwritable file (the gate prints it; the verdict stands).
 """
@@ -46,7 +47,7 @@ from pathlib import Path
 
 SCHEMA_VERSION = 2
 RUNS_COLUMNS = ("finished", "pr", "head", "verdict", "seconds", "rules", "failed_jobs")
-JOB_VERDICTS = ("pass", "fail", "skip", "budget")
+JOB_VERDICTS = ("pass", "fail", "skip", "budget", "error")
 RUN_VERDICTS = ("pass", "fail", "error")
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
@@ -105,7 +106,9 @@ def log_rules(text: str) -> list[str]:
 
 def job_rules(name: str, verdict: str, logdir: Path, over: set[str]) -> tuple[str, ...]:
     rules: list[str] = []
-    if verdict == "fail":
+    if verdict == "error":
+        rules = [f"silence:{name}"]
+    elif verdict == "fail":
         log = logdir / f"{name}.log"
         parsed = log_rules(log.read_text(errors="replace")) if log.is_file() else []
         rules = parsed or [f"job:{name}"]
@@ -153,7 +156,7 @@ def build_record(args: argparse.Namespace, jobs: list[Job], finished: str) -> di
 
 
 def runs_row(record: dict[str, object], jobs: list[Job]) -> str:
-    failed = ",".join(j.name for j in jobs if j.verdict in ("fail", "budget")) or "-"
+    failed = ",".join(j.name for j in jobs if j.verdict in ("fail", "budget", "error")) or "-"
     cells = (
         record["finished"],
         record["pr"],

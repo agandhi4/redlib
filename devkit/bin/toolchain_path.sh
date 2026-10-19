@@ -7,7 +7,8 @@
 #
 #   toolchain_path <tree>    # 0 ok; 1 a declared toolchain cannot be provided
 #
-# On 0 it exports PATH (and COREPACK_ENABLE_DOWNLOAD_PROMPT=0 with Node: a corepack prompt hangs
+# On 0 it exports PATH, DEVKIT_TOOLCHAIN_TREE (the tree's physical path: toolchain_shell.sh skips a
+# tree already on its pins) and COREPACK_ENABLE_DOWNLOAD_PROMPT=0 with Node (a corepack prompt hangs
 # an unattended run) and sets TOOLCHAIN_NOTES ("node v22.23.3 from .nvmrc; rust 1.99.0 from
 # rust-toolchain.toml", empty when nothing is declared). On 1 it sets TOOLCHAIN_FAILED ("Node" or
 # "Rust toolchain") and TOOLCHAIN_ERROR (one line naming the declaration); the provisioning
@@ -43,5 +44,7 @@ toolchain_path() {
     # From the tree: a PATH cargo that matched is usually a rustup proxy, which resolves by cwd.
     TOOLCHAIN_NOTES="${TOOLCHAIN_NOTES:+$TOOLCHAIN_NOTES; }rust $( (cd "$tree" && cargo --version) | awk '{print $2}') from $decl"
   fi
+  DEVKIT_TOOLCHAIN_TREE=$(cd "$tree" && pwd -P)
+  export DEVKIT_TOOLCHAIN_TREE
   return 0
 }

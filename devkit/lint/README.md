@@ -194,6 +194,39 @@ ci-lint: ci-deps
 	uv run python devkit/bin/py_cognitive_lint.py --root . --src server --scope backend
 ```
 
+## Changed-file rules
+
+Some rules have debt in the fleet, so a base cannot select them: the base lints the whole tree,
+and every repo above 0 would fail at its next sync. `bin/changed_lint.py` holds such a rule only
+in the files a change touches, the files `py_cognitive_lint.py` reads (`bin/_changed_files.py`:
+everything that differs from the merge-base with origin/main, committed or not; in a repo with
+no remote yet, every file). The debt drains as files are touched, and a new instance fails in
+the edit that writes it.
+
+| Tool | Rule | Threshold lives in | ci-lint line |
+|---|---|---|---|
+| ruff | `PLR0916`, too many boolean expressions in one `if` (preview, so the three run alone) | `ruff.toml` `[lint.pylint] max-bool-expr = 5` | `uv run python devkit/bin/changed_lint.py ruff --root . --src server` |
+| ruff | `PLR0915`, too many statements in one function | `ruff.toml` `[lint.pylint] max-statements = 50` | the same line |
+| ruff | `PLR1702`, too many nested blocks (preview) | `ruff.toml` `[lint.pylint] max-nested-blocks = 5` | the same line |
+| eslint | `sonarjs/expression-complexity`, at most 4 `&&`/`\|\|`/`?:` operators (five terms) | `eslint.base.mjs` `sonarjsChangedRules` | `python3 -I devkit/bin/changed_lint.py eslint --root frontend --src src` (`--ext .vue` for components) |
+
+PLR0915 and PLR1702 (2026-10-19): finplat's pass-7 lane split five long functions along their
+phases, each of which these flag; the fix is that split, or early returns and a helper per inner
+loop, never a disable comment. The two boolean thresholds are one rule: five terms. finplat's and rollcall's 2026-10-18 lanes
+extracted a named predicate from a repeated multi-term `&&`/`||` chain six times, and a
+16-term `||` list drifted. The fix is the same shape: a named predicate function, or a set or
+table for a membership list, never a disable comment. The eslint run needs eslint-plugin-sonarjs
+under `--root` and keeps the repo's own config (parser, plugins); the ruff run uses the repo's
+interpreter, so its lockfile's ruff judges.
+
+Whole-tree counts on 2026-10-19 (origin/main or a current worktree): PLR0916 finplat backend 1,
+every other Python repo 0; expression-complexity finplat frontend 10, locus 1, rollcall 1,
+instalite 0 (orbit not measured: no local install of the plugin). PLR0915 / PLR1702, own code
+only (the vendored `devkit/` excluded, counted once as devkit): finplat 3 / 0, orbit 3 / 1, locus
+5 / 0, instalite, rollcall, closet and redlib 0 / 0, devkit 6 / 2 (one function). A repo at 0 graduates by
+turning the rule on in its own config and dropping its line; once every repo is at 0, the rule
+moves into the base (`select`, or `sonarjsRules`) and leaves the table.
+
 ## swift-format
 
 swift-format has no `extends`, so `swift-format.json` cannot be referenced; the repo's

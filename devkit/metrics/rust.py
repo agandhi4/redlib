@@ -7,8 +7,9 @@ One line in scripts/ci/metrics.conf, run by devkit/bin/metrics_collect.sh, for e
 
 Why cargo from PATH: the gate and the hooks put the toolchain rust-toolchain.toml pins first on
 PATH (devkit/bin/toolchain_path.sh), so the compiler that measures is the one the repo builds
-with. A cargo or clippy that is missing is exit 2 with the provisioning hint; nothing is
-silently skipped.
+with. With no cargo on PATH (a hand run outside the gate: redlib, 2026-10-18), every cargo call
+goes through devkit/bin/toolchain_exec.sh, which provisions the same pin. A cargo it cannot
+provide, or a missing clippy, is exit 2 with the provisioning hint; nothing is silently skipped.
 
 Keys (docs/metrics-keys.md), each behind its flag; `<scope>` is `--scope`:
   --cognitive  complexity.<scope>.cognitive_max      clippy's cognitive_complexity lint run
@@ -60,6 +61,12 @@ is a design signal: the modules of a cycle cannot be split into crates or read a
 refuses a cycle between crates, so cross-crate paths are no edges. The graph is lexical, not
 rustc's name resolution: what it cannot see is in metrics/_rust_graph.py's header.
 
+--exclude GLOB (repeatable): python.py's Exclusions over the module graph's files (root-relative
+fnmatch; a glob matching no production file is exit 2). An excluded file's functions and
+warnings are not counted and it is no node of the graph; meta.<scope>.excluded_files
+(report-only) counts them. With --exclude the graph is read even without --cycles/--fan, since
+it is the production file set (under a second, no compile).
+
 Not collected here, by design:
   duplication  jscpd reads Rust (`.rs`, format "rust") with no change: metrics/jscpd.mjs over
                the source dirs, with a jscpd the repo pins (README "Metrics ratchet").
@@ -80,10 +87,12 @@ stdout). Exit: 0 ok, 2 a missing tool, a failed build, an unparseable report or 
 from __future__ import annotations
 
 import argparse
+import functools
 import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -107,6 +116,8 @@ DEAD_LINTS = frozenset({
 SCOPE = re.compile(r"[A-Za-z0-9_-]+")  # the key's middle segment: no dots, no whitespace
 # cargo metadata target kinds that are production code (a library's crate-type is its kind).
 PRODUCTION_KINDS = frozenset({"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro", "bin"})
+# bin/ beside metrics/ (VENDOR_PATHS vendors both).
+TOOLCHAIN_EXEC = Path(__file__).resolve().parent.parent / "bin" / "toolchain_exec.sh"
 PROVISION_HINT = (
     "the gate provisions the toolchain rust-toolchain.toml pins; by hand: "
     'PATH="$(devkit/bin/rust_toolchain.sh .):$PATH"'
@@ -137,15 +148,35 @@ class Diagnostic:
 # ------------------------------------------------------------------------------- cargo
 
 
+@functools.cache
+def cargo_command() -> tuple[str, ...]:
+    """`cargo` when PATH has one, else toolchain_exec.sh's (probed once: a toolchain it cannot
+    provide is exit 2 here, not a confusing failure of the first real call)."""
+    if shutil.which("cargo"):
+        return ("cargo",)
+    command = (str(TOOLCHAIN_EXEC), "cargo")
+    try:
+        probe = subprocess.run(
+            [*command, "--version"], capture_output=True, text=True, check=False
+        )
+    except OSError as exc:
+        reason = f"{TOOLCHAIN_EXEC} cannot run: {exc.strerror}"
+    else:
+        if probe.returncode == 0:
+            return command
+        reason = probe.stderr.strip()[-500:] or f"exit {probe.returncode}"
+    raise CollectorError(
+        f"cargo is not on PATH and devkit/bin/toolchain_exec.sh could not provide it "
+        f"({reason}); {PROVISION_HINT}"
+    )
+
+
 def _cargo(
     args: list[str], *, root: Path, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            ["cargo", *args], cwd=root, capture_output=True, text=True, check=False, env=env
-        )
-    except FileNotFoundError as exc:
-        raise CollectorError(f"cargo is not on PATH; {PROVISION_HINT}") from exc
+    return subprocess.run(
+        [*cargo_command(), *args], cwd=root, capture_output=True, text=True, check=False, env=env
+    )
 
 
 def require_clippy(root: Path) -> None:
@@ -318,26 +349,14 @@ def module_graph(root: Path) -> dict[str, set[str]]:
         raise CollectorError(str(exc)) from exc
 
 
-def coupling(root: Path, scope: str, *, cycles: bool, fan: bool) -> Collected:
-    """python.py's cycle and fan definitions over the Rust module graph: one Tarjan, one
-    fan count, one top-offender format for the fleet."""
-    py = _sibling("python.py", "devkit_metrics_python")
-    graph = module_graph(root)
-    out = Collected()
-    files = {f: f for f in graph}
-    if cycles:
-        components = py.strongly_connected(graph)
-        key = f"coupling.{scope}.cycles"
-        out.keys[key] = len(components)
-        out.findings[key] = [" ".join(c) for c in sorted(components, key=lambda c: (-len(c), c))]
-    if fan:
-        fan_in, fan_out = py.fan_counts(graph)
-        in_key, out_key = f"coupling.{scope}.fan_in_max", f"coupling.{scope}.fan_out_max"
-        out.keys[in_key] = max(fan_in.values(), default=0)
-        out.keys[out_key] = max(fan_out.values(), default=0)
-        out.findings[in_key] = py.top_offenders(fan_in, files, "fan_in")
-        out.findings[out_key] = py.top_offenders(fan_out, files, "fan_out")
-    return out
+def _python() -> ModuleType:
+    return _sibling("python.py", "devkit_metrics_python")
+
+
+def coupling(graph: dict[str, set[str]], scope: str, *, cycles: bool, fan: bool) -> Collected:
+    """python.py's cycle and fan definitions over the Rust module graph (coupling_keys)."""
+    keys, findings = _python().coupling_keys(graph, scope, cycles=cycles, fan=fan)
+    return Collected(keys, findings)
 
 
 def dead(diags: list[Diagnostic], root: Path, scope: str) -> Collected:
@@ -366,6 +385,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cycles", action="store_true", help="module cycles")
     parser.add_argument("--fan", action="store_true", help="module fan-in and fan-out maxima")
     parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="root-relative fnmatch glob of production files to leave out of every key; repeatable",
+    )
+    parser.add_argument(
         "--list-out",
         metavar="FILE",
         help="also write the findings behind each count here, one line each (plain text)",
@@ -381,12 +407,21 @@ def collect(args: argparse.Namespace) -> Collected:
         raise CollectorError(f"--scope {args.scope!r} must match [A-Za-z0-9_-]+")
     if not (args.cognitive or args.dead or args.cycles or args.fan):
         raise CollectorError("nothing to collect: pass --cognitive, --dead, --cycles or --fan")
-    parts: list[Collected] = []
+    graph = module_graph(root) if args.cycles or args.fan or args.exclude else {}
+    py = _python()
+    try:
+        excluded = py.Exclusions.resolve(root, args.exclude, graph)
+    except py.CollectorError as exc:
+        raise CollectorError(str(exc)) from exc
+    meta = excluded.report("rust.py", args.scope)  # python.py's Collected: same two fields
+    parts = [Collected(meta.keys, meta.findings)]
     if args.cognitive or args.dead:
         diags = run_cargo(root, clippy=args.cognitive)
+        diags = [d for d in diags if excluded.keeps(shown(root, d.path))]
         parts += [m(diags, root, args.scope) for w, m in ((args.cognitive, cognitive), (args.dead, dead)) if w]
     if args.cycles or args.fan:
-        parts.append(coupling(root, args.scope, cycles=args.cycles, fan=args.fan))
+        pruned = excluded.graph(graph, {f: f for f in graph})
+        parts.append(coupling(pruned, args.scope, cycles=args.cycles, fan=args.fan))
     out = Collected()
     for part in parts:
         out.keys.update(part.keys)

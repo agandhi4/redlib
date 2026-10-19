@@ -40,9 +40,12 @@ def plan_literal(root: Path, name: str) -> str:
     """A literal `NAME=value` line of the repo's gate plan, as _gate_env.sh's gate_plan_literal
     reads it (never sourced); "" when absent."""
     plan = root / PLAN
-    if not plan.is_file():
-        return ""
-    m = re.search(rf"^{re.escape(name)}=([A-Za-z0-9._,/-]+)", plan.read_text(errors="replace"), re.M)
+    return literal_in(plan.read_text(errors="replace"), name) if plan.is_file() else ""
+
+
+def literal_in(plan_text: str, name: str) -> str:
+    """plan_literal over a plan's text, for a caller holding the index copy (_renovate.py --staged)."""
+    m = re.search(rf"^{re.escape(name)}=([A-Za-z0-9._,/-]+)", plan_text, re.M)
     return m.group(1) if m else ""
 
 

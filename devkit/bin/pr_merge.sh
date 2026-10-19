@@ -22,6 +22,12 @@
 # ready` line) and then merged: the fleet Workflow gates a PR while it is a draft, and GitHub
 # refuses to merge one (locus #136 needed a hand `gh pr ready`). A draft that fails a check is
 # refused like any PR and stays a draft.
+# A PR labelled metrics-rebaseline gets one `Metrics-Rebaseline: <key>=<old>→<new>` trailer per
+# bound its head loosens in docs/metrics/ratchet.json against main (metrics_ratchet.py loosened,
+# both commits fetched from origin), appended to the PR body as the squash body (`--body`). Why
+# (instalite 2026-10-19): the label is not in git, so the scorecard's TREND guessed from the
+# message and read a labelled loosening UNLABELLED; the trailer is the label's record in git,
+# and scorecard.py counts a worsen labelled only when one names its key.
 # Then runs `gh pr merge <n> --squash --match-head-commit <head> --delete-branch`, so a push
 # between the check and the merge makes GitHub refuse it, and exits with gh's code.
 # That one gh call, and only it, carries DEVKIT_MERGE_VERIFIED=<the full head sha>: no paid
@@ -62,9 +68,10 @@ extra=$(gate_plan_literal "$PLAN" GATE_MERGE_REQUIRES)
 
 refuse() { echo "merge: refused: $*" >&2; exit 1; }
 
-info=$(gh pr view "$PR" --repo "$SLUG" --json state,headRefOid,isDraft --jq '[.state, .headRefOid, .isDraft] | @tsv') \
+info=$(gh pr view "$PR" --repo "$SLUG" --json state,headRefOid,isDraft,labels \
+  --jq '[.state, .headRefOid, .isDraft, ([.labels[].name] | join(","))] | @tsv') \
   || { echo "merge: cannot read PR #$PR of $SLUG (gh above)" >&2; exit 2; }
-IFS=$'\t' read -r state head draft <<<"$info"
+IFS=$'\t' read -r state head draft labels <<<"$info"
 [ "$state" = OPEN ] || refuse "PR #$PR is ${state:-unknown}, not OPEN"
 [[ "$head" =~ ^[0-9a-f]{40}$ ]] || { echo "merge: gh gave no head commit for PR #$PR ('$head')" >&2; exit 2; }
 
@@ -101,10 +108,31 @@ case "$main_now" in
   *) refuse "re-gate: main moved ${gated_main:0:12}→${main_now:0:12}; run make gate PR=$PR" ;;
 esac
 
+readonly BOUNDS=docs/metrics/ratchet.json
+merge_body=()
+case ",$labels," in
+  *,metrics-rebaseline,*)
+    git -C "$ROOT" fetch -q --no-tags origin "pull/$PR/head" main \
+      || { echo "merge: cannot fetch PR #$PR's head and main to read its loosened bounds (git above)" >&2; exit 2; }
+    loosened=$(python3 -I "$HERE/metrics_ratchet.py" loosened --repo "$ROOT" --bounds "$BOUNDS" \
+      --base-ref "$main_now" --head-ref "$head") \
+      || { echo "merge: cannot compare $BOUNDS at ${head:0:12} with main (python3 above)" >&2; exit 2; }
+    if [ -n "$loosened" ]; then
+      body=$(gh pr view "$PR" --repo "$SLUG" --json body --jq .body) \
+        || { echo "merge: cannot read PR #$PR's body (gh above)" >&2; exit 2; }
+      nl=$'\n'
+      merge_body=(--body "${body:+$body$nl$nl}$(awk '{ print "Metrics-Rebaseline: " $0 }' <<<"$loosened")")
+      echo "merge: PR #$PR carries metrics-rebaseline; the squash body names what it loosens: $(paste -sd ' ' - <<<"$loosened")"
+    else
+      echo "merge: PR #$PR carries metrics-rebaseline but loosens no bound in $BOUNDS; no trailer"
+    fi
+    ;;
+esac
+
 if [ "$draft" = true ]; then
   gh pr ready "$PR" --repo "$SLUG" >/dev/null \
     || { echo "merge: cannot mark draft PR #$PR ready (gh above)" >&2; exit 2; }
   echo "merge: PR #$PR was a draft; its gate passed on head ${head:0:12}, so marked it ready"
 fi
 echo "merge: PR #$PR head ${head:0:12}: $REQUIRED success on main ${main_now:0:12}; squash-merging"
-exec env DEVKIT_MERGE_VERIFIED="$head" gh pr merge "$PR" --repo "$SLUG" --squash --match-head-commit "$head" --delete-branch
+exec env DEVKIT_MERGE_VERIFIED="$head" gh pr merge "$PR" --repo "$SLUG" --squash --match-head-commit "$head" --delete-branch ${merge_body[@]+"${merge_body[@]}"}

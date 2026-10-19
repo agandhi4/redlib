@@ -43,6 +43,10 @@
 # is a docs target, the hook runs `make docs-check` itself (if the Makefile declares it), the one check an AGENTS.md change must not
 # skip. A native-only change runs nothing and prints one line saying so.
 #
+# Vendoring only: a pre-commit whose staged paths only vendor devkit (devkit/ at the tree
+# .devkit-rev records, .devkit-rev, byte-exact base copies: devkit-sync's commit) runs no step
+# and prints one line; _hook_vendoring_only says why.
+#
 # Overrides, for a repo whose layout or target naming the defaults misjudge (most need none):
 #   :unless=<globs>  skip the step when EVERY changed path matches one of the globs
 #   :only=<globs>    run the step only when SOME changed path matches one of the globs
@@ -112,6 +116,8 @@
 . "$(dirname "${BASH_SOURCE[0]}")/_load_lib.sh"
 # shellcheck source=bin/_trailer_lib.sh  # devkit_trailer_ok and devkit_is_agent for the commit-msg trailer step
 . "$(dirname "${BASH_SOURCE[0]}")/_trailer_lib.sh"
+# shellcheck source=bin/_vendor_paths.sh  # base_copies, for a vendoring-only commit
+. "$(dirname "${BASH_SOURCE[0]}")/_vendor_paths.sh"
 
 run_hook_steps() {
   local hook=$1
@@ -148,7 +154,7 @@ run_hook_steps() {
   case "$hook" in
     pre-commit) steps=(${PRE_COMMIT_STEPS[@]+"${PRE_COMMIT_STEPS[@]}"}) ;;
     pre-push)
-      PUSH_RANGES=$(printf '%s\n' "$push_input" | "$root/devkit/bin/push_ranges.sh" "${1:-origin}") || return $?
+      PUSH_RANGES=$(printf '%s\n' "$push_input" | "$(dirname "${BASH_SOURCE[0]}")/push_ranges.sh" "${1:-origin}") || return $?
       if [ -z "$PUSH_RANGES" ]; then
         echo "✓ $hook: nothing to check (deletion or tag push)"
         _hook_allow_push "$uses_lfs" "$push_input" "$@"
@@ -208,6 +214,11 @@ run_hook_steps() {
     fi
   fi
 
+  if [ "$hook" = pre-commit ] && [ "$listed" = 1 ] && _hook_vendoring_only "$changed"; then
+    echo "– vendoring only (devkit/ is .devkit-rev's tree ${HOOK_VENDORED_TREE:0:7}, every other path a base copy): the repo's steps skip; the PR gate runs them"
+    return 0
+  fi
+
   if [ "$runs" -gt 0 ] && ! toolchain_path "$root"; then
     echo "$hook: $TOOLCHAIN_ERROR"
     return 1
@@ -254,6 +265,31 @@ run_hook_steps() {
 
   echo "✓ $hook passed"
   _hook_allow_push "$uses_lfs" "$push_input" "$@"
+}
+
+# <staged paths>: true when the commit only vendors devkit, as devkit-sync's own commit does:
+# every path is under devkit/, is .devkit-rev, or is a base copy (_vendor_paths.sh base_copies)
+# staged byte-identical to its staged base, and the staged devkit/ tree is the tree .devkit-rev
+# records. Sets HOOK_VENDORED_TREE. Why skip the repo's steps for it (closet, 2026-10-19): the
+# sync commits in a fresh worktree before any install, and a lint or typecheck step then fails
+# on a missing node_modules, not on the change. The tree hash is the check this commit needs and
+# it needs no dependency; the code is upstream's, already gated there, and its effect on this
+# repo is the PR gate's to judge. A hand edit under devkit/ breaks the hash, so it runs every step.
+_hook_vendoring_only() {
+  local changed=$1 rev path base copy bases
+  HOOK_VENDORED_TREE=
+  [ -n "$changed" ] || return 1
+  rev=$(git show :.devkit-rev 2>/dev/null) || return 1
+  HOOK_VENDORED_TREE=$(git write-tree --prefix=devkit/ 2>/dev/null) || return 1
+  [ "$HOOK_VENDORED_TREE" = "${rev#* }" ] || return 1
+  bases=$(base_copies)
+  while IFS= read -r path; do
+    case "$path" in ''|devkit/*|.devkit-rev) continue ;; esac
+    base=$(awk -v c="$path" '$2 == c { print $1; exit }' <<<"$bases")
+    [ -n "$base" ] || return 1
+    copy=$(git rev-parse -q --verify ":$path") || return 1
+    [ "$copy" = "$(git rev-parse -q --verify ":devkit/$base")" ] || return 1
+  done <<<"$changed"
 }
 
 # <root> <message file>: run COMMIT_MSG_STEPS (header: commit-msg); stops at the first failure.

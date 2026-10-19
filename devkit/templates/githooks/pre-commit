@@ -3,6 +3,8 @@
 # behaviour are in devkit/bin/hook_steps.sh. Installed by devkit/bin/hooks_check.sh --fix.
 set -uo pipefail
 ROOT=$(git rev-parse --show-toplevel) || exit 1
+BIN=$ROOT/devkit/bin
+[ ! -f "$ROOT/VENDOR_PATHS" ] || BIN=$ROOT/bin   # devkit's own checkout: bin/ at the root
 # shellcheck source=/dev/null
-. "$ROOT/devkit/bin/quiet_run.sh" && . "$ROOT/devkit/bin/hook_steps.sh" || exit 1
+. "$BIN/quiet_run.sh" && . "$BIN/hook_steps.sh" || exit 1
 run_hook_steps pre-commit "$@"
