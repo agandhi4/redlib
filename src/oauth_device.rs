@@ -1,7 +1,7 @@
 // The spoofed Android device redlib mints tokens as: its headers, user agent and the token
 // request itself. Token lifecycle (rotation, budget, the daemon) is oauth.rs; this module only
 // knows how to ask Reddit for one token. Used by `oauth::Oauth`, which owns a `MobileSpoofAuth`.
-use crate::{client::CLIENT, oauth_resources::ANDROID_APP_VERSION_LIST};
+use crate::{oauth_resources::ANDROID_APP_VERSION_LIST, transport::CLIENT};
 use base64::{engine::general_purpose, Engine as _};
 use log::{info, trace};
 use serde_json::json;
