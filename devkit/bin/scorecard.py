@@ -8,10 +8,13 @@
   TREND  is it improving: per key of docs/metrics/ratchet.json and report-only.json, the value
          at the start of the last 7 and 30 days (git history) against HEAD, direction-aware:
          `a↓ b= c↑(l labelled)`. A worsen is labelled when every commit that worsened the key
-         touched docs/decisions.md or names `metrics-rebaseline` in its message (the squash
-         body is the PR body); the label itself is not in git, so those are the two verifiable
-         signals, and the TREND table says which matched. An unlabelled worsen of a bound is an
-         enforcement failure. "Largest debts" lists the keys past the scorecard.conf thresholds
+         carries a `Metrics-Rebaseline: <key>=…` trailer naming it: `make merge` writes one per
+         loosened bound into a metrics-rebaseline PR's squash body (pr_merge.sh), the label's
+         only record in git. A commit with no such trailer (history before devkit #168, a repo
+         not yet synced, a merge outside make merge) falls back to the two older signals: a
+         docs/decisions.md line it adds names the key, or its message names
+         `metrics-rebaseline`. The TREND table says which matched. An unlabelled worsen of a
+         bound is an enforcement failure. "Largest debts" lists the keys past the scorecard.conf thresholds
          (the former T2 bands), with no pass/fail.
   BITE   does enforcement act: gate runs and fails by rule, hook fails, unguarded merges, from
          gate_bite.measure (the numbers `gate_bite.py --json` prints).
@@ -22,7 +25,9 @@ the repo does not own (VM reader, glossary, restore drill) pinned every grade at
 the per-track table and the repo grade are gone.
 
 Read-only and deterministic for WIRED: it runs none of the repo's own code. Metrics come from
-the committed bounds, then docs/metrics/report-only.json, then a fresh build/metrics.json.
+the committed bounds, then docs/metrics/report-only.json, then a fresh build/metrics.json; a
+snapshot older than the checkout's HEAD commit is a leftover of another tree and is skipped with
+one stderr line (load_metrics).
 
   bin/scorecard.py <repo-root> [--json OUT]                     one repo: the line and tables
   bin/scorecard.py --fleet [<repo-root>...] [--md OUT] [--json OUT]
@@ -91,6 +96,7 @@ ratchet_mod = _load_sibling("metrics_ratchet.py", "devkit_metrics_ratchet")
 identity = _load_sibling("_repo_identity.py", "devkit_repo_identity")
 bite_mod = _load_sibling("gate_bite.py", "devkit_gate_bite")
 compose_mod = _load_sibling("_compose.py", "devkit_compose")  # its compose file names
+renovate_mod = _load_sibling("_renovate.py", "devkit_renovate")  # devkit-check's Renovate audit
 BOUNDS_FILE = "docs/metrics/ratchet.json"
 REPORT_ONLY_FILE = "docs/metrics/report-only.json"
 TREND_FILES = (BOUNDS_FILE, REPORT_ONLY_FILE)
@@ -182,12 +188,36 @@ def tracked_files(root: Path) -> set[str]:
 repo_name = identity.repo_name
 
 
+def _duration(seconds: float) -> str:
+    """`45s`, `12m`, `3h 12m`, `2d 4h`: an age a reader takes in at a glance."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h {s % 3600 // 60}m"
+    return f"{s // 86400}d {s % 86400 // 3600}h"
+
+
+def snapshot_staleness(root: Path, snap: Path) -> str | None:
+    """How much older build/metrics.json is than the checkout's HEAD commit, or None when it is
+    not (or the repo has no commit to compare). Why (redlib lane, 2026-10-19): WIRED read the
+    numbers a build/ left behind by an earlier HEAD, untracked so no checkout clears it."""
+    head = git(root, "log", "-1", "--format=%ct")
+    if not head.isdigit():
+        return None
+    behind = int(head) - snap.stat().st_mtime
+    return _duration(behind) if behind > 0 else None
+
+
 def load_metrics(repo: Repo) -> None:
     """Today's numbers, three layers, each over the last: the committed bounds, the committed
     report-only keys (the bounds never hold vuln.* or fan_in_max, devkit #76), then a fresh
-    build/metrics.json. A key the snapshot lacks keeps the committed value, as the metrics
-    ratchet does with a skipped collector's bound: an area-scoped gate skips collectors, and
-    read as missing those keys failed every such PR (Orbit #76)."""
+    build/metrics.json, skipped when it is older than HEAD (snapshot_staleness). A key the
+    snapshot lacks keeps the committed value, as the metrics ratchet does with a skipped
+    collector's bound: an area-scoped gate skips collectors, and read as missing those keys
+    failed every such PR (Orbit #76)."""
     bounds = repo.root / BOUNDS_FILE
     if bounds.is_file():
         try:
@@ -207,6 +237,15 @@ def load_metrics(repo: Repo) -> None:
         repo.metrics_from += (" + " if repo.metrics_from else "") + REPORT_ONLY_FILE
     snap = repo.root / "build" / "metrics.json"
     if snap.is_file():
+        stale = snapshot_staleness(repo.root, snap)
+        if stale is not None:
+            print(
+                f"scorecard: {repo.name}: snapshot build/metrics.json is older than HEAD ({stale}); "
+                "reading committed bounds instead",
+                file=sys.stderr,
+            )
+            repo.metrics_from += " (build/metrics.json older than HEAD, not read)"
+            return
         try:
             fresh = ratchet_mod.load_snapshot(snap, allow_empty=True).values
         except ratchet_mod.InputError:
@@ -381,17 +420,21 @@ class Domain:
     stacks: frozenset[str]  # the stacks a devkit collector measures it for
     matches: str  # regex over the key
     mechanism: str
+    # Stacks the domain does not apply to, by decision, with the reason (docs/decisions.md):
+    # NA rather than devkit backlog when they are all the code a repo has.
+    na: tuple[frozenset[str], str] = (frozenset(), "")
 
 
 CODE_STACKS = frozenset({"python", "ts", "rust", "swift", "shell"})
 RATCHET_DOMAINS = (
     Domain("ratchet.complexity", frozenset({"python", "ts", "rust", "shell"}), r"^complexity\.",
            "python.py --mccabe --cognitive / ts.mjs --cyclomatic --cognitive / rust.py --cognitive / shell.py --complexity"),
-    Domain("ratchet.duplication", frozenset({"python", "ts", "rust"}), r"^duplication\.[^.]+\.clones$", "jscpd.mjs"),
+    Domain("ratchet.duplication", frozenset({"python", "ts", "rust", "shell"}), r"^duplication\.[^.]+\.clones$", "jscpd.mjs (shell: --format bash)"),
     Domain("ratchet.dead", frozenset({"python", "ts", "rust", "shell"}), r"^dead\.", "python.py --vulture / ts.mjs --knip / rust.py --dead / shell.py --dead"),
-    Domain("ratchet.cycles", frozenset({"python", "ts", "rust"}), r"^coupling\.[^.]+\.cycles$", "python.py / ts.mjs / rust.py --cycles"),
-    Domain("ratchet.fan_out", frozenset({"python", "ts", "rust"}), r"^coupling\.[^.]+\.fan_out_max$", "python.py / ts.mjs / rust.py --fan"),
-    Domain("ratchet.coverage", frozenset({"python", "ts", "rust"}), r"^coverage\.", "coverage.py over the unit tier (Rust: --llvm-cov-json)"),
+    Domain("ratchet.cycles", frozenset({"python", "ts", "rust", "shell"}), r"^coupling\.[^.]+\.cycles$", "python.py / ts.mjs / rust.py --cycles / shell.py --cycles"),
+    Domain("ratchet.fan_out", frozenset({"python", "ts", "rust", "shell"}), r"^coupling\.[^.]+\.fan_out_max$", "python.py / ts.mjs / rust.py --fan / shell.py --fan"),
+    Domain("ratchet.coverage", frozenset({"python", "ts", "rust"}), r"^coverage\.", "coverage.py over the unit tier (Rust: --llvm-cov-json)",
+           na=(frozenset({"shell"}), "no line coverage for shell: bats reports tests, not lines, and no fleet machine has kcov (devkit decisions 2026-10-19)")),
 )
 
 
@@ -403,8 +446,11 @@ def wired_ratchet(repo: Repo, stack: set[str]) -> None:
         repo.na("ratchet.file", "no code stack")
     for d in RATCHET_DOMAINS:
         keys = [k for k in repo.metrics if re.search(d.matches, k)]
+        na_stacks, na_reason = d.na
         if stack & d.stacks:
             repo.add(d.cid, bool(keys), f"{len(keys)} key(s)" if keys else f"no key; wire {d.mechanism}")
+        elif stack & CODE_STACKS and stack & CODE_STACKS <= na_stacks:
+            repo.na(d.cid, na_reason)
         elif stack & CODE_STACKS:
             repo.add(d.cid, None, f"stack {', '.join(sorted(stack & CODE_STACKS))}", mechanism=f"a {d.cid.split('.')[1]} collector for {', '.join(sorted((stack & CODE_STACKS) - d.stacks))}")
         else:
@@ -522,9 +568,12 @@ def wired_process(repo: Repo, state_home: Path, conf: dict[str, float]) -> None:
     workflow = "\n".join(section_lines(agents_text(repo), r"workflow"))
     named = "make merge" in workflow
     repo.add("merge_workflow", named, "AGENTS.md Workflow names `make merge`" if named else "AGENTS.md Workflow does not name `make merge` (bin/pr_merge.sh)")
-    renovate = repo.root / "renovate.json"
-    preset = renovate.is_file() and "agandhi4/devkit" in renovate.read_text(errors="replace")
-    repo.add("renovate", preset, "shared devkit preset" if preset else "no renovate.json with the devkit preset")
+    found = renovate_mod.audit(repo.root)
+    if found is None:
+        repo.add("renovate", False, "no renovate.json with the devkit preset")
+    else:
+        rel, issues = found
+        repo.add("renovate", not issues, f"{rel}: {issues[0]}" if issues else "shared devkit preset, no ungated automerge")
     makes = makefiles_text(repo)
     secrets = "secrets_check.sh" in makes or "secrets-check" in makes
     repo.add("secrets", secrets, "Makefile runs secrets_check.sh" if secrets else "no Makefile runs devkit/bin/secrets_check.sh")
@@ -762,7 +811,7 @@ class KeyTrend:
     first: float
     last: float
     status: str  # BETTER SAME WORSE (metrics_ratchet.classify)
-    labelled: str = ""  # for a WORSE key: "decisions", "message", or "" when unlabelled
+    labelled: str = ""  # for a WORSE key: "trailer", "decisions", "message", or "" when unlabelled
 
 
 @dataclass
@@ -782,12 +831,31 @@ class Trend:
         return f"{self.count('BETTER')}↓ {self.count('SAME')}= {self.count('WORSE')}↑({self.labelled()} labelled)"
 
 
-def commit_label(root: Path, sha: str) -> str:
-    """Why a worsening commit counts as labelled: it adds a decisions line, or its message (the
-    squash body) names metrics-rebaseline. The PR label itself is not in git."""
-    if "docs/decisions.md" in git(root, "show", "--name-only", "--format=", sha).splitlines():
+TRAILER = "Metrics-Rebaseline:"  # pr_merge.sh writes `Metrics-Rebaseline: <key>=<old>→<new>`
+
+
+def trailer_keys(message: str) -> set[str]:
+    """The keys a squash body's Metrics-Rebaseline trailers name."""
+    return {
+        line[len(TRAILER):].strip().split("=", 1)[0]
+        for line in message.splitlines()
+        if line.startswith(TRAILER)
+    }
+
+
+def commit_label(root: Path, sha: str, key: str) -> str:
+    """Why a commit that worsened `key` counts as labelled (module docstring): its trailer
+    names the key; or, for a commit with no trailer at all, a decisions line it adds names the
+    key, or its message names metrics-rebaseline. A trailer that names other keys only is a
+    labelled PR that did not loosen this one, so no fallback rescues it."""
+    message = git(root, "log", "-1", "--format=%B", sha)
+    trailed = trailer_keys(message)
+    if trailed:
+        return "trailer" if key in trailed else ""
+    added = git(root, "show", "--format=", sha, "--", "docs/decisions.md").splitlines()
+    if any(line.startswith("+") and key in line for line in added):
         return "decisions"
-    if "metrics-rebaseline" in git(root, "log", "-1", "--format=%B", sha):
+    if "metrics-rebaseline" in message:
         return "message"
     return ""
 
@@ -824,7 +892,7 @@ def trend(root: Path, days: int, now: datetime) -> Trend:
         (a, _), (b, direction) = first[key], last[key]
         kt = KeyTrend(key, a, b, ratchet_mod.classify(b, a, direction))
         if kt.status == "WORSE":
-            labels = [commit_label(root, sha) for sha in worsened_by.get(key, [])]
+            labels = [commit_label(root, sha, key) for sha in worsened_by.get(key, [])]
             kt.labelled = labels[0] if labels and all(labels) else ""
         t.keys.append(kt)
     return t

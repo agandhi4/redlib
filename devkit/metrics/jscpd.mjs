@@ -4,7 +4,7 @@
 // One line in scripts/ci/metrics.conf, run from the repo root, for example:
 //   dup repo node devkit/metrics/jscpd.mjs --scope repo --out build/metrics/dup.json backend/server frontend/src
 //
-// Usage: jscpd.mjs --scope <name> [--min-tokens 50] [--min-lines 5] [--bin <jscpd>] [--base] [--out FILE]
+// Usage: jscpd.mjs --scope <name> [--min-tokens 50] [--min-lines 5] [--bin <jscpd>] [--base] [--format <f,...>] [--out FILE]
 //                  [--list-out FILE] <paths...>
 //   paths        repo-relative directories or files jscpd scans (at least one)
 //   --min-tokens, --min-lines   jscpd's clone size knobs (its defaults are 50 and 5). The one
@@ -14,6 +14,10 @@
 //                --bin frontend/node_modules/.bin/jscpd). Never PATH's: the lockfile's measures
 // A `.jscpd.json` in the current directory is honoured by jscpd itself (ignore patterns,
 // formats); the flags above override its matching keys, as jscpd's own CLI does.
+//   --format     only these jscpd formats (its --format; `jscpd --list` names them). A shell
+//                scope passes `--format bash`, which jscpd reads from .sh and .bash files: shell
+//                needs no collector of its own. Extensionless scripts (git hooks) are not read,
+//                as jscpd selects files by extension. Default: every format jscpd knows
 //   --base       merge that `.jscpd.json` (or package.json `jscpd`) over devkit/lint/jscpd.base.json
 //                (tests and `*.d.ts` out; lists union, the repo's scalars win) and pass the result
 //                as jscpd's --config, which replaces the `.jscpd.json` lookup (lint/README.md)
@@ -58,6 +62,7 @@ function parse(argv) {
       "min-lines": { type: "string", default: "5" },
       bin: { type: "string", default: join("node_modules", ".bin", "jscpd") },
       base: { type: "boolean", default: false },
+      format: { type: "string" },
       out: { type: "string" },
       "list-out": { type: "string" },
     },
@@ -67,6 +72,9 @@ function parse(argv) {
   }
   for (const key of ["min-tokens", "min-lines"]) {
     if (!/^[1-9][0-9]*$/.test(values[key])) throw new CollectorError(`--${key} must be a positive integer`);
+  }
+  if (values.format !== undefined && !/^[a-z0-9-]+(,[a-z0-9-]+)*$/.test(values.format)) {
+    throw new CollectorError("--format must be jscpd format names, comma-separated (jscpd --list)");
   }
   if (positionals.length === 0) throw new CollectorError("pass at least one path to scan");
   for (const p of positionals) {
@@ -91,6 +99,7 @@ function collect(opts) {
       // --absolute: jscpd otherwise names a file relative to whichever scanned path holds it,
       // so src/a.ts and lib/a.ts both read `a.ts` in a finding.
       "--reporters", "json", "--output", outDir, "--no-colors", "--absolute",
+      ...(opts.format === undefined ? [] : ["--format", opts.format]),
       ...extra,
     ], { cwd: process.cwd() });
     if (opts.base) {

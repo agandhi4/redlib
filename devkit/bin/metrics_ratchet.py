@@ -21,8 +21,12 @@ key with check's line and exits 1 after writing the BETTER bounds: it is the com
 runs before the gate, so it must show what the gate will refuse (finplat #660 learned of a
 regression only from a gate run).
 
-Report-only keys (`vuln.*`, `coupling.<scope>.fan_in_max`, `duplication.<scope>.jscpd_percent`,
-`size.<scope>.max_lines` and `size.<scope>.over_600`; is_report_only): collected and printed, never gated, even when a bounds file still holds one.
+Report-only keys (`vuln.*`, `meta.*`, `coupling.<scope>.fan_in_max`, `duplication.<scope>.jscpd_percent`,
+`size.<scope>.max_lines` and `size.<scope>.over_600`; is_report_only), plus any key its collector
+declares report-only (a top-level `"report_only": [<its keys>]` list in its output, carried into
+the snapshot by `merge`: ts.mjs declares a Next build's `bundle.<scope>.kb_total`, while a vite
+build's stays gated; Snapshot.is_report_only): collected and printed, never gated, even when a
+bounds file still holds one.
 `check` prints such a bound as REPORT-ONLY with a note to drop it and ignores it in the
 comparison with main (dropping one needs no label); `tighten` and `rebaseline` drop it and seed
 none. With `--report-only FILE`,
@@ -86,6 +90,7 @@ Usage:
   metrics_ratchet.py tighten --snapshot S --bounds B [--report-only F] [--seed]
   metrics_ratchet.py rebaseline --snapshot S --bounds B [--report-only F] [--keys K1,K2]
   metrics_ratchet.py merge --out OUT [--skipped NAME]... [--] [INPUT.json...]
+  metrics_ratchet.py loosened --base-ref REF --head-ref REF [--repo DIR] [--bounds REL]
 
 Key shape (docs/metrics-keys.md): flat dotted keys `<domain>.<scope>.<stat>`, numbers only,
 no whitespace. A collector file may also be nested objects (flattened to dotted keys) or
@@ -97,7 +102,9 @@ number) into one snapshot; a key two collectors both emit is an error, not a sil
 The snapshot `merge` writes (schema 2) names where each key came from, so `check` can tell a
 collector that did not run from a metric that vanished:
   {"schema_version": 2, "metrics": {<flat>}, "sources": {"<key>": "<collector>"},
-   "skipped": ["<collector>", ...]}
+   "skipped": ["<collector>", ...][, "report_only": ["<key>", ...]]}
+`report_only` (absent when empty) is the union of the inputs' declarations; a collector may
+declare only keys it emits.
 `<collector>` is the input file's stem (`build/metrics/python-backend.json` -> `python-backend`;
 the gate's `gate.json` and tier_guard's `tier-unit.json` are sources too). `skipped` is what
 metrics_collect.sh did not run because the PR changed no path in the collector's area. `check`,
@@ -143,7 +150,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -167,6 +174,7 @@ DOMAIN_DIRECTIONS = {
     "vuln": "lower",
     "allowlist": "lower",
     "lint": "lower",
+    "meta": "lower",
 }
 # Never seeded by rebaseline (docs/metrics-keys.md): area-scoped jobs leave them absent on
 # narrow PRs and the seconds are noisy. A repo may still track one by hand, with headroom.
@@ -174,7 +182,8 @@ NEVER_SEEDED_DOMAINS = frozenset({"gate", "tier", "tests"})
 # Report-only (module docstring): never gated, whatever the bounds file says. `vuln` moves with
 # a new advisory, not a code change; fan-in of a hub is architecture, not drift; a duplicated
 # share rises when unduplicated lines are deleted; a file's length alone never justifies a split.
-REPORT_ONLY_DOMAINS = frozenset({"vuln"})
+# `meta` describes the measurement (files a collector's --exclude left out), not the code.
+REPORT_ONLY_DOMAINS = frozenset({"vuln", "meta"})
 REPORT_ONLY_STATS = frozenset(  # (domain, last key segment)
     {
         ("coupling", "fan_in_max"),
@@ -205,6 +214,13 @@ class Snapshot:
     values: dict[str, float]
     sources: dict[str, str]  # key -> collector; empty for a schema 1 or flat snapshot
     skipped: frozenset[str]  # collectors metrics_collect.sh did not run; empty likewise
+    # Keys their collector declared report-only (module docstring): a property of how this
+    # build was measured, which the key's name cannot carry (bundle.*.kb_total is gated for vite).
+    report_only: frozenset[str] = frozenset()
+
+    def is_report_only(self, metric: str) -> bool:
+        """Never gated: by name (is_report_only) or by its collector's declaration."""
+        return is_report_only(metric) or metric in self.report_only
 
 
 SNAPSHOT_SCHEMA = 2
@@ -265,6 +281,7 @@ def load_snapshot(path: Path, *, allow_empty: bool = False) -> Snapshot:
         raise InputError(f"snapshot {path} must be a JSON object")
     sources: dict[str, str] = {}
     skipped: frozenset[str] = frozenset()
+    declared = _declared_report_only(doc, path)
     # An envelope: only `metrics` holds measurements; `commit` and `schema_version` would
     # otherwise flatten into bogus metrics (commit.dirty is skipped, schema_version not).
     if "schema_version" in doc and isinstance(doc.get("metrics"), dict):
@@ -279,7 +296,21 @@ def load_snapshot(path: Path, *, allow_empty: bool = False) -> Snapshot:
     values = _flatten(doc)
     if not values and not allow_empty:
         raise InputError(f"snapshot {path} contains no numeric metrics")
-    return Snapshot(values=values, sources=sources, skipped=skipped)
+    undeclared = sorted(declared - set(values))
+    if undeclared:
+        raise InputError(f"snapshot {path}: report_only names {', '.join(undeclared)}, which it does not emit")
+    return Snapshot(values=values, sources=sources, skipped=skipped, report_only=declared)
+
+
+def _declared_report_only(doc: dict[str, object], path: Path) -> frozenset[str]:
+    """The top-level `report_only` list of a collector file or schema 2 snapshot (module
+    docstring); empty when absent. _flatten skips it, as it skips every list."""
+    raw = doc.get("report_only", [])
+    if not isinstance(raw, list) or not all(isinstance(key, str) for key in raw):
+        raise InputError(f"snapshot {path}: `report_only` must be a list of metric keys")
+    for key in raw:
+        _check_key(key, f"snapshot {path} report_only")
+    return frozenset(raw)
 
 
 def parse_bounds(doc: object, where: str) -> dict[str, Bound]:
@@ -320,6 +351,18 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         raise InputError(f"cannot run git: {exc.strerror}") from exc
 
 
+def bounds_at(root: Path, ref: str, rel: str, what: str = "base ref") -> dict[str, Bound] | None:
+    """The bounds file `rel` as committed at `ref` in the checkout `root`, or None when that
+    commit has no such file. A ref that does not resolve is an error, never "no file": an
+    unfetched main must never read as "nothing to compare against"."""
+    if _git(root, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").returncode != 0:
+        raise InputError(f"{what} {ref} does not resolve; fetch it (git fetch origin main)")
+    shown = _git(root, "show", f"{ref}:{rel}")
+    if shown.returncode != 0:
+        return None
+    return parse_bounds(_parse_json(shown.stdout, f"{ref}:{rel}"), f"{ref}:{rel}")
+
+
 def load_base_bounds(bounds_path: Path, ref: str) -> tuple[dict[str, Bound] | None, str]:
     """Main's copy of the bounds file, or None when main has none yet (first adoption).
 
@@ -333,13 +376,10 @@ def load_base_bounds(bounds_path: Path, ref: str) -> tuple[dict[str, Bound] | No
             "against main's bounds"
         )
     rel = bounds_path.resolve().relative_to(Path(top.stdout.strip()).resolve()).as_posix()
-    if _git(where, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").returncode != 0:
-        # Fail closed: an unfetched main must never read as "nothing to compare against".
-        raise InputError(f"base ref {ref} does not resolve; fetch it (git fetch origin main)")
-    shown = _git(where, "show", f"{ref}:{rel}")
-    if shown.returncode != 0:
+    base = bounds_at(where, ref, rel)
+    if base is None:
         return None, f"none ({rel} is not on {ref}: first adoption)"
-    return parse_bounds(_parse_json(shown.stdout, f"{ref}:{rel}"), f"{ref}:{rel}"), f"{ref}:{rel}"
+    return base, f"{ref}:{rel}"
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -364,15 +404,21 @@ def write_bounds(path: Path, bounds: dict[str, Bound]) -> None:
 
 
 def _write_envelope(
-    path: Path, values: dict[str, float], sources: dict[str, str], skipped: list[str]
+    path: Path,
+    values: dict[str, float],
+    sources: dict[str, str],
+    skipped: list[str],
+    report_only: Iterable[str] = (),
 ) -> None:
     """A schema 2 snapshot: what `merge` writes and what the report-only file is."""
-    doc = {
+    doc: dict[str, object] = {
         "schema_version": SNAPSHOT_SCHEMA,
         "metrics": values,
         "sources": sources,
         "skipped": sorted(set(skipped)),
     }
+    if declared := sorted(set(report_only)):
+        doc["report_only"] = declared
     path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(path, json.dumps(doc, indent=2, sort_keys=True) + "\n")
 
@@ -390,7 +436,7 @@ def write_report_only(path: Path, snapshot: Snapshot) -> None:
             if old.sources.get(metric) in snapshot.skipped:
                 values[metric], sources[metric] = value, old.sources[metric]
     for metric, value in snapshot.values.items():
-        if is_report_only(metric):
+        if snapshot.is_report_only(metric):
             values[metric] = value
             if metric in snapshot.sources:
                 sources[metric] = snapshot.sources[metric]
@@ -424,10 +470,10 @@ def is_report_only(metric: str) -> bool:
     return parts[0] in REPORT_ONLY_DOMAINS or (parts[0], parts[-1]) in REPORT_ONLY_STATS
 
 
-def seedable(metric: str) -> bool:
+def seedable(metric: str, snapshot: Snapshot) -> bool:
     """A key `rebaseline` and `tighten --seed` may add a bound for: not a never-seeded domain,
     not report-only."""
-    return metric.partition(".")[0] not in NEVER_SEEDED_DOMAINS and not is_report_only(metric)
+    return metric.partition(".")[0] not in NEVER_SEEDED_DOMAINS and not snapshot.is_report_only(metric)
 
 
 def seed_bound(metric: str, snapshot: Snapshot, bounds_path: Path) -> Bound:
@@ -449,7 +495,7 @@ def seed_bounds(snapshot: Snapshot, bounds: dict[str, Bound], bounds_path: Path)
     return {
         metric: seed_bound(metric, snapshot, bounds_path)
         for metric in sorted(set(snapshot.values) - set(bounds))
-        if seedable(metric)
+        if seedable(metric, snapshot)
     }
 
 
@@ -493,12 +539,30 @@ def _fmt(value: float | None) -> str:
     return str(value) if isinstance(value, int) else repr(value)
 
 
-def compare_to_base(base: dict[str, Bound], bounds: dict[str, Bound]) -> dict[str, int]:
-    """Print one `ratchet-bound` line per bound that moved from main; count loosenings."""
-    counts = {"loosened": 0, "tightened": 0, "added": 0}
+@dataclass(frozen=True)
+class BoundMove:
+    """One bound that differs between main's file and the PR's (`ratchet-bound` line)."""
+
+    metric: str
+    old: Bound | None
+    new: Bound | None
+    status: str  # LOOSENED REMOVED DIRECTION TIGHTENED ADDED
+
+    @property
+    def loosens(self) -> bool:
+        """Needs the metrics-rebaseline label (module docstring)."""
+        return self.status in ("REMOVED", "DIRECTION", "LOOSENED")
+
+
+def bound_moves(
+    base: dict[str, Bound], bounds: dict[str, Bound], report_only: Callable[[str], bool]
+) -> list[BoundMove]:
+    """Every bound that moved from `base` to `bounds`, a report-only one aside: it is never
+    gated, so moving or dropping its bound loosens nothing."""
+    moves = []
     for metric in sorted(set(base) | set(bounds)):
-        if is_report_only(metric):
-            continue  # never gated, so moving or dropping its bound loosens nothing
+        if report_only(metric):
+            continue
         old, new = base.get(metric), bounds.get(metric)
         if new is None:
             status = "REMOVED"
@@ -514,16 +578,37 @@ def compare_to_base(base: dict[str, Bound], bounds: dict[str, Bound]) -> dict[st
             status = "LOOSENED"
         else:
             status = "TIGHTENED"
+        moves.append(BoundMove(metric, old, new, status))
+    return moves
+
+
+def compare_to_base(base: dict[str, Bound], bounds: dict[str, Bound], snapshot: Snapshot) -> dict[str, int]:
+    """Print one `ratchet-bound` line per bound that moved from main; count loosenings."""
+    counts = {"loosened": 0, "tightened": 0, "added": 0}
+    for move in bound_moves(base, bounds, snapshot.is_report_only):
+        old, new = move.old, move.new
         old_s = f"{old.direction}:{_fmt(old.bound)}" if old else "-"
         new_s = f"{new.direction}:{_fmt(new.bound)}" if new else "-"
-        print(f"ratchet-bound {metric} {old_s} -> {new_s} {status}")
-        if status in ("REMOVED", "DIRECTION", "LOOSENED"):
+        print(f"ratchet-bound {move.metric} {old_s} -> {new_s} {move.status}")
+        if move.loosens:
             counts["loosened"] += 1
-        elif status == "TIGHTENED":
+        elif move.status == "TIGHTENED":
             counts["tightened"] += 1
         else:
             counts["added"] += 1
     return counts
+
+
+def trailer_value(move: BoundMove) -> str:
+    """`<key>=<old>→<new>` for the squash body's Metrics-Rebaseline trailer (pr_merge.sh); a
+    flipped direction names both, a removed bound reads `→removed`."""
+    def side(b: Bound | None, with_direction: bool) -> str:
+        if b is None:
+            return "removed"
+        return f"{b.direction}:{_fmt(b.bound)}" if with_direction else _fmt(b.bound)
+
+    flipped = move.status == "DIRECTION"
+    return f"{move.metric}={side(move.old, flipped)}→{side(move.new, flipped)}"
 
 
 def _status_line(metric: str, bound: Bound, snapshot: Snapshot, bounds_path: Path) -> str:
@@ -564,7 +649,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     snapshot = load_snapshot(Path(args.snapshot), allow_empty=True)
     bounds_path = Path(args.bounds)
     bounds = load_bounds(bounds_path)
-    unset = sorted(m for m, b in bounds.items() if b.bound is None and not is_report_only(m))
+    unset = sorted(m for m, b in bounds.items() if b.bound is None and not snapshot.is_report_only(m))
     if unset:
         raise InputError(
             f"bounds {bounds_path}: {', '.join(unset)} unset; run `metrics_ratchet.py rebaseline` "
@@ -577,14 +662,14 @@ def cmd_check(args: argparse.Namespace) -> int:
     else:
         base, base_label = load_base_bounds(bounds_path, args.base_ref)
     print(f"ratchet base {base_label}")
-    moved = compare_to_base(base, bounds) if base is not None else {"loosened": 0}
+    moved = compare_to_base(base, bounds, snapshot) if base is not None else {"loosened": 0}
 
     counts = {"SAME": 0, "BETTER": 0, "WORSE": 0, "MISSING": 0, "SKIPPED": 0, "REPORT-ONLY": 0}
     worse: list[tuple[str, float, float]] = []
     unlocked: list[str] = []
     for metric in sorted(bounds):
         bound = bounds[metric]
-        if is_report_only(metric):
+        if snapshot.is_report_only(metric):
             counts["REPORT-ONLY"] += 1
             value = snapshot.values.get(metric)
             print(
@@ -665,7 +750,7 @@ def cmd_tighten(args: argparse.Namespace) -> int:
     worse: list[str] = []
     for metric in sorted(bounds):
         bound = bounds[metric]
-        if is_report_only(metric):
+        if snapshot.is_report_only(metric):
             del tightened[metric]
             dropped += 1
             _drop_report_only(metric, bound)
@@ -698,7 +783,7 @@ def cmd_tighten(args: argparse.Namespace) -> int:
     notes_s = f" ({', '.join(notes)})" if notes else ""
     print(f"ratchet tightened {changed} bound(s) in {bounds_path}{notes_s}")
     if not args.seed:
-        unbounded = [m for m in sorted(set(snapshot.values) - set(bounds)) if seedable(m)]
+        unbounded = [m for m in sorted(set(snapshot.values) - set(bounds)) if seedable(m, snapshot)]
         if unbounded:
             print(
                 f"ratchet untracked {len(unbounded)} key(s) without a bound "
@@ -735,14 +820,14 @@ def rebaseline_keys(
     """Loosen exactly `keys` to their measured values where WORSE, and seed a named key that has
     no bound yet; None when none moved."""
     for key in keys:
-        if is_report_only(key):
+        if snapshot.is_report_only(key):
             raise InputError(f"--keys {key}: report-only, never gated; nothing to loosen")
         if key not in bounds:
             if key not in snapshot.values:
                 raise InputError(
                     f"--keys {key}: not a bound in {bounds_path} and not in the snapshot"
                 )
-            if not seedable(key):
+            if not seedable(key, snapshot):
                 raise InputError(f"--keys {key}: its domain is never bounded (gate, tier, tests)")
         elif key not in snapshot.values:
             collector = skipped_collector(key, bounds[key], snapshot)
@@ -794,7 +879,7 @@ def cmd_rebaseline(args: argparse.Namespace) -> int:
         for m, b in bounds.items()
         if m not in snapshot.values
         and skipped_collector(m, b, snapshot) is None
-        and not is_report_only(m)
+        and not snapshot.is_report_only(m)
     )
     if missing:
         for metric in missing:
@@ -810,7 +895,7 @@ def cmd_rebaseline(args: argparse.Namespace) -> int:
     loosened: list[str] = []
     for metric in sorted(bounds):
         bound = bounds[metric]
-        if is_report_only(metric):
+        if snapshot.is_report_only(metric):
             dropped += 1
             _drop_report_only(metric, bound)
             continue
@@ -856,10 +941,13 @@ def cmd_merge(args: argparse.Namespace) -> int:
     merged: dict[str, float] = {}
     owner: dict[str, str] = {}  # key -> input path, for the clash message
     sources: dict[str, str] = {}  # key -> collector (the input's stem), for the envelope
+    declared: set[str] = set()
     for skipped in args.skipped:
         _collector_name(skipped, "merge --skipped")
     for name in args.inputs:
-        for key, value in load_snapshot(Path(name)).values.items():
+        collected = load_snapshot(Path(name))
+        declared |= collected.report_only
+        for key, value in collected.values.items():
             _check_key(key, f"snapshot {name}")
             if key in owner:
                 raise InputError(f"metric {key} is emitted by both {owner[key]} and {name}")
@@ -867,7 +955,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             sources[key] = Path(name).stem
             merged[key] = value
     out = Path(args.out)
-    _write_envelope(out, merged, sources, args.skipped)
+    _write_envelope(out, merged, sources, args.skipped, declared)
     skipped = sorted(set(args.skipped))
     skipped_note = f"; skipped: {', '.join(skipped)}" if skipped else ""
     print(
@@ -881,6 +969,18 @@ REPORT_ONLY_HELP = (
     "also write the snapshot's report-only keys to FILE (docs/metrics/report-only.json), the "
     "committed copy the scorecard reads"
 )
+
+
+def cmd_loosened(args: argparse.Namespace) -> int:
+    """Print `<key>=<old>→<new>` per bound `--head-ref` loosens against `--base-ref` (the
+    label-admitted moves: LOOSENED, REMOVED, DIRECTION), nothing when none does."""
+    root = Path(args.repo)
+    base = bounds_at(root, args.base_ref, args.bounds) or {}
+    head = bounds_at(root, args.head_ref, args.bounds, "head ref") or {}
+    for move in bound_moves(base, head, is_report_only):
+        if move.loosens:
+            print(trailer_value(move))
+    return EXIT_OK
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -940,6 +1040,19 @@ def build_parser() -> argparse.ArgumentParser:
         "moves, nothing is seeded or dropped",
     )
     rebaseline.set_defaults(func=cmd_rebaseline)
+
+    loosened = sub.add_parser(
+        "loosened",
+        help="print key=old→new per bound one commit loosens against another (make merge's "
+        "Metrics-Rebaseline trailers)",
+    )
+    loosened.add_argument("--base-ref", required=True, help="the commit holding main's bounds")
+    loosened.add_argument("--head-ref", required=True, help="the commit holding the PR's bounds")
+    loosened.add_argument("--repo", default=".", help="the git checkout holding both (default .)")
+    loosened.add_argument(
+        "--bounds", default="docs/metrics/ratchet.json", help="the bounds file's repo-relative path"
+    )
+    loosened.set_defaults(func=cmd_loosened)
 
     merge = sub.add_parser("merge", help="merge collector outputs into one snapshot envelope")
     merge.add_argument("--out", required=True, help="snapshot JSON to write")

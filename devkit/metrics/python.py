@@ -55,6 +55,14 @@ Keys (docs/metrics-keys.md), each behind its flag; `<scope>` is `--scope`:
                coupling.<scope>.fan_out_max         initializer edge would make every package
                                                     that imports anything a hub)
 
+--exclude GLOB (repeatable): production files the repo does not own (a vendored shadcn component)
+left out of every key above: their functions are not scored, their dead code not counted, and
+they are no node of the import graph. Globs are root-relative fnmatch patterns (shell.py's
+--exclude); a literal path or `dir/*` reads the same in ts.mjs. A glob that matches no --src file
+is exit 2: a stale exclusion is removed, not carried. The count is emitted as
+meta.<scope>.excluded_files (report-only, never gated) and printed as `excluded N files` on
+stderr, so a growing list is visible in the snapshot. Exclusions (also rust.py's, loaded by path).
+
 --list-out FILE: the findings behind the counts, so a lane never re-derives what to fix. Plain
 text, one `# <key>` header per key with findings, then one line per finding; empty when there
 are none. Paths are --root joined with the tool's path (repo-relative in a gate run). Never read
@@ -80,6 +88,7 @@ from __future__ import annotations
 import argparse
 import ast
 import enum
+import fnmatch
 import json
 import re
 import shutil
@@ -133,6 +142,57 @@ class Collected:
     def merge(self, other: Collected) -> None:
         self.keys.update(other.keys)
         self.findings.update(other.findings)
+
+
+@dataclass(frozen=True)
+class Exclusions:
+    """The --exclude globs resolved to the production files they drop, as shown() prints them
+    (every finding carries that form, so filtering is one set lookup). Used by rust.py too."""
+
+    globs: tuple[str, ...]
+    dropped: frozenset[str]
+
+    @classmethod
+    def resolve(cls, root: Path, globs: Iterable[str], production: Iterable[str]) -> Exclusions:
+        """`production` is the shown paths a collector measures; each glob is matched against
+        their --root-relative form and must match at least one (else exit 2: stale)."""
+        globs = tuple(globs)
+        relative = {}
+        for path in production:
+            try:
+                relative[path] = Path(path).relative_to(root).as_posix()
+            except ValueError:  # an absolute path outside --root: no root-relative glob names it
+                continue
+        dropped = set()
+        for glob in globs:
+            hits = {p for p, rel in relative.items() if fnmatch.fnmatchcase(rel, glob)}
+            if not hits:
+                raise CollectorError(
+                    f"--exclude {glob} matches no production file under {root}; "
+                    "drop the stale exclusion"
+                )
+            dropped |= hits
+        return cls(globs, frozenset(dropped))
+
+    def keeps(self, path: str) -> bool:
+        return path not in self.dropped
+
+    def graph(self, graph: Graph, files: dict[str, str]) -> Graph:
+        """`graph` without the excluded nodes and every edge into them; `files` maps a node to
+        its shown path."""
+        drop = {node for node, path in files.items() if path in self.dropped}
+        return {node: targets - drop for node, targets in graph.items() if node not in drop}
+
+    def report(self, script: str, scope: str) -> Collected:
+        """The meta key (only when --exclude was given: a repo without one emits nothing new)."""
+        if not self.globs:
+            return Collected()
+        listed = " ".join(sorted(self.dropped))
+        print(f"metrics/{script}: excluded {len(self.dropped)} files: {listed}", file=sys.stderr)
+        return Collected({f"meta.{scope}.excluded_files": len(self.dropped)})
+
+
+NO_EXCLUSIONS = Exclusions((), frozenset())  # callers outside the CLI (bin/py_cognitive_lint.py)
 
 
 @dataclass(frozen=True)
@@ -208,7 +268,9 @@ def _parse_json(text: str, what: str) -> object:
 # ------------------------------------------------------------------------------ McCabe
 
 
-def collect_mccabe(python: str, root: Path, src: list[str], scope: str) -> Collected:
+def collect_mccabe(
+    python: str, root: Path, src: list[str], scope: str, excluded: Exclusions = NO_EXCLUSIONS
+) -> Collected:
     require_module(python, "ruff", "ruff", root)
     out = run_tool(
         [
@@ -230,6 +292,7 @@ def collect_mccabe(python: str, root: Path, src: list[str], scope: str) -> Colle
                 int(match["cx"]),
             )
         )  # fmt: skip
+    functions = [f for f in functions if excluded.keeps(f.path)]
     over_key = f"complexity.{scope}.mccabe_over_{MCCABE_THRESHOLD}"
     return Collected(
         {
@@ -243,7 +306,9 @@ def collect_mccabe(python: str, root: Path, src: list[str], scope: str) -> Colle
 # --------------------------------------------------------------------------- cognitive
 
 
-def collect_cognitive(python: str, root: Path, src: list[str], scope: str) -> Collected:
+def collect_cognitive(
+    python: str, root: Path, src: list[str], scope: str, excluded: Exclusions = NO_EXCLUSIONS
+) -> Collected:
     # complexipy ships a console script, not a runnable module; it sits beside the interpreter
     # (`.venv/bin/complexipy`). Not resolve(): a venv's python is a symlink to the base
     # interpreter, whose bin/ holds no project tools.
@@ -270,6 +335,8 @@ def collect_cognitive(python: str, root: Path, src: list[str], scope: str) -> Co
     defs = DefLines(root)
     functions = []
     for entry in entries:
+        if not excluded.keeps(shown(root, entry["path"])):
+            continue
         score = int(entry["complexity"])
         # Only a listed function needs its line, and finding it parses the file.
         listed = score > COGNITIVE_THRESHOLD
@@ -567,6 +634,7 @@ def collect_vulture(
     *,
     keep_declarative: bool,
     base_sets: list[str] | None,
+    excluded: Exclusions = NO_EXCLUSIONS,
 ) -> Collected:
     require_module(python, "vulture", "vulture", root)
     config = _own_vulture(root) if base_sets is None else vulture_base_config(root, base_sets)
@@ -598,8 +666,11 @@ def collect_vulture(
         if index is not None and match["kind"] in DECLARATIVE_KINDS:
             if int(match["line"]) in index.lines(match["file"]):
                 continue
+        path = shown(root, match["file"])
+        if not excluded.keeps(path):
+            continue
         what = match["message"] if match["kind"] is None else f"{match['name']} {match['kind']}"
-        found.append((shown(root, match["file"]), int(match["line"]), what))
+        found.append((path, int(match["line"]), what))
     key = f"dead.{scope}.vulture"
     return Collected(
         {key: len(found)}, {key: [f"{path}:{line} {what}" for path, line, what in sorted(found)]}
@@ -837,9 +908,11 @@ def module_files(root: Path, src: list[str]) -> dict[str, str]:
     return {module_name(rel): shown(root, rel.as_posix()) for rel in source_files(root, src)}
 
 
-def collect_cycles(root: Path, src: list[str], scope: str) -> Collected:
-    components = strongly_connected(import_graph(root, src, kinds=RUNTIME))
+def collect_cycles(
+    root: Path, src: list[str], scope: str, excluded: Exclusions = NO_EXCLUSIONS
+) -> Collected:
     files = module_files(root, src)
+    components = strongly_connected(excluded.graph(import_graph(root, src, kinds=RUNTIME), files))
     cycles = sorted((sorted(files[m] for m in c) for c in components), key=lambda c: (-len(c), c))
     key = f"coupling.{scope}.cycles"
     return Collected({key: len(components)}, {key: [" ".join(cycle) for cycle in cycles]})
@@ -863,10 +936,36 @@ def top_offenders(counts: dict[str, int], files: dict[str, str], metric: str) ->
     return [f"{path} {metric}={-neg}" for neg, path in ranked[:FAN_TOP]]
 
 
-def collect_fan(root: Path, src: list[str], scope: str) -> Collected:
-    graph = import_graph(root, src, kinds=STATEMENTS)
-    fan_in, fan_out = fan_counts(graph)
+def coupling_keys(
+    graph: Graph, scope: str, *, cycles: bool, fan: bool
+) -> tuple[dict[str, int], dict[str, list[str]]]:
+    """The cycle and fan keys, with their findings, over a graph whose nodes are already the
+    paths a finding names. Used by rust.py and shell.py, so one Tarjan, one fan count and one
+    top-offender format serve the fleet. python.py's own collectors call the parts, since its
+    cycles read runtime imports and its fan every import statement: two graphs, not one."""
+    keys: dict[str, int] = {}
+    findings: dict[str, list[str]] = {}
+    files = {node: node for node in graph}
+    if cycles:
+        key = f"coupling.{scope}.cycles"
+        components = strongly_connected(graph)
+        keys[key] = len(components)
+        findings[key] = [" ".join(c) for c in sorted(components, key=lambda c: (-len(c), c))]
+    if fan:
+        fan_in, fan_out = fan_counts(graph)
+        in_key, out_key = f"coupling.{scope}.fan_in_max", f"coupling.{scope}.fan_out_max"
+        keys[in_key] = max(fan_in.values(), default=0)
+        keys[out_key] = max(fan_out.values(), default=0)
+        findings[in_key] = top_offenders(fan_in, files, "fan_in")
+        findings[out_key] = top_offenders(fan_out, files, "fan_out")
+    return keys, findings
+
+
+def collect_fan(
+    root: Path, src: list[str], scope: str, excluded: Exclusions = NO_EXCLUSIONS
+) -> Collected:
     files = module_files(root, src)
+    fan_in, fan_out = fan_counts(excluded.graph(import_graph(root, src, kinds=STATEMENTS), files))
     in_key, out_key = f"coupling.{scope}.fan_in_max", f"coupling.{scope}.fan_out_max"
     return Collected(
         {in_key: max(fan_in.values(), default=0), out_key: max(fan_out.values(), default=0)},
@@ -912,6 +1011,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SET[,SET...]",
         help="merge devkit/lint/vulture.toml and these decorator sets under [tool.vulture]",
     )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="root-relative fnmatch glob of production files to leave out of every key; repeatable",
+    )
     parser.add_argument("--cycles", action="store_true", help="AST import cycles")
     parser.add_argument("--fan", action="store_true", help="fan-in and fan-out maxima over the runtime import graph")
     parser.add_argument(
@@ -938,23 +1044,27 @@ def collect(args: argparse.Namespace) -> Collected:
         raise CollectorError(
             "nothing to collect: pass --mccabe, --cognitive, --vulture, --cycles or --fan"
         )
-    out = Collected()
+    excluded = Exclusions.resolve(
+        root, args.exclude, (shown(root, rel.as_posix()) for rel in source_files(root, args.src))
+    )
+    out = excluded.report("python.py", args.scope)
     if args.mccabe:
-        out.merge(collect_mccabe(args.python, root, args.src, args.scope))
+        out.merge(collect_mccabe(args.python, root, args.src, args.scope, excluded))
     if args.cognitive:
-        out.merge(collect_cognitive(args.python, root, args.src, args.scope))
+        out.merge(collect_cognitive(args.python, root, args.src, args.scope, excluded))
     if args.vulture:
         out.merge(
             collect_vulture(
                 args.python, root, args.src, args.scope,
                 keep_declarative=not args.vulture_ignore_declarative,
                 base_sets=None if args.vulture_base is None else _set_names(args.vulture_base),
+                excluded=excluded,
             )
         )  # fmt: skip
     if args.cycles:
-        out.merge(collect_cycles(root, args.src, args.scope))
+        out.merge(collect_cycles(root, args.src, args.scope, excluded))
     if args.fan:
-        out.merge(collect_fan(root, args.src, args.scope))
+        out.merge(collect_fan(root, args.src, args.scope, excluded))
     return out
 
 

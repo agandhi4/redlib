@@ -14,3 +14,12 @@ select = [
   # backend.md: all imports at module top. Retires orbit's test_no_deferred_imports.py.
   "PLC0415",
 ]
+
+[lint.pylint]
+# PLR0915 (statements per function), PLR0916 (boolean expressions in one `if`) and PLR1702
+# (nested blocks), written down at pylint's defaults. They are not in `select`:
+# bin/changed_lint.py ruff runs them (PLR0916 and PLR1702 are preview rules) over the files a
+# change touches until a repo's count is 0 (lint/README.md "Changed-file rules").
+max-statements = 50
+max-bool-expr = 5
+max-nested-blocks = 5

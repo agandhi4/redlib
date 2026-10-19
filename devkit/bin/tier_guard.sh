@@ -47,6 +47,8 @@
 set -uo pipefail
 # shellcheck source=bin/_load_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_load_lib.sh"
+# shellcheck source=bin/_awake_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_awake_lib.sh"
 
 RUNNERS="pytest vitest playwright cargo bats"
 
@@ -165,6 +167,8 @@ LOG=$(mktemp "${tmp%/}/tier-$TIER.XXXXXX") || die "mktemp failed"
 trap 'rm -f "$LOG"' EXIT
 
 devkit_load_scale "$BUDGET"
+# A tier's budget is wall time; a nap mid-run would read as test time (bin/_awake_lib.sh).
+devkit_stay_awake
 start=$SECONDS
 "$@" 2>&1 | tee "$LOG"
 rc=${PIPESTATUS[0]}

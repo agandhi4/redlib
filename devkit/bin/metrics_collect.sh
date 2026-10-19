@@ -197,7 +197,8 @@ done <"$CONF"
 gate_job_ran() { [ -f "$GATE_JSON" ] && grep -q "\"gate.$1.seconds\"" "$GATE_JSON"; }
 # run_reason <area>: prints why the collector runs, or nothing when it is skipped.
 run_reason() {
-  if [ -z "${GATE_AREAS+x}" ]; then echo "outside the gate: every collector runs"; return; fi
+  # shellcheck disable=SC2031  # plan_job_target's subshell sets its own GATE_AREAS; this is the gate's
+if [ -z "${GATE_AREAS+x}" ]; then echo "outside the gate: every collector runs"; return; fi
   case "$1" in
     repo) echo "repo: always runs"; return ;;
     job:*) ! gate_job_ran "${1#job:}" || echo "gate job ${1#job:} ran"; return ;;
@@ -265,18 +266,36 @@ tier_inputs() {
     esac
   done <<<"$TIER_INPUTS"
 }
-# plan_job_target <job>: the make target of the plan's gate job <job>, or nothing.
+# plan_job_target <job>: the make target of the plan's gate job <job>, or nothing. The plan is
+# run, not parsed: a regex read rollcall's one-line `if …; then job db ci-db; else …` as target
+# `ci-db;` (2026-10-19). A subshell sources _paths_lib.sh and the plan with the skeleton's
+# helpers stubbed (`job` prints the target of the job asked for on fd 3 and stops; plan output
+# and errors are dropped), then declares every GATE_JOBS_<GROUP> and calls gate_plan_extra and
+# gate_plan as the gate would for a diff of one unclassified root file: an "other" path, which
+# by the plan contract runs every group. A job only some other diff reaches is not found.
 plan_job_target() {
   [ -f scripts/ci/gate_plan.sh ] || return 0
-  awk -v j="$1" '
-    { sub(/#.*/, "") }
-    match($0, /GATE_JOBS_[A-Z0-9_]+="[^"]*"/) {
-      s = substr($0, RSTART, RLENGTH); sub(/^[^"]*"/, "", s); sub(/"$/, "", s)
-      n = split(s, e, "|")
-      for (i = 1; i <= n; i++) { split(e[i], w, " "); if (w[1] == j) { print w[2]; exit } }
+  (
+    set +eu
+    want=$1 CHANGED=devkit-plan-probe
+    # shellcheck source=bin/_paths_lib.sh
+    . "$HERE/_paths_lib.sh"
+    # shellcheck source=/dev/null  # the repo's plan, as local_gate.sh sources it
+    . scripts/ci/gate_plan.sh
+    # shellcheck disable=SC2329  # the skeleton's helpers (local_gate.sh), which the plan calls
+    {
+      job() { [ "$1" != "$want" ] || { printf '%s\n' "$2" >&3; exit 0; }; }
+      skip() { :; }
+      note() { :; }
+      nothing_to_run() { exit 0; }
+      changed() { grep -qE "$1" <<<"$CHANGED"; }
+      pr_has_label() { return 1; }
     }
-    { for (i = 1; i < NF - 1; i++) if ($i == "job" && $(i + 1) == j) { print $(i + 2); exit } }
-  ' scripts/ci/gate_plan.sh
+    devkit_gate_areas "$CHANGED"
+    for group in $(compgen -v GATE_JOBS_); do _devkit_run_jobs "${!group}"; done
+    if declare -F gate_plan_extra >/dev/null; then gate_plan_extra; fi
+    if declare -F gate_plan >/dev/null; then gate_plan; fi
+  ) 3>&1 >/dev/null 2>&1 </dev/null
 }
 # STAT_MTIME <file>...: each file's mtime in epoch seconds. GNU is probed first: BSD stat has
 # no -c, while GNU `stat -f` is the file-system form and would print a wrong answer, not fail.
@@ -338,6 +357,7 @@ report_stale() {
     echo "metrics_collect: WARNING: $f ($name) is older than the newest tracked change under $dir; its numbers may predate the code. Rerun: make ${target:-<its tier>} (or TIGHTEN_RUN_TIERS=1)" >&2
   done <<<"$STALE"
 }
+# shellcheck disable=SC2031  # plan_job_target's subshell sets its own GATE_AREAS; this is the gate's
 if [ -z "${GATE_AREAS+x}" ]; then
   tier_input_state
   if [ -n "$RERUN" ] && { [ "$FRESH" = 1 ] || [ "${TIGHTEN_RUN_TIERS:-0}" = 1 ]; }; then

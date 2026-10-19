@@ -44,6 +44,10 @@
 # template (a repo that adopted the hooks gets every hook devkit adds: commit-msg, 2026-10-18),
 # executable when its base is; a repo with no .githooks/ gets none.
 #
+# Hooks: the sync's commit only vendors (devkit/ at .devkit-rev's tree, base copies), so the
+# repo's pre-commit runs none of its steps for it (hook_steps.sh _hook_vendoring_only) and the
+# sync commits in a fresh worktree before any install (closet, 2026-10-19).
+#
 # Trailer: both commits end with devkit_commit_trailer (bin/_trailer_lib.sh: DEVKIT_COMMIT_TRAILER,
 # set even empty wins, else `git config devkit.trailer`, else the model-agnostic
 # `Co-Authored-By: Claude <noreply@anthropic.com>`). An agent sets the env to the trailer naming

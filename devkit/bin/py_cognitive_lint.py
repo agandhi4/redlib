@@ -10,9 +10,9 @@ ratchet count at the gate, minutes after the edit; TypeScript fails it in the ed
 (sonarjs/cognitive-complexity, lint/README.md "Graduating"). finplat #670's sweep found the same
 helper-extraction shape three times, and ruff's PLR0912/PLR0915 caught 4 of its 16 functions.
 
-Which files: the .py files under --src that differ from the merge-base of --base-ref and HEAD,
-committed, staged, unstaged or untracked, so the hook, ci-quick and the gate (the merged tree)
-all judge the same change. Every function in those files counts, not only the edited ones: the
+Which files: the .py files under --src that differ from the merge-base of --base-ref and HEAD
+(bin/_changed_files.py, shared with bin/changed_lint.py). Every function in those files counts,
+not only the edited ones: the
 file is where the lane is working. Graduation is automatic: when --bounds holds
 `complexity.<scope>.cognitive_over_15` at 0 (the ratchet tightened to 0), the whole --src tree
 is linted, so no function over 15 can come back anywhere. A missing --bounds file means not
@@ -32,21 +32,19 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
-import posixpath
-import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
 
 EXIT_FOUND = 1
 EXIT_USAGE = 2
-COLLECTOR = Path(__file__).resolve().parent.parent / "metrics" / "python.py"
+HERE = Path(__file__).resolve().parent
 
 
-def _load_collector() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("devkit_metrics_python", COLLECTOR)
+def _load(path: Path, name: str) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
-        raise SystemExit(f"py-cognitive-lint: cannot load {COLLECTOR}")
+        raise SystemExit(f"py-cognitive-lint: cannot load {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     sys.dont_write_bytecode = True  # no __pycache__ in a consumer's vendored devkit/
@@ -54,7 +52,8 @@ def _load_collector() -> ModuleType:
     return module
 
 
-collector = _load_collector()
+collector = _load(HERE.parent / "metrics" / "python.py", "devkit_metrics_python")
+changed = _load(HERE / "_changed_files.py", "devkit_changed_files")
 THRESHOLD = collector.COGNITIVE_THRESHOLD
 
 
@@ -68,33 +67,6 @@ def graduated(bounds: Path, scope: str) -> bool:
         raise collector.CollectorError(f"--bounds {bounds}: {exc}") from exc
     entry = doc.get(key) if isinstance(doc, dict) else None
     return isinstance(entry, dict) and entry.get("bound") == 0
-
-
-def _git(root: Path, *args: str) -> str:
-    proc = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        raise collector.CollectorError(f"git {' '.join(args)}: {proc.stderr.strip()}")
-    return proc.stdout
-
-
-def changed_files(root: Path, src: list[str], base_ref: str) -> list[str]:
-    """The .py files under --src, relative to --root, that differ from the merge-base."""
-    try:
-        base = _git(root, "merge-base", base_ref, "HEAD").strip()
-    except collector.CollectorError as exc:
-        raise collector.CollectorError(
-            f"{exc}; --base-ref {base_ref} must resolve (a shallow CI clone needs it fetched)"
-        ) from exc
-    # --relative and a cwd of --root: paths relative to it, and only paths under it.
-    diff = _git(root, "diff", "--name-only", "--relative", "--diff-filter=d", "-z", base)
-    untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z")
-    dirs = [posixpath.normpath(s) for s in src]
-    paths = {p for p in (diff + untracked).split("\0") if p.endswith(".py")}
-    return sorted(
-        p
-        for p in paths
-        if (root / p).is_file() and any(p == d or p.startswith(f"{d}/") or d == "." for d in dirs)
-    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -120,13 +92,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"py-cognitive-lint: whole tree (complexity.{args.scope}.cognitive_over_"
                   f"{THRESHOLD} is 0 in {args.bounds})")  # fmt: skip
         else:
-            files = changed_files(root, args.src, args.base_ref)
+            files = changed.changed_files(root, args.src, args.base_ref, [".py"])
             print(f"py-cognitive-lint: {len(files)} changed .py file(s) since {args.base_ref} "
                   f"(whole tree once complexity.{args.scope}.cognitive_over_{THRESHOLD} is 0)")  # fmt: skip
             if not files:
                 return 0
         found = collector.collect_cognitive(args.python, root, files, args.scope)
-    except collector.CollectorError as exc:
+    except (collector.CollectorError, changed.ChangedFilesError) as exc:
         print(f"py-cognitive-lint: {exc}", file=sys.stderr)
         return EXIT_USAGE
     over = found.findings[f"complexity.{args.scope}.cognitive_over_{THRESHOLD}"]

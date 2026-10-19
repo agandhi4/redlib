@@ -46,6 +46,17 @@ export const sonarjsRules = {
   "sonarjs/no-duplicate-string": ["error", { threshold: 3 }],
 };
 
+// Rules held only in the files a change touches until a repo's count is 0 (lint/README.md
+// "Changed-file rules"): bin/changed_lint.py eslint passes this map as --rule over those files.
+// Not in sonarjsRules yet, which lints the whole tree: the existing debt would fail every repo.
+// A rule graduates into sonarjsRules once every repo is at 0. finplat's and rollcall's 2026-10-18
+// lanes extracted a named predicate from a repeated multi-term &&/|| chain six times, and a
+// 16-term || list drifted. max counts &&, || and ?: operators, so 4 is five terms: the same
+// chain ruff's PLR0916 allows (max-bool-expr 5 in lint/ruff.toml).
+export const sonarjsChangedRules = {
+  "sonarjs/expression-complexity": ["error", { max: 4 }],
+};
+
 // For the repo's test-file layer: repeated literals in tests (titles, fixture ids, expected
 // text) are the readable form, and they were 87% of the 2026-10-17 fleet dry run's duplicate-string findings.
 export const sonarjsTestRules = {

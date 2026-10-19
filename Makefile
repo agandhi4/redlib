@@ -1,11 +1,14 @@
 # The repo's check API: the PR gate (scripts/ci/gate_plan.sh) and Actions (quick-check.yml) call
 # these targets and nothing else, so a check changes here, once.
 #
-# Rust comes from rust-toolchain.toml. Every cargo call goes through toolchain_exec.sh, which puts
-# the same pinned toolchain first on PATH that the gate and the hooks use, so a hand-run
-# `make ci-quick` works on a machine with no Rust. On Actions setup-rust-toolchain has already put
-# the pin on PATH, and rust_toolchain.sh reuses a PATH cargo that matches it.
-CARGO ?= devkit/bin/toolchain_exec.sh cargo
+# Rust comes from rust-toolchain.toml. make's SHELL puts the same pinned toolchain first on PATH
+# for every recipe line and $(shell …) that the gate and the hooks use, so a hand-run
+# `make ci-quick` works on a machine with no Rust and no recipe can be the one left out
+# (devkit decisions 2026-10-19 "Lanes own their Postgres port; recipes run on the pins"). Under the
+# gate or a hook the PATH is already built and the line skips it. On Actions
+# setup-rust-toolchain has already put the pin on PATH, and rust_toolchain.sh reuses it.
+SHELL := devkit/bin/toolchain_shell.sh
+CARGO ?= cargo
 CI_IMAGE ?= redlib:ci
 # The image's APP_VERSION, and what ci-image then asserts its ENV and OCI label carry: the bare
 # 7-char sha, as ghcr.yml passes it; the gate passes gate-<pr> (scripts/ci/gate_plan.sh) because

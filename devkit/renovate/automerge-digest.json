@@ -1,0 +1,14 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "A CONSCIOUS HOLE in the gate: digest-only pins (an image or action SHA moving under an unchanged tag, and the first pin of one) automerge with no local-gate. Extend it AFTER renovate/default, and only with GATE_RENOVATE_AUTOMERGE=digest in scripts/ci/gate_plan.sh: devkit-check and the scorecard flag either half alone. Nothing else may automerge (devkit/docs/decisions.md 2026-10-19).",
+  "packageRules": [
+    {
+      "description": "Digests get their own group so a grouped minor never rides along (Renovate automerges a branch only when every update in it may). platformAutomerge is off because GitHub's native auto-merge is unavailable on free-plan private repos; ignoreTests because a Renovate PR never receives local-gate, so Renovate would otherwise wait on a check that never comes.",
+      "matchUpdateTypes": ["digest", "pinDigest"],
+      "groupName": "digest pins",
+      "automerge": true,
+      "platformAutomerge": false,
+      "ignoreTests": true
+    }
+  ]
+}
