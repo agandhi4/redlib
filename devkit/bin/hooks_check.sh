@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Assert this checkout's git hooks actually run: core.hooksPath points at the repo's tracked
-# .githooks/, and pre-commit and pre-push there exist and are executable.
+# .githooks/, and every hook devkit ships (templates/githooks beside this script, vendored at
+# devkit/templates/githooks: pre-commit, pre-push, commit-msg) exists there and is executable.
 #
 # Why: on 2026-08-16 we found a tool installer (code-review-graph) had repointed finplat's
 # core.hooksPath; its hooks had silently never run for two months. Nothing failed, so nothing
@@ -26,8 +27,10 @@
 #
 # Usage: devkit/bin/hooks_check.sh [--fix] [repo-root]
 #   repo-root defaults to the current checkout. --fix sets core.hooksPath to .githooks (the
-#   relative form, so each worktree runs its own checkout's hooks) and adds the .gitattributes
-#   line before checking.
+#   relative form, so each worktree runs its own checkout's hooks), installs a missing hook as a
+#   byte copy of its template (executable; devkit-check's base copies then hold it there), and
+#   adds the .gitattributes line before checking. Installed files are left for the developer
+#   to commit.
 #   Prints "hooks-check: ok" (exit 0) or "hooks-check: <reason>" (exit 1). Exit 2 on usage.
 #   Under CI/GITHUB_ACTIONS it prints "hooks-check: skipped (CI)" and exits 0: runners never
 #   install hooks, and the workflows run the checks themselves.
@@ -56,6 +59,13 @@ fail() { echo "hooks-check: $*"; exit 1; }
 
 ROOT=$(git -C "${ROOT:-.}" rev-parse --show-toplevel 2>/dev/null) || fail "${ROOT:-.} is not a git checkout"
 ROOT=$(cd "$ROOT" && pwd -P)
+# -P: a bin/ reached through a symlink still finds the templates of the devkit it belongs to.
+TEMPLATES=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../templates/githooks
+HOOKS=()
+for template in "$TEMPLATES"/*; do
+  if [ -f "$template" ]; then HOOKS+=("${template##*/}"); fi
+done
+[ "${#HOOKS[@]}" -gt 0 ] || { echo "hooks-check: no hook templates at $TEMPLATES" >&2; exit 2; }
 
 if [ "$FIX" = 1 ]; then
   was=$(git -C "$ROOT" config --get core.hooksPath || true)
@@ -63,6 +73,13 @@ if [ "$FIX" = 1 ]; then
     git -C "$ROOT" config core.hooksPath .githooks
     echo "hooks-check: set core.hooksPath=.githooks (was '${was:-unset}')"
   fi
+  for hook in "${HOOKS[@]}"; do
+    [ ! -e "$ROOT/.githooks/$hook" ] || continue
+    mkdir -p "$ROOT/.githooks"
+    cp "$TEMPLATES/$hook" "$ROOT/.githooks/$hook"
+    chmod +x "$ROOT/.githooks/$hook"
+    echo "hooks-check: installed .githooks/$hook from devkit/templates/githooks; commit it"
+  done
   attrs=$ROOT/.gitattributes
   if ! has_decisions_union "$attrs"; then
     # Start a new line when the file's last one has no newline.
@@ -84,8 +101,8 @@ case "$HOOKS_PATH" in
   *) fail "core.hooksPath is '$HOOKS_PATH', not .githooks (fix: $0 --fix)" ;;
 esac
 
-for hook in pre-commit pre-push; do
-  [ -e "$ROOT/.githooks/$hook" ] || fail ".githooks/$hook is missing"
+for hook in "${HOOKS[@]}"; do
+  [ -e "$ROOT/.githooks/$hook" ] || fail ".githooks/$hook is missing (fix: $0 --fix)"
   [ -x "$ROOT/.githooks/$hook" ] || fail ".githooks/$hook is not executable (fix: chmod +x and commit the mode)"
 done
 

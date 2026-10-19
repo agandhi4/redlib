@@ -166,6 +166,7 @@ DOMAIN_DIRECTIONS = {
     "size": "lower",
     "vuln": "lower",
     "allowlist": "lower",
+    "lint": "lower",
 }
 # Never seeded by rebaseline (docs/metrics-keys.md): area-scoped jobs leave them absent on
 # narrow PRs and the seconds are noisy. A repo may still track one by hand, with headroom.

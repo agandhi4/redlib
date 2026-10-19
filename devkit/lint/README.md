@@ -204,6 +204,17 @@ change is a devkit PR; each repo's `devkit-sync` then refreshes every tracked co
 commit (it never creates one), so that commit passes its devkit-check. The base is
 instalite's config as of 2026-10-16.
 
+## shellcheck
+
+`shellcheckrc` is the shellcheck base: follow `source` into files not on the command line,
+resolved beside the script (`external-sources`, `source-path=SCRIPTDIR`). shellcheckrc has no
+include and shellcheck reads only the first `.shellcheckrc` it finds, so `bin/shellcheck.sh`
+hands shellcheck one `--rcfile`: this base, then the repo's own `.shellcheckrc` appended. Later
+lines win for a scalar key and `disable` lists accumulate, the kit's base-merge rule below. The
+version is devkit's (`bin/release_tool.sh`, 0.11.0 with its checksums), so every repo, hook and
+`metrics/shell.py` run lints with one shellcheck under one config. A plain `shellcheck` by hand
+sees neither the pin nor the base.
+
 ## Bases the collectors merge
 
 knip, jscpd and vulture have no `extends`, and in this fleet only devkit's collectors run them

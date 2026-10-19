@@ -43,6 +43,14 @@
     "direction": "lower",
     "bound": null
   },
+  "complexity.infra.branches_max": {
+    "direction": "lower",
+    "bound": null
+  },
+  "complexity.infra.branches_over_15": {
+    "direction": "lower",
+    "bound": null
+  },
   "coupling.app.cycles": {
     "direction": "lower",
     "bound": null
@@ -103,7 +111,19 @@
     "direction": "lower",
     "bound": null
   },
+  "dead.infra.unused": {
+    "direction": "lower",
+    "bound": null
+  },
   "duplication.repo.clones": {
+    "direction": "lower",
+    "bound": null
+  },
+  "lint.infra.shellcheck_errors": {
+    "direction": "lower",
+    "bound": null
+  },
+  "lint.infra.shellcheck_warnings": {
     "direction": "lower",
     "bound": null
   }

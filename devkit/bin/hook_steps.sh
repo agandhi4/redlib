@@ -13,12 +13,13 @@
 # commit-msg runs devkit's own message checks, never make targets: a message is not a tree a
 # ci-* target can read. Each COMMIT_MSG_STEPS entry is `<check>` or `<check>:off`; the one check:
 #   trailer  an agent's commit (devkit_is_agent, bin/_trailer_lib.sh: CLAUDECODE or CLAUDE_CODE_*
-#            in the environment, or `git config devkit.agent true`) must hold the required line
-#            (devkit_commit_trailer: DEVKIT_COMMIT_TRAILER, else `git config devkit.trailer`, else
-#            the fleet default; devkit-sync's own commits read the same chain) as a line of its
-#            own. It fails printing the exact line to add. A human's commit, a merge commit (git
-#            writes its message) and an empty required line pass untouched. Why a hook (owner,
-#            2026-10-18): two lanes committed another model's trailer against their brief.
+#            in the environment, or `git config devkit.agent true`) must hold, as a line of its
+#            own, a Claude co-author trailer naming the model that ran it (devkit_trailer_ok:
+#            `Co-Authored-By: Claude[ <model>] <noreply@anthropic.com>`). It never compares
+#            against DEVKIT_COMMIT_TRAILER or devkit.trailer, which an agent can set to anything;
+#            those are only what devkit-sync writes. It fails printing the form to add. A human's
+#            commit and a merge commit (git writes its message) pass untouched. Why a hook
+#            (owner, 2026-10-18): the convention lived only in briefs.
 # A check that applied writes its ledger rows (header: Timings), so gate_bite.py counts it.
 # Each step is "<label>=<make target>[:<override>]". Steps call the gate's own ci-* targets,
 # never raw tools, so a hook cannot drift from the gate. They run in order and stop at the
@@ -109,7 +110,7 @@
 . "$(dirname "${BASH_SOURCE[0]}")/_paths_lib.sh"
 # shellcheck source=bin/_load_lib.sh  # devkit_load_scale, shared with local_gate.sh and tier_guard.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_load_lib.sh"
-# shellcheck source=bin/_trailer_lib.sh  # the commit-msg trailer chain, shared with devkit-sync.sh
+# shellcheck source=bin/_trailer_lib.sh  # devkit_trailer_ok and devkit_is_agent for the commit-msg trailer step
 . "$(dirname "${BASH_SOURCE[0]}")/_trailer_lib.sh"
 
 run_hook_steps() {
@@ -290,25 +291,21 @@ _hook_parse_msg_step() {
   esac
 }
 
-# Does the trailer check apply to this commit (header: commit-msg)? Sets HOOK_TRAILER, the
-# required line.
+# Does the trailer check apply to this commit (header: commit-msg)?
 _hook_trailer_applies() {
-  HOOK_TRAILER=$(devkit_commit_trailer)
-  [ -n "$HOOK_TRAILER" ] && devkit_is_agent && ! git rev-parse -q --verify MERGE_HEAD >/dev/null
+  devkit_is_agent && ! git rev-parse -q --verify MERGE_HEAD >/dev/null
 }
 
 # <message file>: the trailer check; returns 1 after printing the line to add.
 _hook_msg_trailer() {
-  local msg=$1 want=$HOOK_TRAILER found
-  # CR and trailing blanks dropped: an editor's line ending is not a different trailer.
-  if tr -d '\r' <"$msg" | sed 's/[[:space:]]*$//' | grep -qxF -- "$want"; then
-    return 0
-  fi
-  echo "✗ commit-msg: an agent's commit must carry the fleet trailer. Add this line, after a blank line, at the end of the message:"
-  echo "  $want"
+  local msg=$1 found
+  devkit_trailer_ok "$msg" && return 0
+  echo "✗ commit-msg: an agent's commit must carry a Claude trailer naming the model that ran it. Add this line, after a blank line, at the end of the message:"
+  echo "  Co-Authored-By: Claude <model> <noreply@anthropic.com>"
+  echo "  <model> is the one your harness attribution names (e.g. Opus 5.5); without one, $DEVKIT_DEFAULT_TRAILER"
   found=$(grep -iE '^co-authored-by:' "$msg" | head -1)
-  [ -z "$found" ] || echo "  (the message has '$found' instead)"
-  echo "  The line comes from DEVKIT_COMMIT_TRAILER, else git config devkit.trailer, else devkit's default; COMMIT_MSG_STEPS=(\"trailer:off\") in scripts/ci/hooks.conf turns the check off."
+  [ -z "$found" ] || echo "  (the message has '$found', which is not a Claude trailer)"
+  echo "  COMMIT_MSG_STEPS=(\"trailer:off\") in scripts/ci/hooks.conf turns the check off."
   return 1
 }
 
