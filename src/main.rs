@@ -105,8 +105,12 @@ async fn main() {
 	// Load environment variables
 	_ = dotenvy::dotenv();
 
-	// Initialize logger
-	pretty_env_logger::init();
+	// Initialize logger. Default `warn`, not env_logger's error-only: the token-rotation and
+	// rate-limit lines are warn!, and with no RUST_LOG on the instance they never reached the
+	// logs, so the 2026-10-20 thread 403s could not be told from token blocks. RUST_LOG overrides.
+	pretty_env_logger::formatted_builder()
+		.parse_filters(&std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".to_string()))
+		.init();
 
 	let matches = Command::new("Redlib")
 		.version(env!("CARGO_PKG_VERSION"))

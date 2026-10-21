@@ -12,7 +12,10 @@ pub(crate) enum TokenAction {
 	RotateInBackground,
 	/// JSON 401 "Unauthorized": the token expired. Rotate before answering.
 	Rotate,
-	/// Non-JSON 403: Reddit's network-policy block page for a flagged token/device pair.
+	/// Non-JSON 403: Reddit's network-policy block page. For a flagged token/device pair a
+	/// rotation fixes it (Oct 2026). The same page also answers a ROUTE Reddit blocks for every
+	/// logged-out client (threads, 2026-10-20), which no rotation fixes: hence the hedged message
+	/// and the 60s cooldown in `oauth::refresh_blocked_token`. Same body, so they can't be told apart here.
 	RotateBlocked,
 }
 
@@ -36,7 +39,7 @@ pub(crate) fn interpret_response(status: u16, body: &[u8], ratelimit_reset: Opti
 			error!("Got an invalid response from reddit {e}. Status code: {status}");
 			return if status == 403 {
 				(
-					Err("Reddit blocked this session. A new one was issued; refresh the page.".to_string()),
+					Err("Reddit refused this request (403 block page). The session is being renewed; if a refresh does not help, Reddit is blocking this kind of page for logged-out clients.".to_string()),
 					TokenAction::RotateBlocked,
 				)
 			} else if (500..600).contains(&status) {
@@ -99,7 +102,13 @@ mod tests {
 	#[test]
 	fn interpret_html_403_rotates_the_blocked_token() {
 		let (result, action) = interpret(403, "<html><body>whoa there, pardner!</body></html>");
-		assert_eq!(result, Err("Reddit blocked this session. A new one was issued; refresh the page.".to_string()));
+		assert_eq!(
+			result,
+			Err(
+				"Reddit refused this request (403 block page). The session is being renewed; if a refresh does not help, Reddit is blocking this kind of page for logged-out clients."
+					.to_string()
+			)
+		);
 		assert_eq!(action, TokenAction::RotateBlocked);
 	}
 
