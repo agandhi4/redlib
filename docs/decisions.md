@@ -153,3 +153,10 @@ Consequence: re-adding a `compose*.yml` turns guards on; that PR adds the four c
 Why: devkit #166 warns on a Makefile in a repo pinning Rust without `SHELL := devkit/bin/toolchain_shell.sh`; `CARGO ?= devkit/bin/toolchain_exec.sh cargo` covered cargo only, not `$(shell …)` or the other tools a recipe runs.
 Decision: SHELL is toolchain_shell.sh and `CARGO ?= cargo`; one mechanism, so the per-command wrapper goes (toolchain_exec.sh stays for a hand-typed cargo). No changed-file lint line (#161/#164): it has ruff and eslint rules only, and redlib has no Python env or Node; clippy already lints the whole tree.
 Consequence: devkit-check reads zero warnings; a hand-run `make ci-quick` with no cargo on PATH passes. Metrics SAME, WIRED stays 19/20 (duplication is the declared delta).
+
+## 2026-10-20 — Thread routes go out with the slash before `comments` encoded
+
+**Why:** From about 18:40 UTC, Reddit's edge answers `/r/<sub>/comments/…` (and `/u|user/<name>/comments/…`) with its HTML "blocked by network security" 403 for every app-only token, on every instance; listings are unaffected (redlib-org/redlib#591). The 403 self-heal read this as a flagged token, rotated (at most once a minute) and told the user to refresh, which could not help. Its `warn!` lines were invisible because env_logger defaults to error-only.
+**Decision:** `client::encode_thread_route` sends the same request with that one slash as `%2F`, which Reddit's route rule does not match (upstream #592's approach); cache keys and messages keep the readable path. The 403 message no longer promises a refresh fixes it, and the logger defaults to `warn`.
+**Consequence:** Bare `/comments/<id>` links stay blocked (no slash to encode). If thread pages 403 again, Reddit has started normalising `%2F`, and the remaining route is a logged-in token. The self-heal cannot tell a route block from a token block by body; a repeating `🚫 … not rotating again yet` on one page type means a route block.
+

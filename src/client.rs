@@ -122,6 +122,26 @@ fn reddit_get(path: String, quarantine: bool) -> Boxed<Result<WreqResponse, Stri
 	request(&Method::GET, path, true, quarantine, REDDIT_URL_BASE, REDDIT_URL_BASE_HOST)
 }
 
+/// Since 2026-10-20 ~18:40 UTC, Reddit's edge answers the literal thread route
+/// `/{r,u,user}/<name>/comments/...` with its HTML "blocked by network security" 403 for the
+/// app-only tokens redlib mints, on every instance, while listings keep working. The same
+/// request with the slash before `comments` percent-encoded is not matched and returns the
+/// thread JSON (redlib-org/redlib#591, #592). A bare `/comments/<id>` has no such slash and
+/// stays blocked. If thread pages 403 again, Reddit has started normalising `%2F`.
+/// Used by `fetch_json` only: the cache key and error messages keep the readable path.
+fn encode_thread_route(path: &str) -> String {
+	let (route, query) = path.split_once('?').map_or((path, None), |(route, query)| (route, Some(query)));
+	let encoded = ["/r/", "/u/", "/user/"].iter().find_map(|prefix| {
+		let (name, tail) = route.strip_prefix(prefix)?.split_once('/')?;
+		tail.starts_with("comments/").then(|| format!("{prefix}{name}%2F{tail}"))
+	});
+	match (encoded, query) {
+		(Some(route), Some(query)) => format!("{route}?{query}"),
+		(Some(route), None) => route,
+		(None, _) => path.to_string(),
+	}
+}
+
 /// Makes a HEAD request to Reddit at `path, using the short URL base. This will not follow redirects.
 fn reddit_short_head(path: String, quarantine: bool, base_path: &'static str, host: &'static str) -> Boxed<Result<WreqResponse, String>> {
 	request(&Method::HEAD, path, false, quarantine, base_path, host)
@@ -251,8 +271,8 @@ async fn fetch_json(path: String, quarantine: bool) -> Result<Value, String> {
 	}
 	session.ratelimit_remaining().fetch_sub(1, Ordering::SeqCst);
 
-	// Fetch the url...
-	let response = match reddit_get(path.clone(), quarantine).await {
+	// Fetch the url (thread routes with one slash encoded, see encode_thread_route)...
+	let response = match reddit_get(encode_thread_route(&path), quarantine).await {
 		Ok(response) => response,
 		Err(e) => return Err(format!("Couldn't send request to Reddit: {e} | {path}")),
 	};
@@ -298,6 +318,39 @@ async fn fetch_json(path: String, quarantine: bool) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn thread_routes_get_the_slash_before_comments_encoded() {
+		assert_eq!(
+			encode_thread_route("/r/politics/comments/1x9xx9e/.json?&sort=confidence&raw_json=1"),
+			"/r/politics%2Fcomments/1x9xx9e/.json?&sort=confidence&raw_json=1"
+		);
+		assert_eq!(
+			encode_thread_route("/r/rust/comments/18t5968/title/kfbqlbc/.json?raw_json=1"),
+			"/r/rust%2Fcomments/18t5968/title/kfbqlbc/.json?raw_json=1"
+		);
+		assert_eq!(
+			encode_thread_route("/user/spez/comments/abc123/title/.json?raw_json=1"),
+			"/user/spez%2Fcomments/abc123/title/.json?raw_json=1"
+		);
+		assert_eq!(encode_thread_route("/u/spez/comments/abc123/title.json"), "/u/spez%2Fcomments/abc123/title.json");
+		// A subreddit called `comments` is still a subreddit.
+		assert_eq!(encode_thread_route("/r/comments/comments/1x9xx9e/.json"), "/r/comments%2Fcomments/1x9xx9e/.json");
+	}
+
+	#[test]
+	fn non_thread_routes_are_untouched() {
+		for path in [
+			"/r/politics/hot.json?&raw_json=1",
+			"/r/politics/about.json?raw_json=1",
+			"/user/spez/comments.json?raw_json=1",
+			"/r/politics/search.json?q=comments/x",
+			"/comments/1x9xx9e/.json?raw_json=1",
+			"/r/politics+stocks/new.json",
+		] {
+			assert_eq!(encode_thread_route(path), path);
+		}
+	}
 	use crate::oauth::init_oauth_client;
 
 	const POPULAR_URL: &str = "/r/popular/hot.json?&raw_json=1&geo_filter=GLOBAL";
