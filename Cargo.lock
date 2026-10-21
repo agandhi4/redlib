@@ -1687,7 +1687,7 @@ dependencies = [
 
 [[package]]
 name = "redlib"
-version = "0.42.3"
+version = "0.42.4"
 dependencies = [
  "arc-swap",
  "askama",
