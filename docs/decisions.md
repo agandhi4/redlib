@@ -160,3 +160,9 @@ Consequence: devkit-check reads zero warnings; a hand-run `make ci-quick` with n
 **Decision:** `client::encode_thread_route` sends the same request with that one slash as `%2F`, which Reddit's route rule does not match (upstream #592's approach); cache keys and messages keep the readable path. The 403 message no longer promises a refresh fixes it, and the logger defaults to `warn`.
 **Consequence:** Bare `/comments/<id>` links stay blocked (no slash to encode). If thread pages 403 again, Reddit has started normalising `%2F`, and the remaining route is a logged-in token. The self-heal cannot tell a route block from a token block by body; a repeating `🚫 … not rotating again yet` on one page type means a route block.
 
+## 2026-10-21 — Bare `/comments/<id>` links redirect to their canonical thread
+
+**Why:** The thread-route fix of 2026-10-20 encodes the slash between the subreddit and `comments`; a bare `/comments/<id>` link has no such slash, and Reddit still 403s its JSON route. The short-link resolver (`client::canonical_path`, a HEAD on www.reddit.com) is not blocked and already returns the canonical `/r/<sub>/comments/<id>/<title>/`.
+**Decision:** The bare `/comments/:id…` routes and the `/:id` short link share `post::canonical_redirect`, which resolves the canonical path and redirects, keeping a linked comment and the query. It follows only `/r/`, `/u/` or `/user/` paths: on a 2xx `canonical_path` echoes its bare input, which would redirect to itself forever.
+**Consequence:** A bare link costs one extra HEAD before the thread loads. If short links break too, Reddit has blocked the HEAD route as well.
+

@@ -343,11 +343,13 @@ async fn main() {
 	app.at("/r/:sub/comments/:id").get(|r| post::item(r).boxed());
 	app.at("/r/:sub/comments/:id/:title").get(|r| post::item(r).boxed());
 	app.at("/r/:sub/comments/:id/:title/:comment_id").get(|r| post::item(r).boxed());
-	app.at("/comments/:id").get(|r| post::item(r).boxed());
-	app.at("/comments/:id/comments").get(|r| post::item(r).boxed());
-	app.at("/comments/:id/comments/:comment_id").get(|r| post::item(r).boxed());
-	app.at("/comments/:id/:title").get(|r| post::item(r).boxed());
-	app.at("/comments/:id/:title/:comment_id").get(|r| post::item(r).boxed());
+	// No subreddit in the link: Reddit blocks that JSON route, so these redirect to the
+	// canonical /r/<sub>/comments/... page (post::canonical_redirect).
+	app.at("/comments/:id").get(|r| post::canonical_redirect(r).boxed());
+	app.at("/comments/:id/comments").get(|r| post::canonical_redirect(r).boxed());
+	app.at("/comments/:id/comments/:comment_id").get(|r| post::canonical_redirect(r).boxed());
+	app.at("/comments/:id/:title").get(|r| post::canonical_redirect(r).boxed());
+	app.at("/comments/:id/:title/:comment_id").get(|r| post::canonical_redirect(r).boxed());
 
 	app.at("/r/:sub/duplicates/:id").get(|r| duplicates::item(r).boxed());
 	app.at("/r/:sub/duplicates/:id/:title").get(|r| duplicates::item(r).boxed());
@@ -416,13 +418,7 @@ async fn main() {
 				Some("best" | "hot" | "new" | "top" | "rising" | "controversial") => subreddit::community(req).await,
 
 				// Short link for post
-				Some(id) if (5..8).contains(&id.len()) => match canonical_path(format!("/comments/{id}"), 3).await {
-					Ok(path_opt) => match path_opt {
-						Some(path) => Ok(redirect(&path)),
-						None => error(req, "Post ID is invalid. It may point to a post on a community that has been banned.").await,
-					},
-					Err(e) => error(req, &e).await,
-				},
+				Some(id) if (5..8).contains(&id.len()) => post::canonical_redirect(req).await,
 
 				// Error message for unknown pages
 				_ => error(req, "Nothing here").await,

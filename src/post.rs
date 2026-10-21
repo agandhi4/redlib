@@ -1,5 +1,5 @@
 #![allow(clippy::cmp_owned)]
-use crate::client::json;
+use crate::client::{canonical_path, json};
 use crate::config::get_setting;
 use crate::db;
 use crate::model::{parse_post, Author, Awards, Comment, Flair, FlairPart, Post, Subreddit};
@@ -50,6 +50,43 @@ static RENDERED_POST_CACHE: LazyLock<Mutex<TimedSizedCache<String, String>>> =
 
 fn html_response(html: String) -> Response<Body> {
 	Response::builder().status(200).header("content-type", "text/html").body(html.into()).unwrap_or_default()
+}
+
+/// A post link with no subreddit (`/comments/<id>/…`, and the `/<id>` short link). Reddit 403s the
+/// bare JSON route for app-only tokens (2026-10-20) and `client::encode_thread_route` has no
+/// subreddit slash to encode there, so resolve the canonical `/r/<sub>/comments/<id>/<title>/`
+/// with the short-link HEAD on www.reddit.com (not blocked) and redirect, keeping a linked
+/// comment and the query. Used by the `/comments/:id…` routes and `/:id` in `main.rs`.
+pub async fn canonical_redirect(req: Request<Body>) -> Result<Response<Body>, String> {
+	let id = req.param("id").unwrap_or_default();
+	let resolved = canonical_path(format!("/comments/{id}"), 3).await;
+	match resolved.map(|path| path.and_then(|path| canonical_target(&path, req.param("comment_id").as_deref(), req.uri().query()))) {
+		Ok(Some(target)) => Ok(redirect(&target)),
+		Ok(None) => error(req, "Post ID is invalid. It may point to a post on a community that has been banned.").await,
+		Err(e) => error(req, &e).await,
+	}
+}
+
+/// Where `canonical_redirect` sends the reader, or None. A resolved path still lacking a
+/// subreddit (Reddit answered 2xx, so `canonical_path` echoed the bare input) would redirect
+/// back to the same route forever, so only `/r/`, `/u/` and `/user/` paths are followed.
+fn canonical_target(path: &str, comment_id: Option<&str>, query: Option<&str>) -> Option<String> {
+	if !["/r/", "/u/", "/user/"].iter().any(|prefix| path.starts_with(prefix)) {
+		return None;
+	}
+	let mut target = path.to_string();
+	if let Some(comment_id) = comment_id.filter(|c| !c.is_empty()) {
+		if !target.ends_with('/') {
+			target.push('/');
+		}
+		target.push_str(comment_id);
+		target.push('/');
+	}
+	if let Some(query) = query.filter(|q| !q.is_empty()) {
+		target.push('?');
+		target.push_str(query);
+	}
+	Some(target)
 }
 
 pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
@@ -339,4 +376,35 @@ pub async fn unsave(req: Request<Body>) -> Result<Response<Body>, String> {
 	}
 
 	Ok(redirect(&redirect_url))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	const PERMALINK: &str = "/r/nyc/comments/1xadhhx/vandals_hit_nyc_subway/";
+
+	#[test]
+	fn canonical_target_keeps_a_linked_comment_and_the_query() {
+		assert_eq!(canonical_target(PERMALINK, None, None).as_deref(), Some(PERMALINK));
+		assert_eq!(
+			canonical_target(PERMALINK, Some("kfbqlbc"), Some("context=3")).as_deref(),
+			Some("/r/nyc/comments/1xadhhx/vandals_hit_nyc_subway/kfbqlbc/?context=3")
+		);
+		assert_eq!(
+			canonical_target("/r/nyc/comments/1xadhhx/title", Some("kfbqlbc"), Some("")).as_deref(),
+			Some("/r/nyc/comments/1xadhhx/title/kfbqlbc/")
+		);
+		assert_eq!(
+			canonical_target("/user/spez/comments/abc123/t/", None, None).as_deref(),
+			Some("/user/spez/comments/abc123/t/")
+		);
+	}
+
+	#[test]
+	fn canonical_target_refuses_a_path_that_would_redirect_to_itself() {
+		// canonical_path echoes its input on a 2xx; following it would loop on /comments/:id.
+		assert_eq!(canonical_target("/comments/1xadhhx", None, None), None);
+		assert_eq!(canonical_target("/comments/1xadhhx/title/", Some("kfbqlbc"), None), None);
+	}
 }
