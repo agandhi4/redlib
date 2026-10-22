@@ -101,6 +101,21 @@
 # to stderr, adds `core.bare=<v> is-bare=<v>` as a sixth column on that step's ledger row, and
 # restores the value from before the step. Only a failed restore fails the hook.
 #
+# Metrics preview (pre-push, after every step passed): when the repo has scripts/ci/metrics.conf
+# and docs/metrics/ratchet.json and the push touched more than docs and native paths, the hook
+# runs `metrics_collect.sh check --quick` (the collectors whose tier inputs are already built;
+# no tier runs). It never blocks the push: a clean ratchet is one line, a failing one prints the
+# lines the gate's metrics job would fail on (with `BETTER: run make metrics-tighten before push`
+# for a gain left unlocked), a preview that cannot run says why in one line. Why (2026-10-20):
+# all eight instalite PRs #37-#46 failed their first gate on unlocked coverage gains and bundle
+# growth that a 20 s local run shows. The ledger row is `metrics-quick`, always ok.
+#
+# Merge driver: every hook first runs metrics_driver_heal (bin/_gitattributes_lib.sh), so a clone
+# whose merge.devkit-metrics.driver is unset or not the vendored command gets it, with one line,
+# at its next commit; it never blocks. A failed step in a worktree with a tracked lockfile and
+# no node_modules beside it adds a line naming that and `run npm ci (or make install) in this
+# worktree` under the blocked line (_hook_missing_node_modules).
+#
 # Toolchains: before the first step, toolchain_path (bin/toolchain_path.sh, the gate's own code)
 # puts the checkout's pinned Node (.nvmrc) and Rust (rust-toolchain.toml) first on PATH, so
 # `make ci-*` here runs what the gate runs. A machine with no cargo (redlib's Mac) or another node
@@ -118,6 +133,10 @@
 . "$(dirname "${BASH_SOURCE[0]}")/_trailer_lib.sh"
 # shellcheck source=bin/_vendor_paths.sh  # base_copies, for a vendoring-only commit
 . "$(dirname "${BASH_SOURCE[0]}")/_vendor_paths.sh"
+# shellcheck source=bin/_gitattributes_lib.sh  # metrics_driver_heal, run by every hook
+. "$(dirname "${BASH_SOURCE[0]}")/_gitattributes_lib.sh"
+# shellcheck source=bin/_makefile_lib.sh  # makefile_targets, for the docs-check fallback
+. "$(dirname "${BASH_SOURCE[0]}")/_makefile_lib.sh"
 
 run_hook_steps() {
   local hook=$1
@@ -129,6 +148,8 @@ run_hook_steps() {
   ENV_REQUIRED_HOOKS=
   COMMIT_MSG_STEPS=(trailer)
   root=$(git rev-parse --show-toplevel) || return 1
+  # Never blocks: a clone whose config cannot be written still merges, only as text.
+  metrics_driver_heal "$root" "$(dirname "${BASH_SOURCE[0]}")" "$hook" || true
 
   if [ "$hook" = pre-push ]; then
     push_input=$(cat)
@@ -205,7 +226,7 @@ run_hook_steps() {
   # Only docs (and native) paths, no docs step listed: docs-check is the check they must not skip.
   if [ "$listed" = 1 ] && _hook_areas_within " docs native " && [ "$docs_steps" = 0 ] &&
     case "$HOOK_AREAS" in *" docs "*) true ;; *) false ;; esac; then
-    if grep -qE '^docs-check[[:space:]]*:' "$root/Makefile" 2>/dev/null; then
+    if case "$(cd "$root" && makefile_targets)" in *" docs-check "*) true ;; *) false ;; esac; then
       steps+=("docs=docs-check")
       plan+=("")
       runs=$((runs + 1))
@@ -233,7 +254,7 @@ run_hook_steps() {
 
   _hook_drop_git_dir "$root"
   # shellcheck disable=SC2034  # LOAD_* are devkit_load_scale's outputs, local so they do not leak
-  local i=0 hook_start step_start bare_before HOOK_LOAD_NOTE LOAD_SCALE LOAD_BUDGET LOAD_NOTE LOAD_LEDGER LOAD_BASE LOAD_START LOAD_NCPU
+  local i=0 hook_start step_start bare_before missing HOOK_LOAD_NOTE LOAD_SCALE LOAD_BUDGET LOAD_NOTE LOAD_LEDGER LOAD_BASE LOAD_START LOAD_NCPU
   bare_before=$(_hook_bare_state "$root")
   hook_start=$(date +%s)
   # Any positive budget: only the factor is recorded, as the ledger note (header: Timings).
@@ -258,13 +279,36 @@ run_hook_steps() {
     if [ "$rc" -ne 0 ]; then
       _hook_record "$root" "$hook" total "$hook_start" "$rc"
       echo "$hook: blocked by '$HOOK_STEP_LABEL'; fix it and try again"
+      if missing=$(_hook_missing_node_modules "$root"); then
+        echo "$hook: $missing has no node_modules: if the failure above is a missing module or command, run npm ci (or make install) in this worktree"
+      fi
       return "$rc"
     fi
   done
+  if [ "$hook" = pre-push ] && [ "$native_only" = 0 ] && ! { [ "$listed" = 1 ] && _hook_areas_within " docs native "; }; then
+    _hook_metrics_quick "$root"
+  fi
   _hook_record "$root" "$hook" total "$hook_start" 0
 
   echo "✓ $hook passed"
   _hook_allow_push "$uses_lfs" "$push_input" "$@"
+}
+
+# _hook_missing_node_modules <root>: print the first directory with a tracked npm, pnpm or yarn
+# lockfile, a package.json and no node_modules beside it (`.` for the root), or exit 1; a Yarn
+# PnP project (.pnp.cjs) has none by design. Read only after a step failed: a fresh worktree (an
+# agent's lane) has none, and the step's tail then shows a raw "Cannot find module" or "command
+# not found" rather than the fix (closet). A possible cause, not a certain one, so the hook
+# prints it under its usual blocked line.
+_hook_missing_node_modules() {
+  local lock dir
+  while IFS= read -r lock; do
+    dir=$(dirname "$lock")
+    [ -f "$1/$dir/package.json" ] && [ ! -e "$1/$dir/.pnp.cjs" ] || continue
+    [ -d "$1/$dir/node_modules" ] || { echo "$dir"; return 0; }
+  done < <(git -C "$1" ls-files -- package-lock.json pnpm-lock.yaml yarn.lock \
+    '*/package-lock.json' '*/pnpm-lock.yaml' '*/yarn.lock' | grep -v '^devkit/')
+  return 1
 }
 
 # <staged paths>: true when the commit only vendors devkit, as devkit-sync's own commit does:
@@ -358,6 +402,24 @@ _hook_record() {
     "$([ "$rc" -eq 0 ] && echo ok || echo fail)")
   [ -z "$note" ] || row+=$'\t'$note
   printf '%s\n' "$row" >>"$dir/$(_hook_ledger_name "$root").tsv" 2>/dev/null || true
+}
+
+# <root>: the pre-push metrics preview (header: Metrics preview). Prints, never fails.
+_hook_metrics_quick() {
+  local root=$1 out rc=0 start
+  [ -f "$root/scripts/ci/metrics.conf" ] && [ -f "$root/docs/metrics/ratchet.json" ] || return 0
+  start=$(date +%s)
+  # A hook is never inside a gate, even when a gate job's tests run one: drop the gate's areas.
+  out=$(cd "$root" && env -u GATE_AREAS "$(dirname "${BASH_SOURCE[0]}")/metrics_collect.sh" check --quick 2>&1 </dev/null) || rc=$?
+  _hook_record "$root" pre-push metrics-quick "$start" 0
+  case "$rc" in
+    0) echo "✓ metrics (quick): every bound holds" ;;
+    1)
+      grep -E '^ratchet ' <<<"$out" | grep -vE ' SAME$| SKIPPED \(|REPORT-ONLY|within tolerance|^ratchet (summary|untracked|base|merged) '
+      grep '^BETTER: ' <<<"$out"
+      echo "– metrics (quick): the gate's metrics job fails on the lines above; not blocking the push" ;;
+    *) echo "– metrics (quick) did not run ($(grep -m1 -E '^metrics_collect: |FAIL' <<<"$out" || echo "exit $rc")); the gate's metrics job decides" ;;
+  esac
 }
 
 # <root>: unexport GIT_DIR and GIT_WORK_TREE when git resolves the same git dir from <root>

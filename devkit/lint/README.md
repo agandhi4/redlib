@@ -210,6 +210,14 @@ the edit that writes it.
 | ruff | `PLR1702`, too many nested blocks (preview) | `ruff.toml` `[lint.pylint] max-nested-blocks = 5` | the same line |
 | eslint | `sonarjs/expression-complexity`, at most 4 `&&`/`\|\|`/`?:` operators (five terms) | `eslint.base.mjs` `sonarjsChangedRules` | `python3 -I devkit/bin/changed_lint.py eslint --root frontend --src src` (`--ext .vue` for components) |
 
+**A repo whose whole-tree count is 0 enables the rule tree-wide in its own config instead of
+adding the changed-file line** (instalite, 2026-10-19): `sonarjs/expression-complexity` in its
+eslint layer from `sonarjsChangedRules`, ruff `PLR0915` in `extend-select`. The line is for a
+repo above 0; it drops the line for the same tree-wide rule the day its count reaches 0. The
+one exception is ruff's two preview rules (PLR0916, PLR1702): tree-wide they need `lint.preview`,
+which changes other rules' verdicts, so a repo at 0 keeps the line for those two. At 0 the line
+holds the same tree, since a new finding can only appear in a file the change touches.
+
 PLR0915 and PLR1702 (2026-10-19): finplat's pass-7 lane split five long functions along their
 phases, each of which these flag; the fix is that split, or early returns and a helper per inner
 loop, never a disable comment. The two boolean thresholds are one rule: five terms. finplat's and rollcall's 2026-10-18 lanes
@@ -217,15 +225,58 @@ extracted a named predicate from a repeated multi-term `&&`/`||` chain six times
 16-term `||` list drifted. The fix is the same shape: a named predicate function, or a set or
 table for a membership list, never a disable comment. The eslint run needs eslint-plugin-sonarjs
 under `--root` and keeps the repo's own config (parser, plugins); the ruff run uses the repo's
-interpreter, so its lockfile's ruff judges.
+interpreter, so its lockfile's ruff judges. A repo with no Python project env (homelab, devkit)
+declares `--ruff-from release` instead: `python3 -I devkit/bin/changed_lint.py ruff --ruff-from
+release --root . --src stacks` runs release_tool.sh's pinned, checksummed ruff, installed once
+per machine. It is never a fallback: a repo whose env lacks ruff still fails with the hint.
 
-Whole-tree counts on 2026-10-19 (origin/main or a current worktree): PLR0916 finplat backend 1,
-every other Python repo 0; expression-complexity finplat frontend 10, locus 1, rollcall 1,
-instalite 0 (orbit not measured: no local install of the plugin). PLR0915 / PLR1702, own code
-only (the vendored `devkit/` excluded, counted once as devkit): finplat 3 / 0, orbit 3 / 1, locus
-5 / 0, instalite, rollcall, closet and redlib 0 / 0, devkit 6 / 2 (one function). A repo at 0 graduates by
-turning the rule on in its own config and dropping its line; once every repo is at 0, the rule
-moves into the base (`select`, or `sonarjsRules`) and leaves the table.
+Whole-tree counts on 2026-10-21, each repo's origin/main, own code only (the vendored `devkit/`
+excluded; devkit excludes `templates/` and `tests/fixtures`). ruff 0.17.1 (release_tool.sh's pin;
+count from `--output-format json`, since 0.17's concise format prints rule names, not codes);
+eslint 9 with eslint-plugin-sonarjs 4.2, every TS/JS/Vue file outside build output, so tests
+and scripts count; instalite's generated `Resources/filter.js` bundle is left out.
+
+| Repo | PLR0916 | PLR0915 | PLR1702 | expression-complexity |
+|---|---|---|---|---|
+| finplat | 1 | 3 | 0 | 5 |
+| orbit | 0 | 3 | 1 | 2 |
+| locus | 0 | 5 | 0 | 1 |
+| closet | 0 | 0 | 0 | 7 |
+| rollcall | 0 | 0 | 0 | 1 |
+| devkit | 0 | 0 | 0 | 1 |
+| instalite | 0 | 0 | 0 | 0 |
+| redlib | 0 | 0 | 0 | 0 |
+| homelab | 0 | 0 | 0 | no JS/TS |
+
+devkit's root `ruff.toml` extends this base and holds its full `select` plus PLR0915 tree-wide.
+
+**A base `select` rule a repo still owes** is ignored in its own config and held with `--hold
+<rule>` on the ruff line (`RUFF_HOLDABLE` in changed_lint.py, today E501): the command line's
+`--select` wins over the config's `ignore`. A held rule judges only the lines the change adds or
+rewrites (`git diff -U0` against the merge-base; a pure move has none), so the first PR into a
+file pays for its own lines, not the file's history, and the debt drains as lines are touched.
+The rules judged on the whole changed file are `FILE_SCOPED` in changed_lint.py: PLR0915,
+PLR0916, PLR1702 and expression-complexity report on a def's or a statement's first line, which
+the edit that grows its body never touches. devkit holds E501 this way (2026-10-21); the repo
+drops the ignore and the flag at 0.
+
+Once every repo is at 0, the rule moves into the base (`select`, or `sonarjsRules`) and leaves the table.
+
+## vitest
+
+`vitest.base.mjs` stretches vitest's per-test timeouts by the load factor the gate and
+tier_guard.sh already apply to budgets: both export it as `DEVKIT_LOAD_SCALE` (1 unscaled, at
+most 2; `bin/_load_lib.sh`). finplat #689's frontend-unit hit the 5 s default at load 169 on 10
+cores while its tier budget had stretched ×2. It imports nothing, as the eslint base does, and
+`vitest.base.d.mts` types it for a `vitest.config.ts`. The scaffolds spread `timeouts`
+(vitest's 5 s and 10 s defaults, stretched); a repo's own timeout goes through `loadScaled`:
+
+```js
+import { loadScaled, timeouts } from "../devkit/lint/vitest.base.mjs"
+
+  test: { ...timeouts, include: ["src/**/*.test.ts"] },
+  test: { testTimeout: loadScaled(180_000) },   // finplat's metrics config
+```
 
 ## swift-format
 

@@ -21,7 +21,12 @@ the section's root, and a glob also names a directory the file is under.
                                                 or those names from it
   only-call   NAME GLOB...                      only files under the globs call NAME
   ban-call    NAME[,NAME] GLOB... [except GLOB...]
-                                                files under the globs do not call NAME
+                                                files under the globs do not call NAME. Both
+                                                match NAME against the callee exactly as the
+                                                call site writes it and follow no import:
+                                                after `from flask import request`, write
+                                                `request.get_json`; `flask.request.get_json`
+                                                matches nothing (orbit #112)
   call-arg-ban CALLEE[,CALLEE] ARG-SHAPE[,ARG-SHAPE] GLOB... [except GLOB...]
                                                 files under the globs pass no argument of
                                                 these shapes to these callees, at any depth of
@@ -549,54 +554,53 @@ def _ban_subject(subject: str, lang: str, where: str) -> tuple[str, frozenset[st
     return head + module, names
 
 
-def _rule(kind: str, name: str, args: list[str], where: str, lineno: int, lang: str) -> Rule:
-    main, excepts = args, ()
-    names: frozenset[str] = frozenset()
-    shape = KINDS[kind].shape
-    if "except" in args:
-        at = args.index("except")
-        main = args[:at]
-    main, options = _options(kind, main, where)
-    low, high = KINDS[kind].arity
-    if len(main) < low or (high is not None and len(main) > high):
-        raise ConfError(f"{where}: expected `{shape}`")
-    subject, globs = "", tuple(main[1:])
-    callees: tuple[rules.CalleePattern, ...] = ()
+@dataclass(frozen=True)
+class _Subject:
+    """A rule line's subject as its kind reads it: the text the rule id names, the globs
+    after it, and what the rule targets."""
+
+    text: str
+    globs: tuple[str, ...]
+    targets: tuple[str, ...]
+    names: frozenset[str] = frozenset()  # ban-import's banned names
+    callees: tuple[rules.CalleePattern, ...] = ()  # call-arg-ban's
+
+
+def _subject(kind: str, main: list[str], name: str, lang: str, where: str) -> _Subject:
     if kind == "ban-import":
-        subject, globs = main[-1], tuple(main[:-1])
-        module, names = _ban_subject(subject, lang, where)
-        targets: tuple[str, ...] = (module,)
-    elif kind == "call-arg-ban":
-        subject, globs = main[0], tuple(main[2:])
-        targets = _split(subject, where, subject)
+        module, names = _ban_subject(main[-1], lang, where)
+        return _Subject(main[-1], tuple(main[:-1]), (module,), names)
+    if kind == "call-arg-ban":
+        targets = _split(main[0], where, main[0])
         try:
             callees = tuple(rules.callee_pattern(pattern) for pattern in targets)
         except ValueError as exc:
             raise ConfError(f"{where}: {exc}") from exc
-    elif kind in GLOB_FIRST:
-        subject, globs = main[1], (main[0],)
-        targets = _split(subject, where, subject)
+        return _Subject(main[0], tuple(main[2:]), targets, callees=callees)
+    if kind in GLOB_FIRST:
+        targets = _split(main[1], where, main[1])
         for target in targets:
             if kind == "scoped-exports" and IDENTIFIER.fullmatch(target) is None:
                 raise ConfError(f"{where}: {target!r} is not a parameter name")
             dotted = PY_MODULE if kind == "decorated-with" else CALLEE
             if kind != "scoped-exports" and dotted.fullmatch(target) is None:
                 raise ConfError(f"{where}: {target!r} is not a dotted name")
-    elif kind == "own-transaction":
-        globs, targets = tuple(main), ()  # no subject: the rule is what it guards
-    elif kind == "only-text":
-        subject = main[0]
-        targets = (subject,)  # a comma is part of the text
-        if not name and re.search(r"\s", subject):
+        return _Subject(main[1], (main[0],), targets)
+    if kind == "own-transaction":
+        return _Subject("", tuple(main), ())  # no subject: the rule is what it guards
+    if kind == "only-text":
+        if not name and re.search(r"\s", main[0]):
             raise ConfError(
-                f"{where}: only-text {subject!r} holds a space, so it is no rule id; "
+                f"{where}: only-text {main[0]!r} holds a space, so it is no rule id; "
                 "name the rule: `@NAME only-text ...`"
             )
-    elif main:
-        subject = main[0]
-        targets = _split(subject, where, subject)
-    else:
-        targets = ()
+        return _Subject(main[0], tuple(main[1:]), (main[0],))  # a comma is part of the text
+    if not main:
+        return _Subject("", (), ())
+    return _Subject(main[0], tuple(main[1:]), _split(main[0], where, main[0]))
+
+
+def _check_targets(kind: str, targets: tuple[str, ...], where: str) -> None:
     if kind == "only-call" and len(targets) > 1:
         raise ConfError(f"{where}: only-call takes one NAME; write one rule per callee")
     if kind in CALL_RULES:
@@ -604,18 +608,20 @@ def _rule(kind: str, name: str, args: list[str], where: str, lineno: int, lang: 
             if CALLEE.fullmatch(callee) is None:
                 raise ConfError(f"{where}: {callee!r} is not a dotted name")
     if kind in ("single-writer", "logger-name") and len(targets) > 1:
+        shape = KINDS[kind].shape
         raise ConfError(f"{where}: {kind} takes one {shape.split()[1]}; write one rule each")
-    owners = tuple(_site(kind, g, names, where, "") for g in globs) if KINDS[kind].sited else ()
-    if kind == "single-writer":
-        if lang == "python" and IDENTIFIER.fullmatch(targets[0]) is None:
-            raise ConfError(f"{where}: {targets[0]!r} is not an attribute name")
-        if lang == "python" and any(site.names for site in owners):
-            raise ConfError(f"{where}: a python single-writer's owners are files, not functions")
-        if lang == "ts" and TABLE_FIELD.fullmatch(targets[0]) is None:
-            raise ConfError(f"{where}: {targets[0]!r} is not TABLE or TABLE.FIELD")
-    globs = tuple(site.glob for site in owners) or globs
-    if "except" in args:
-        excepts = _excepts(kind, args[args.index("except") + 1 :], names, where)
+
+
+def _check_single_writer(target: str, owners: tuple[Site, ...], lang: str, where: str) -> None:
+    if lang == "python" and IDENTIFIER.fullmatch(target) is None:
+        raise ConfError(f"{where}: {target!r} is not an attribute name")
+    if lang == "python" and any(site.names for site in owners):
+        raise ConfError(f"{where}: a python single-writer's owners are files, not functions")
+    if lang == "ts" and TABLE_FIELD.fullmatch(target) is None:
+        raise ConfError(f"{where}: {target!r} is not TABLE or TABLE.FIELD")
+
+
+def _depth_and_when(options: dict[str, str], where: str) -> tuple[int, tuple[str, ...]]:
     depth = options.get("depth", "1")
     if not depth.isdigit():
         raise ConfError(f"{where}: `depth` takes the number of helper levels, not {depth!r}")
@@ -623,19 +629,44 @@ def _rule(kind: str, name: str, args: list[str], where: str, lineno: int, lang: 
     for decorator in when:
         if PY_MODULE.fullmatch(decorator) is None:
             raise ConfError(f"{where}: when {decorator!r} is not a dotted name")
-    shapes: tuple[rules.ArgShape, ...] = ()
-    if kind == "call-arg-ban":
-        try:
-            shapes = tuple(rules.arg_shape(s, lang) for s in _split(main[1], where, main[1]))
-        except ValueError as exc:
-            raise ConfError(f"{where}: {exc}") from exc
-    texts: tuple[rules.TextPattern, ...] = ()
-    if kind == "only-text":
-        try:
-            texts = (rules.text_pattern(subject),)
-        except ValueError as exc:
-            raise ConfError(f"{where}: {exc}") from exc
-    rule_id = name or (f"{kind}:{subject}" if subject else kind)
+    return int(depth), when
+
+
+def _patterns(
+    kind: str, main: list[str], subject: str, lang: str, where: str
+) -> tuple[tuple[rules.ArgShape, ...], tuple[rules.TextPattern, ...]]:
+    """call-arg-ban's argument shapes and only-text's text pattern."""
+    try:
+        if kind == "call-arg-ban":
+            return tuple(rules.arg_shape(s, lang) for s in _split(main[1], where, main[1])), ()
+        if kind == "only-text":
+            return (), (rules.text_pattern(subject),)
+    except ValueError as exc:
+        raise ConfError(f"{where}: {exc}") from exc
+    return (), ()
+
+
+def _rule(kind: str, name: str, args: list[str], where: str, lineno: int, lang: str) -> Rule:
+    main = args[: args.index("except")] if "except" in args else args
+    main, options = _options(kind, main, where)
+    low, high = KINDS[kind].arity
+    if len(main) < low or (high is not None and len(main) > high):
+        raise ConfError(f"{where}: expected `{KINDS[kind].shape}`")
+    subject = _subject(kind, main, name, lang, where)
+    targets, names = subject.targets, subject.names
+    _check_targets(kind, targets, where)
+    owners = (
+        tuple(_site(kind, g, names, where, "") for g in subject.globs) if KINDS[kind].sited else ()
+    )
+    if kind == "single-writer":
+        _check_single_writer(targets[0], owners, lang, where)
+    globs = tuple(site.glob for site in owners) or subject.globs
+    excepts = (
+        _excepts(kind, args[args.index("except") + 1 :], names, where) if "except" in args else ()
+    )
+    depth, when = _depth_and_when(options, where)
+    shapes, texts = _patterns(kind, main, subject.text, lang, where)
+    rule_id = name or (f"{kind}:{subject.text}" if subject.text else kind)
     return Rule(
         kind,
         rule_id,
@@ -646,12 +677,12 @@ def _rule(kind: str, name: str, args: list[str], where: str, lineno: int, lang: 
         lineno,
         owners=owners,
         marker=options.get("marker", ""),
-        depth=int(depth),
+        depth=depth,
         functions_only="functions-only" in options,
         server_only="server-only" in options,
         when=when,
         shapes=shapes,
-        callees=callees,
+        callees=subject.callees,
         texts=texts,
     )
 

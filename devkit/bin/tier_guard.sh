@@ -22,7 +22,17 @@
 # Under load the budget stretches (bin/_load_lib.sh: min(1-minute load / cores, 2), sampled when
 # the command starts and when it ends, the larger stretch kept, only above 1.0) and both budget
 # lines then read `(budget 110 s ×1.6 (load 2.0 at start, 13.1 at end on 8 cpus) → 176 s)`;
-# unloaded at both, they are exactly as above.
+# unloaded at both, they are exactly as above. The command runs with DEVKIT_LOAD_SCALE set to the
+# start sample's factor ("1" unscaled), so its runner can stretch its own per-test timeouts
+# by the factor its budget got (lint/vitest.base.mjs does, for vitest).
+# Slot: outside a gate the tier takes one of the machine-wide gate slots first (bin/_slot_lib.sh,
+# GATE_SLOTS from the environment or gate.env, as the gate reads it), holder `<repo>:<tier>`, so
+# `make ci-unit` by hand in four worktrees queues instead of piling onto the gates' load
+# (2026-10-21). While every slot is held it prints, at once and every 30 s,
+#   TIER <tier> waiting for a gate slot (<n> running: <repo>#<pr>, <repo>:<tier>, ...)
+# then `TIER <tier> slot <n>/<slots>`. The wait is before the budget clock. Inside a gate (or
+# another tier) DEVKIT_SLOT_HOLDER names a live holder and the tier runs on that slot, silently;
+# TIER_SLOT=0 (default 1) skips the slot for a deliberately quick single test.
 # A bad invocation exits 2 before the command runs. TIER_BUDGET_ENFORCE=0 (default 1) keeps
 # the OVERBUDGET line but not the failure, for a repo or box adopting budgets, exactly as
 # GATE_BUDGET_ENFORCE does for local_gate's job budgets. Floors have no such switch: a count
@@ -49,6 +59,10 @@ set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_load_lib.sh"
 # shellcheck source=bin/_awake_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_awake_lib.sh"
+# shellcheck source=bin/_gate_env.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_gate_env.sh"
+# shellcheck source=bin/_slot_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_slot_lib.sh"
 
 RUNNERS="pytest vitest playwright cargo bats"
 
@@ -123,6 +137,16 @@ tier_count() {
     END { if (seen) print total + 0 }'
 }
 
+# repo_name: the checkout's repo, the same name from any of its worktrees (the common git dir's
+# parent); the working directory's name outside a repo.
+repo_name() {
+  local common
+  common=$(env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    || common=$PWD/.git
+  common=${common%/.git}
+  echo "${common##*/}"
+}
+
 strip_ansi() {
   sed $'s/\x1b\\[[0-9;?]*[A-Za-z]//g'
 }
@@ -161,16 +185,27 @@ shift
 [ -n "$BUDGET" ] || die "--budget is required: every tier has one (the test-value standard)"
 ENFORCE=${TIER_BUDGET_ENFORCE:-1}
 [[ "$ENFORCE" =~ ^[01]$ ]] || die "TIER_BUDGET_ENFORCE must be 0 or 1 (got '$ENFORCE')"
+TAKE_SLOT=${TIER_SLOT:-1}
+[[ "$TAKE_SLOT" =~ ^[01]$ ]] || die "TIER_SLOT must be 0 or 1 (got '$TAKE_SLOT')"
 
 tmp=${TMPDIR:-/tmp}
 LOG=$(mktemp "${tmp%/}/tier-$TIER.XXXXXX") || die "mktemp failed"
 trap 'rm -f "$LOG"' EXIT
 
-devkit_load_scale "$BUDGET"
 # A tier's budget is wall time; a nap mid-run would read as test time (bin/_awake_lib.sh).
 devkit_stay_awake
+if [ "$TAKE_SLOT" = 1 ] && ! slot_held_above; then
+  # Only GATE_SLOTS is read from gate.env; the gate's other keys are its own.
+  gate_env_load tier_guard GATE_SLOTS "$GATE_LOCAL_KEYS|$GATE_REMOTE_KEYS"
+  slot_pool_init tier_guard
+  slot_acquire "TIER $TIER" "$(repo_name):$TIER"
+  echo "TIER $TIER slot $SLOT/$SLOTS"
+fi
+devkit_load_scale "$BUDGET"
 start=$SECONDS
-"$@" 2>&1 | tee "$LOG"
+# 9>&- on both sides of the pipe: the slot's fd stays with this process alone, so a stray
+# background child of the command cannot hold the slot after the tier ends (bin/_slot_lib.sh).
+DEVKIT_LOAD_SCALE=$LOAD_SCALE "$@" 9>&- 2>&1 | tee "$LOG" 9>&-
 rc=${PIPESTATUS[0]}
 secs=$((SECONDS - start))
 devkit_load_rescale

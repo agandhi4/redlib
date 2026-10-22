@@ -46,7 +46,7 @@ is README.md "Architecture". Invariants of the design:
 
 ## Commands
 ```sh
-make ci-quick                  # shellcheck, python + template unit tests (npm), devkit's own guards on itself
+make ci-quick                  # shellcheck, python + template unit tests (npm), devkit's own guards and ruff (ci-lint) on itself
 make ci-unit                   # bats tests/ (~2 min)
 make ci-metrics                # the ratchet over devkit's own shell (scripts/ci/metrics.conf, docs/metrics/ratchet.json)
 make gate PR=<n>               # all three, on the PR merged into origin/main; posts `local-gate`
@@ -58,8 +58,9 @@ make agent-cost                # append this project's merged-PR costs to docs/a
 ```
 
 ## Workflow
-- `make install` once per checkout (core.hooksPath=.githooks): pre-commit runs shellcheck, the
-  guards and the staged secrets scan, pre-push the python tests (scripts/ci/hooks.conf).
+- `make install` once per checkout (core.hooksPath=.githooks): pre-commit runs ci-lint (ruff
+  and changed_lint.py's held rules), shellcheck, the guards and the staged secrets scan,
+  pre-push the python tests (scripts/ci/hooks.conf).
 - Branch, PR, `make gate PR=<n>` green (the `local-gate` status is the merge signal; Actions is
   a second opinion and has been billing-blocked), `make merge PR=<n>` with a descriptive
   sentence title. Consumers pick it up with

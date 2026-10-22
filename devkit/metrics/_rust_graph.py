@@ -260,90 +260,115 @@ def _attribute(body: list[Token]) -> tuple[bool, bool, str | None]:
     return test, bool(words) and words[0] == "cfg", path
 
 
+@dataclass
+class _Scan:
+    """scan's pass over one file: the open inline modules and the brace depth, and what the
+    attributes and `pub` before the current item said (cleared once the item is read)."""
+
+    toks: list[Token]
+    found: FileScan = field(default_factory=FileScan)
+    stack: list[tuple[str, int]] = field(default_factory=list)  # inline modules, depth inside
+    depth: int = 0
+    test: bool = False
+    cfg: bool = False
+    public: bool = False
+    path_attr: str | None = None
+    leading: bool = True  # still in the file's leading inner attributes
+
+    def inline(self) -> Segments:
+        return tuple(name for name, _ in self.stack)
+
+    def item_read(self) -> None:
+        self.test = self.cfg = self.public = False
+        self.path_attr = None
+
+    def step(self, i: int) -> int:
+        """Reads the token at toks[i]; the index to read next."""
+        toks = self.toks
+        tok, nxt = toks[i], _at(toks, i + 1)
+        if _is(tok, "#"):
+            after = self.attribute(i, inner=_is(nxt, "!"))
+            if after is not None:
+                return after
+        self.leading = False
+        if self.test:
+            self.item_read()
+            return _skip_item(toks, i)
+        if _is(tok, "pub"):  # `pub(crate)`, `pub(in path)`: the parenthesis is part of it
+            self.public = True
+            return _closing(toks, i + 1) + 1 if _is(nxt, "(") else i + 1
+        if _is(tok, "mod") and nxt is not None and nxt.kind == "ident":
+            return self.mod(i, nxt.text)
+        if _is(tok, "use"):
+            leaves, after = _use_tree(toks, i + 1, ())
+            for segs, bound, glob in leaves:
+                self.found.uses.append(UseLeaf(self.inline(), segs, bound, self.public, glob))
+            self.item_read()
+            return after
+        if tok.kind == "ident" and tok.text in DEFINING and nxt is not None and nxt.kind == "ident":
+            self.found.defines.add((self.inline(), nxt.text))
+        elif _is(tok, "macro_rules") and _is(nxt, "!") and i + 2 < len(toks):
+            self.found.defines.add((self.inline(), toks[i + 2].text))
+        if tok.kind == "ident" and _is(nxt, "::"):
+            return self.path(i)  # a path keeps the item's attributes: it is inside the item
+        if _is(tok, "{"):
+            self.depth += 1
+        elif _is(tok, "}"):
+            if self.stack and self.stack[-1][1] == self.depth:
+                self.stack.pop()
+            self.depth -= 1
+        self.item_read()
+        return i + 1
+
+    def attribute(self, i: int, inner: bool) -> int | None:
+        """`#[...]` or `#![...]` at toks[i]: the index after it; None for a bare `#`."""
+        toks = self.toks
+        open_at = i + 2 if inner else i + 1
+        if not (open_at < len(toks) and _is(toks[open_at], "[")):
+            return None
+        close = _closing(toks, open_at)
+        is_test, is_cfg, path = _attribute(toks[open_at + 1 : close])
+        if inner and self.leading and is_test:
+            self.found.test_only = True
+        elif not inner:
+            self.test, self.cfg = self.test or is_test, self.cfg or is_cfg
+            self.path_attr = path or self.path_attr
+        return close + 1
+
+    def mod(self, i: int, name: str) -> int:
+        """`mod name { ... }` opens an inline module; `mod name;` declares a file module."""
+        after = _at(self.toks, i + 2)
+        if _is(after, "{"):
+            self.stack.append((name, self.depth + 1))
+            self.found.inline.add(self.inline())
+            self.depth += 1
+            end = i + 3
+        else:
+            self.found.mods.append(ModDecl(self.inline(), name, self.path_attr, self.cfg))
+            end = i + 3 if _is(after, ";") else i + 2
+        self.item_read()
+        return end
+
+    def path(self, i: int) -> int:
+        """`a::b::c` from toks[i]: recorded when it has two segments or more."""
+        toks = self.toks
+        segs = [toks[i].text]
+        j = i + 1
+        while j + 1 < len(toks) and _is(toks[j], "::") and toks[j + 1].kind == "ident":
+            segs.append(toks[j + 1].text)
+            j += 2
+        if len(segs) > 1:
+            self.found.paths.append((self.inline(), tuple(segs)))
+        return j
+
+
 def scan(text: str) -> FileScan:
     """One file's module declarations, use leaves, paths and defined item names."""
-    toks = tokens(text)
-    found = FileScan()
-    stack: list[tuple[str, int]] = []  # inline modules open here, with the brace depth inside
-    depth = 0
-    test = cfg = public = False
-    path_attr: str | None = None
-    leading = True  # still in the file's leading inner attributes
-
-    def inline() -> Segments:
-        return tuple(name for name, _ in stack)
-
+    state = _Scan(tokens(text))
     i = 0
-    while i < len(toks):
-        tok = toks[i]
-        nxt = toks[i + 1] if i + 1 < len(toks) else None
-        if _is(tok, "#"):
-            inner = _is(nxt, "!")
-            open_at = i + 2 if inner else i + 1
-            if open_at < len(toks) and _is(toks[open_at], "["):
-                close = _closing(toks, open_at)
-                is_test, is_cfg, path = _attribute(toks[open_at + 1 : close])
-                if inner and leading and is_test:
-                    found.test_only = True
-                elif not inner:
-                    test, cfg = test or is_test, cfg or is_cfg
-                    path_attr = path or path_attr
-                i = close + 1
-                continue
-        leading = False
-        if test:
-            i = _skip_item(toks, i)
-            test = cfg = public = False
-            path_attr = None
-            continue
-        if _is(tok, "pub"):  # `pub(crate)`, `pub(in path)`: the parenthesis is part of it
-            public = True
-            i = _closing(toks, i + 1) + 1 if _is(nxt, "(") else i + 1
-            continue
-        if _is(tok, "mod") and nxt is not None and nxt.kind == "ident":
-            after = toks[i + 2] if i + 2 < len(toks) else None
-            if _is(after, "{"):
-                stack.append((nxt.text, depth + 1))
-                found.inline.add(inline())
-                depth += 1
-                i += 3
-            else:
-                found.mods.append(ModDecl(inline(), nxt.text, path_attr, cfg))
-                i += 3 if _is(after, ";") else 2
-            test = cfg = public = False
-            path_attr = None
-            continue
-        if _is(tok, "use"):
-            leaves, i = _use_tree(toks, i + 1, ())
-            for segs, bound, glob in leaves:
-                found.uses.append(UseLeaf(inline(), segs, bound, public, glob))
-            test = cfg = public = False
-            path_attr = None
-            continue
-        if tok.kind == "ident" and tok.text in DEFINING and nxt is not None and nxt.kind == "ident":
-            found.defines.add((inline(), nxt.text))
-        elif _is(tok, "macro_rules") and _is(nxt, "!") and i + 2 < len(toks):
-            found.defines.add((inline(), toks[i + 2].text))
-        if tok.kind == "ident" and _is(nxt, "::"):
-            segs = [tok.text]
-            j = i + 1
-            while j + 1 < len(toks) and _is(toks[j], "::") and toks[j + 1].kind == "ident":
-                segs.append(toks[j + 1].text)
-                j += 2
-            if len(segs) > 1:
-                found.paths.append((inline(), tuple(segs)))
-            i = j
-            continue
-        if _is(tok, "{"):
-            depth += 1
-        elif _is(tok, "}"):
-            if stack and stack[-1][1] == depth:
-                stack.pop()
-            depth -= 1
-        test = cfg = public = False
-        path_attr = None
-        i += 1
-    return found
+    while i < len(state.toks):
+        i = state.step(i)
+    return state.found
 
 
 # ------------------------------------------------------------------------------- crate

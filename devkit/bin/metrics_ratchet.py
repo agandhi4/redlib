@@ -983,6 +983,101 @@ def cmd_loosened(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# ---- merge-driver: git's three-way merge of the committed metrics files ----------------------
+# Why (2026-10-20): docs/metrics/ratchet.json, report-only.json and scorecard.json are whole-file
+# JSON that every lane's tighten rewrites, and sorted keys put two lanes' edits on neighbouring
+# lines, so parallel lanes conflicted on rebase (4 of the fleet's 40 non-green gates in 30 days).
+# The driver merges key by key: a key one side changed takes that side, a key both changed to
+# the same value takes it, and a key both changed differently takes the STRICTER bound (the
+# direction's better one; never a silent loosening; the gate then measures the merged tree).
+# Installed by hooks_check.sh --fix (the .gitattributes lines and the per-clone driver config);
+# git runs it from the worktree's top level as `merge-driver %O %A %B %P` and reads the result
+# from %A. Exit 1 is a conflict git reports: it leaves %A as ours, and the configured fallback
+# (`|| git merge-file`) then makes the ordinary text merge.
+_ABSENT = object()  # a key one side deleted
+
+
+class MergeConflict(Exception):
+    """Two sides changed one key in ways the driver will not choose between."""
+
+
+def _stricter_bound(key: str, ours: object, theirs: object) -> object:
+    """ratchet.json: both sides moved one bound. The tighter one wins; null (not yet seeded)
+    loses to a number; a deletion or a direction change is a conflict."""
+    if ours is _ABSENT or theirs is _ABSENT:
+        raise MergeConflict(f"{key}: deleted on one side, changed on the other")
+    a, b = parse_bounds({key: ours}, "ours")[key], parse_bounds({key: theirs}, "theirs")[key]
+    if a.direction != b.direction:
+        raise MergeConflict(f"{key}: direction {a.direction} on one side, {b.direction} on the other")
+    if a.bound is None or b.bound is None:
+        return theirs if a.bound is None else ours
+    return theirs if is_better(b.bound, a.bound, a.direction) else ours
+
+
+def _higher_share(key: str, ours: object, theirs: object) -> object:
+    """scorecard.json: both sides moved the WIRED share; the higher (stricter) one wins."""
+    if isinstance(ours, bool) or isinstance(theirs, bool) \
+            or not isinstance(ours, (int, float)) or not isinstance(theirs, (int, float)):
+        raise MergeConflict(f"{key}: changed on both sides and not a number on both")
+    return ours if ours >= theirs else theirs
+
+
+def _ours(key: str, ours: object, theirs: object) -> object:
+    """report-only.json: observations, not bounds; the next tighten rewrites them anyway."""
+    return theirs if ours is _ABSENT else ours
+
+
+# The three committed files by name: how a key both sides changed is settled, and whether the
+# file's nested objects (report-only's metrics and sources) merge per key or as one value.
+_MERGE_RULES: dict[str, tuple[Callable[[str, object, object], object], bool]] = {
+    "ratchet.json": (_stricter_bound, False),
+    "scorecard.json": (_higher_share, False),
+    "report-only.json": (_ours, True),
+}
+
+
+def merge_json(
+    base: object, ours: object, theirs: object, both: Callable[[str, object, object], object],
+    *, nested: bool, path: str = "",
+) -> object:
+    """Per-key three-way merge of two JSON objects against their base."""
+    if not (isinstance(ours, dict) and isinstance(theirs, dict) and isinstance(base, dict)):
+        raise MergeConflict(f"{path or 'the file'}: not a JSON object on every side")
+    out: dict[str, object] = {}
+    for key in sorted(set(base) | set(ours) | set(theirs)):
+        b, o, t = base.get(key, _ABSENT), ours.get(key, _ABSENT), theirs.get(key, _ABSENT)
+        name = f"{path}.{key}" if path else key
+        if o == t or t == b:
+            value = o
+        elif o == b:
+            value = t
+        elif nested and all(isinstance(x, dict) for x in (o, t)):
+            value = merge_json(b if isinstance(b, dict) else {}, o, t, both, nested=True, path=name)
+        else:
+            value = both(name, o, t)
+        if value is not _ABSENT:
+            out[key] = value
+    return out
+
+
+def cmd_merge_driver(args: argparse.Namespace) -> int:
+    name = Path(args.path).name
+    rule = _MERGE_RULES.get(name)
+    if rule is None:
+        print(f"ratchet merge-driver: {args.path} is not one of {', '.join(_MERGE_RULES)}", file=sys.stderr)
+        return EXIT_RATCHET
+    both, nested = rule
+    try:
+        # A file both sides added has an empty base.
+        docs = [_parse_json(Path(f).read_text(encoding="utf-8").strip() or "{}", f) for f in (args.base, args.ours, args.theirs)]
+        merged = merge_json(*docs, both, nested=nested)
+    except (InputError, MergeConflict, OSError) as exc:
+        print(f"ratchet merge-driver: {args.path}: {exc}; leaving it to git's text merge", file=sys.stderr)
+        return EXIT_RATCHET
+    _atomic_write(Path(args.ours), json.dumps(merged, indent=2, sort_keys=True) + "\n")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="metrics_ratchet.py",
@@ -1068,6 +1163,17 @@ def build_parser() -> argparse.ArgumentParser:
         "inputs", nargs="*", help="collector JSON files (build/metrics/*.json); none is valid"
     )
     merge.set_defaults(func=cmd_merge)
+
+    driver = sub.add_parser(
+        "merge-driver",
+        help="git's merge driver for docs/metrics/{ratchet,report-only,scorecard}.json: per key, "
+        "the stricter bound where both sides moved one (hooks_check.sh --fix installs it)",
+    )
+    driver.add_argument("base", help="%%O: the merge base's version")
+    driver.add_argument("ours", help="%%A: ours, rewritten with the result")
+    driver.add_argument("theirs", help="%%B: theirs")
+    driver.add_argument("path", help="%%P: the path in the tree, which names the file's rules")
+    driver.set_defaults(func=cmd_merge_driver)
     return parser
 
 

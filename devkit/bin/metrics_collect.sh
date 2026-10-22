@@ -10,6 +10,10 @@
 #   devkit/bin/metrics_collect.sh <snapshot|check|tighten|rebaseline>
 #       [--conf scripts/ci/metrics.conf] [--bounds docs/metrics/ratchet.json] [--out build/metrics.json]
 #   snapshot    run the collectors and merge; build/metrics.json is the report
+#   check --quick  outside the gate only: a collector whose tier inputs are missing or stale is
+#               skipped (its keys SKIPPED), no tier runs, no scorecard; after the ratchet lines a
+#               gain left unlocked adds `BETTER: run make metrics-tighten before push`. The
+#               pre-push hook's preview (hook_steps.sh), which never blocks the push
 #   check       snapshot, then `metrics_ratchet.py check` (the gate job; METRICS_REBASELINE=1,
 #               which the gate plan sets from the metrics-rebaseline label, adds --rebaseline-ok).
 #               A BETTER key fails too until `make metrics-tighten` is committed (gains lock in)
@@ -19,6 +23,8 @@
 #               (`make metrics-tighten SEED=1`) also adds a bound at today's value for every
 #               key without one (`ratchet <key> SEEDED <value>`): the way to bound a new key,
 #               since that is a tightening and needs no label
+#               Merged tree (header below): when HEAD does not contain origin/main's tip,
+#               tighten measures HEAD merged into it, as the gate will, and copies the bounds back
 #   rebaseline  snapshot, then overwrite every bound (a label-approved tool change only).
 #               KEYS=<key>[,<key>] (`make metrics-rebaseline KEYS=...`: make hands command-line
 #               variables to the recipe's environment) loosens only those bounds, each only
@@ -78,6 +84,21 @@
 # reruns every input's target. Inside the gate a job: collector runs only when its job ran, so a
 # missing input there is the collector's ordinary failure.
 #
+# Merged tree (tighten only, outside the gate): the gate measures the PR merged into origin/main,
+# so a bound tighten set from the branch alone read WORSE there once main had moved (instalite
+# #29: coverage 0.04 under the bound it had just committed). When origin/main's tip (fetched
+# first when there is an origin remote) is not an ancestor of HEAD, tighten refuses a dirty
+# tree (an untracked, unignored file too: the worktree is built from commits), adds a detached worktree at origin/main under $TMPDIR, merges HEAD into it (a conflict
+# is exit 2: rebase first, the gate would fail the merge too) and runs the repo's own
+# `make metrics-tighten` there with TIGHTEN_RUN_TIERS=1 (a new worktree has no tier outputs;
+# `fresh` passes through), so its deps target installs what the merged tree declares. It then
+# copies the bounds file, report-only.json and scorecard.json beside it, and the snapshot, back
+# into this checkout (commit them) and removes the worktree. The bounds then carry main's moves
+# too, so the PR's copy merges cleanly. METRICS_TIGHTEN_MERGED is set inside: no second hop.
+# --conf, --bounds and --out reach the inner tighten as METRICS_TIGHTEN_{CONF,BOUNDS,OUT}, which
+# only a tighten under METRICS_TIGHTEN_MERGED reads: the recipe it runs passes no flags. They and
+# SCORECARD_BOUNDS go relative when inside this checkout (in_checkout), else absolute.
+#
 # Toolchain: before any collector, the tree's pinned Node and Rust go first on PATH
 # (bin/toolchain_path.sh, as the gate and the hooks do), so `make metrics-snapshot` on a Mac
 # whose PATH has Node 25 still runs dependency-cruiser on the .nvmrc Node. A pin that cannot
@@ -132,7 +153,7 @@ ts.mjs --bundle next-build"
 readonly TIER_INPUT_COLLECTOR='[[:space:]/]metrics/([a-z_]+\.(py|mjs))[[:space:]]'
 
 usage() {
-  echo "usage: $0 <snapshot|check|tighten|rebaseline> [--conf FILE] [--bounds FILE] [--out FILE] [--fresh]" >&2
+  echo "usage: $0 <snapshot|check|tighten|rebaseline> [--conf FILE] [--bounds FILE] [--out FILE] [--fresh] [--quick]" >&2
   exit 2
 }
 die() { echo "metrics_collect: $*" >&2; exit 2; }
@@ -144,12 +165,21 @@ case " $SUBCOMMANDS " in *" $SUB "*) ;; *) usage ;; esac
 CONF=scripts/ci/metrics.conf
 BOUNDS=docs/metrics/ratchet.json
 OUT=build/metrics.json
+# Inside the merged hop the outer call's --conf/--bounds/--out arrive as env (tighten_on_merge):
+# the repo's metrics-tighten recipe passes no flags of its own, so make cannot carry them.
+if [ "$SUB" = tighten ] && [ -n "${METRICS_TIGHTEN_MERGED:-}" ]; then
+  CONF=${METRICS_TIGHTEN_CONF:-$CONF}
+  BOUNDS=${METRICS_TIGHTEN_BOUNDS:-$BOUNDS}
+  OUT=${METRICS_TIGHTEN_OUT:-$OUT}
+fi
 # --fresh, or TIGHTEN_RUN_TIERS=fresh (the spelling a make target passes): rerun every tier input.
 FRESH=0
 [ "${TIGHTEN_RUN_TIERS:-0}" != fresh ] || FRESH=1
+QUICK=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --fresh) FRESH=1 ;;
+    --quick) QUICK=1 ;;
     --conf) [ $# -ge 2 ] || usage; CONF=$2; shift ;;
     --bounds) [ $# -ge 2 ] || usage; BOUNDS=$2; shift ;;
     --out) [ $# -ge 2 ] || usage; OUT=$2; shift ;;
@@ -157,9 +187,97 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+# quick_args: --quick is check's, outside the gate, and never reruns a tier (it skips the
+# tier's collectors instead), so FRESH goes back to 0.
+quick_args() {
+  [ "$SUB" = check ] || die "--quick is check's alone (the pre-push preview)"
+  [ -z "${GATE_AREAS+x}" ] || die "--quick runs outside the gate only"
+  FRESH=0
+}
+[ "$QUICK" = 0 ] || quick_args
 [ -f "$CONF" ] || die "no collectors file at $CONF (format: devkit/bin/metrics_collect.sh header)"
 [ "$SUB" = snapshot ] || [ -f "$BOUNDS" ] \
   || die "no bounds file at $BOUNDS (start from '{}' or devkit/templates/metrics/ratchet.json, then run rebaseline)"
+
+# ---- tighten on the merged tree (header: Merged tree) ---------------------------------------------
+# merge_needed: true when tighten must measure a merge, setting MERGE_MAIN and MERGE_HEAD (only
+# outside the gate, not already inside one, and with an origin/main HEAD does not contain).
+merge_needed() {
+  [ "$SUB" = tighten ] && [ -z "${GATE_AREAS+x}" ] && [ -z "${METRICS_TIGHTEN_MERGED:-}" ] || return 1
+  if git remote get-url origin >/dev/null 2>&1 && ! git fetch -q origin main 2>/dev/null; then
+    echo "metrics tighten: could not fetch origin main; using the local origin/main" >&2
+  fi
+  MERGE_MAIN=$(git rev-parse -q --verify "origin/main^{commit}" 2>/dev/null) || return 1
+  MERGE_HEAD=$(git rev-parse HEAD) || return 1
+  ! git merge-base --is-ancestor "$MERGE_MAIN" "$MERGE_HEAD"
+}
+# merge_worktree <dir>: a detached worktree at MERGE_MAIN with MERGE_HEAD merged in; exit 2 when
+# the tree is dirty (the merge would not hold the edit) or the merge conflicts. Dirty counts an
+# untracked, unignored file: the worktree is built from commits, so a collector walking the tree
+# (metrics/size.py) would miss it and its bounds would not describe this checkout.
+merge_worktree() {
+  local dirty
+  # awk, not head: it drains the list, so git never dies of SIGPIPE under pipefail.
+  dirty=$(git status --porcelain --untracked-files=all | awk 'NR <= 3 { printf "%s ", substr($0, 4) }')
+  [ -z "$dirty" ] \
+    || die "tighten measures HEAD merged into origin/main ${MERGE_MAIN:0:7}, as the gate does, and HEAD does not contain it: commit (or stash -u) the changes first, or rebase onto origin/main (dirty: ${dirty% })"
+  git worktree add -q --detach "$1" "$MERGE_MAIN" >/dev/null 2>&1 || die "could not add a worktree at origin/main ${MERGE_MAIN:0:7}"
+  git -C "$1" -c user.name=metrics-tighten -c user.email=metrics-tighten@local \
+    merge -q --no-edit "$MERGE_HEAD" >/dev/null 2>&1 \
+    || die "HEAD conflicts with origin/main ${MERGE_MAIN:0:7}; rebase onto it first (the gate would fail the merge too)"
+}
+# in_checkout <path>: <path> relative to this checkout when it resolves inside it (logically or
+# physically: a checkout under a symlinked directory), so the merged worktree reads and writes
+# its own copy; else absolute, since a relative `../x` would resolve against the worktree.
+in_checkout() {
+  local top path dir
+  top=$(pwd -P)
+  case "$1" in /*) path=$1 ;; *) path=$PWD/$1 ;; esac
+  # A directory that does not exist yet (--out build/x.json before any build) stays logical.
+  if dir=$(CDPATH='' cd -P "$(dirname "$path")" 2>/dev/null && pwd); then
+    path=$dir/$(basename "$path")
+  fi
+  case "$path" in
+    "$top"/*) echo "${path#"$top"/}" ;;
+    "$PWD"/*) echo "${path#"$PWD"/}" ;;
+    *) echo "$path" ;;
+  esac
+}
+# copy_back <dir>: the files tighten writes, from the merged worktree into this checkout. An
+# absolute path (outside this checkout: in_checkout) was written in place by the merged run.
+copy_back() {
+  local f
+  for f in "$BOUNDS" "$(dirname "$BOUNDS")/report-only.json" "${SCORECARD_BOUNDS:-docs/metrics/scorecard.json}" "$OUT"; do
+    case "$f" in /*) continue ;; esac
+    if [ -f "$1/$f" ] && ! cmp -s "$1/$f" "$f"; then
+      { mkdir -p "$(dirname "$f")" && cp "$1/$f" "$f"; } || die "could not copy $f back from the merged tree"
+      echo "metrics tighten: $f from the merged tree"
+    fi
+  done
+}
+# tighten_on_merge: tighten in a temporary worktree of the merge, the results copied back; exits.
+tighten_on_merge() {
+  local wt tiers rc=0
+  MERGED_TMP=$(mktemp -d "${TMPDIR:-/tmp}/metrics-tighten.XXXXXX") || die "mktemp failed"
+  wt=$MERGED_TMP/merged
+  trap 'git worktree remove --force "$MERGED_TMP/merged" >/dev/null 2>&1; rm -rf "$MERGED_TMP"' EXIT
+  merge_worktree "$wt"
+  tiers=${TIGHTEN_RUN_TIERS:-1}
+  [ "$tiers" = fresh ] || tiers=1
+  echo "metrics tighten: HEAD ${MERGE_HEAD:0:7} does not contain origin/main ${MERGE_MAIN:0:7}; measuring their merge, as the gate will, in $wt (TIGHTEN_RUN_TIERS=$tiers)"
+  CONF=$(in_checkout "$CONF") BOUNDS=$(in_checkout "$BOUNDS") OUT=$(in_checkout "$OUT")
+  if [ -n "${SCORECARD_BOUNDS:-}" ]; then
+    SCORECARD_BOUNDS=$(in_checkout "$SCORECARD_BOUNDS")
+    export SCORECARD_BOUNDS
+  fi
+  METRICS_TIGHTEN_MERGED=1 TIGHTEN_RUN_TIERS=$tiers \
+    METRICS_TIGHTEN_CONF=$CONF METRICS_TIGHTEN_BOUNDS=$BOUNDS METRICS_TIGHTEN_OUT=$OUT \
+    make -C "$wt" --no-print-directory metrics-tighten || rc=$?
+  # tighten exits 1 for a WORSE key after writing its BETTER bounds: those still come back.
+  [ "$rc" -gt 1 ] || copy_back "$wt"
+  exit "$rc"
+}
+! merge_needed || tighten_on_merge
 
 # ---- parse the conf: every line before anything runs ---------------------------------------
 NAMES=()
@@ -357,9 +475,29 @@ report_stale() {
     echo "metrics_collect: WARNING: $f ($name) is older than the newest tracked change under $dir; its numbers may predate the code. Rerun: make ${target:-<its tier>} (or TIGHTEN_RUN_TIERS=1)" >&2
   done <<<"$STALE"
 }
+# quick_skip_unbuilt: --quick drops every collector with a missing or stale tier input, then
+# clears MISSING, STALE and RERUN: nothing is left for the steps below to rerun or refuse.
+quick_skip_unbuilt() {
+  local f name dir target i seen=" "
+  while IFS=$'\t' read -r f name dir target; do
+    [ -n "$f" ] && [ "${seen/ $name /}" = "$seen" ] || continue
+    seen="$seen$name "
+    i=0
+    while [ "${NAMES[$i]}" != "$name" ]; do i=$((i + 1)); done
+    RUN[i]=0
+    SKIPPED+=("$name")
+    if [ -e "$f" ]; then
+      echo "metrics $name SKIP (--quick: $f is older than the newest tracked change under $dir)"
+    else
+      echo "metrics $name SKIP (--quick: $f is not built${target:+; make $target writes it})"
+    fi
+  done <<<"$MISSING$STALE"
+  MISSING="" STALE="" RERUN=""
+}
 # shellcheck disable=SC2031  # plan_job_target's subshell sets its own GATE_AREAS; this is the gate's
 if [ -z "${GATE_AREAS+x}" ]; then
   tier_input_state
+  [ "$QUICK" = 0 ] || quick_skip_unbuilt
   if [ -n "$RERUN" ] && { [ "$FRESH" = 1 ] || [ "${TIGHTEN_RUN_TIERS:-0}" = 1 ]; }; then
     why=TIGHTEN_RUN_TIERS=1
     [ "$FRESH" = 0 ] || why=--fresh
@@ -456,6 +594,15 @@ if [ "$SUB" = tighten ] && [ "${SEED:-0}" = 1 ]; then RATCHET_ARGS+=(--seed); fi
 # The modes an author commits from also refresh the committed report-only copy beside the
 # bounds; check (the gate) never writes a tracked file.
 case "$SUB" in tighten|rebaseline) RATCHET_ARGS+=(--report-only "$(dirname "$BOUNDS")/report-only.json") ;; esac
+# quick_ratchet: --quick's ratchet, its lines then the pre-push hint; exits with the ratchet's code.
+quick_ratchet() {
+  local out rc=0
+  out=$(python3 -I "$RATCHET" "${RATCHET_ARGS[@]}") || rc=$?
+  printf '%s\n' "$out"
+  ! grep -q ' BETTER — run make metrics-tighten' <<<"$out" || echo "BETTER: run make metrics-tighten before push"
+  exit "$rc"
+}
+[ "$QUICK" = 0 ] || quick_ratchet
 python3 -I "$RATCHET" "${RATCHET_ARGS[@]}"
 ratchet_rc=$?
 # A failing tighten (rc 1: a WORSE key) has still written its BETTER bounds; the scorecard's

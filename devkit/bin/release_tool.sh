@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run one command with a devkit-pinned release tool first on PATH (shellcheck for metrics/shell.py
-# and bin/shellcheck.sh, bats for the infra-compose stack's test tier), the way cargo_tool.sh
-# does for a cargo subcommand.
+# and bin/shellcheck.sh, bats for the infra-compose stack's test tier, ruff for changed_lint.py
+# where the repo has no Python env), the way cargo_tool.sh does for a cargo subcommand.
 # Usage: devkit/bin/release_tool.sh <tool> -- <command> [args...]
 #        devkit/bin/release_tool.sh <tool> --version    # the pinned version, nothing installed
 #
@@ -32,9 +32,9 @@ PLATFORM=$OS.$ARCH
 # PINS: per tool, VERSION, the archive path under the mirror, its top directory (installed
 # whole: bats's bin/bats finds its libexec/ beside it), the bin directory inside that, the
 # command and the archive's sha256 for this platform (taken from the release on the day it was
-# pinned; neither release publishes a checksum file). A new pin is a devkit PR with every
+# pinned; shellcheck and bats publish no checksum file). A new pin is a devkit PR with every
 # platform's sum.
-SHA='' BINDIR=''
+SHA='' BINDIR='' TARGET=''
 case $TOOL in
   shellcheck)
     VERSION=0.11.0
@@ -53,7 +53,20 @@ case $TOOL in
     ARCHIVE=bats-core/bats-core/archive/refs/tags/v$VERSION.tar.gz
     TOP=bats-core-$VERSION BINDIR=bin BIN=bats
     SHA=bb537b70b15b732f6d8827dd6578e3d8ce166636ce1f18ea9a074184fcce9177 ;;
-  *) die "no pin for '$TOOL' (pinned: shellcheck, bats)" ;;
+  ruff)
+    # For changed_lint.py --ruff-from release: a repo with no Python project env (homelab,
+    # devkit). A repo with one runs its lockfile's ruff instead. Ruff publishes .sha256 files;
+    # the sums below were checked against them.
+    VERSION=0.17.1
+    case $PLATFORM in
+      darwin.aarch64) TARGET=aarch64-apple-darwin SHA=1c8e6e36538eaa0b996378a20c226403c4ca6369ac24884751b024d3a9530b86 ;;
+      darwin.x86_64) TARGET=x86_64-apple-darwin SHA=88ee16f88dba9d440e06375f46898ec85baf578042ad086764d5a33558bb6e17 ;;
+      linux.x86_64) TARGET=x86_64-unknown-linux-gnu SHA=a293ac937715ae6fb6b64da86761598379e6149f40fbc00fde9ba8a2a562ac65 ;;
+      linux.aarch64) TARGET=aarch64-unknown-linux-gnu SHA=d3ead1f0ed779e777a034ccd9286be6bd9bd3cdaba732ff9797f8288a283e9e2 ;;
+    esac
+    ARCHIVE=astral-sh/ruff/releases/download/$VERSION/ruff-$TARGET.tar.gz
+    TOP=ruff-$TARGET BIN=ruff ;;
+  *) die "no pin for '$TOOL' (pinned: shellcheck, bats, ruff)" ;;
 esac
 [ -n "$SHA" ] || die "$TOOL $VERSION has no pinned archive for $PLATFORM"
 

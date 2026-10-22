@@ -3,6 +3,7 @@
 touches, until its whole-tree count is 0.
 
   uv run --frozen python devkit/bin/changed_lint.py ruff --root . --src server
+  devkit/bin/changed_lint.py ruff --ruff-from release --root . --src bin [--hold E501]
   devkit/bin/changed_lint.py eslint --root frontend --src src [--ext .vue]
       [--base-ref origin/main]
 
@@ -23,6 +24,16 @@ Rules, each from the base it graduates into (lint/README.md "Changed-file rules"
           is `--preview --select <these>` and nothing else: preview changes no other rule's
           verdict. `--force-exclude` keeps the repo's own excludes. The tool is
           `<python> -m ruff`, the repo's interpreter (`uv run`), so the lockfile's ruff judges.
+          A repo with no Python project env (homelab, devkit) passes `--ruff-from release`:
+          release_tool.sh's pinned, checksummed ruff, installed once per machine. It is a
+          declaration, never a fallback: a repo whose env lacks ruff gets the error, not a
+          different ruff than its lockfile's.
+          `--hold <rule>` adds a base `select` rule the repo's config ignores tree-wide while
+          its count is above 0 (devkit's E501): the command line's --select wins over the
+          config's `ignore`. A held rule judges only the lines the change adds or rewrites
+          (`git diff -U0` against the merge-base, bin/_changed_files.py's changed_lines), so
+          the first PR into a file does not pay for its history; ruff runs with
+          `--output-format json` and its rows are filtered here.
   eslint  lint/eslint.base.mjs's `sonarjsChangedRules` (sonarjs/expression-complexity, max 4
           operators: five terms, as ruff's 5), read from the module by node and passed as
           `--rule` with `--plugin sonarjs`, under the repo's own config (parser, other plugins).
@@ -31,16 +42,22 @@ Rules, each from the base it graduates into (lint/README.md "Changed-file rules"
 
 Which files: bin/_changed_files.py's, those under --src that differ from the merge-base of
 --base-ref and HEAD (committed, staged, unstaged or untracked) with the tool's extensions. With
-none, the tool is not run. Every finding in a changed file counts, not only the edited lines:
-the file is where the lane is working.
+none, the tool is not run. A rule in FILE_SCOPED (the three ruff rules, the eslint rule) counts
+every finding in a changed file: each reports on the first line of a function or a statement,
+which the edit that grows its body never touches. Every other rule (the --hold rules) counts a
+finding only on a changed line.
 
-Graduation: once a repo's whole tree is at 0, it turns the rule on in its own config, as the
-lint/README.md graduation table does for complexity, and drops this line. Once every repo is at
-0, the rule moves into the base (`select`, or sonarjsRules) and this table loses it.
+Graduation (lint/README.md "Changed-file rules"): a repo whose whole-tree count is 0 enables
+the rule tree-wide in its own config instead of adding this line; a repo above 0 adds the line
+and swaps it for the tree-wide rule at 0. Ruff's preview rules are the exception: tree-wide they
+need `lint.preview`, so the line stays. Once every repo is at 0, the rule moves into the base
+(`select`, or sonarjsRules) and this table loses it.
 
-Output: one `changed-lint <tool>:` line naming the file count and the rules, then the tool's own
-findings. Exit: the tool's (0 clean, 1 findings); 2 a bad call, a missing tool, or a --base-ref
-that does not resolve (a shallow CI clone: fetch it).
+Output: one `changed-lint <tool>:` line naming the file count and the rules, then the findings:
+eslint's own output; ruff's as `<file>:<row>:<col>: <code> <message>`, plus one line counting
+the held findings left out on unchanged lines. Exit: 0 clean, 1 findings (eslint's own exit,
+ruff's from the findings kept); 2 a bad call, a missing tool, ruff output that is not JSON, or a
+--base-ref that does not resolve (a shallow CI clone: fetch it).
 """
 
 from __future__ import annotations
@@ -60,11 +77,22 @@ EXIT_FOUND = 1
 HERE = Path(__file__).resolve().parent
 ESLINT_BASE = HERE.parent / "lint" / "eslint.base.mjs"
 RUFF_RULES = ("PLR0915", "PLR0916", "PLR1702")
+# Base `select` rules a repo may hold here (--hold) while its tree-wide count is above 0.
+RUFF_HOLDABLE = ("E501",)
+# Rules judged on every line of a changed file. Each reports on the first line of what it
+# measures (a def, an `if`, an outer block, an expression's start), and the edit that grows the
+# body is below it, so a changed-line filter would miss it. Every other rule, each --hold rule
+# included, is judged only on the lines the change adds or rewrites. A file that does not parse
+# (ruff's `invalid-syntax`, a null code before 0.17) is judged whole.
+SYNTAX = "invalid-syntax"
+FILE_SCOPED = frozenset({"PLR0915", "PLR0916", "PLR1702", "sonarjs/expression-complexity", SYNTAX})
 # The fix each rule asks for, named in the FAIL line; a disable comment is never one.
 FIXES = {
     "PLR0915": "split the function along its phases",
     "PLR0916": "name the condition (a predicate function or a table)",
     "PLR1702": "flatten the nesting (early returns, a helper per inner loop)",
+    "E501": "wrap the line at the base's line-length",
+    SYNTAX: "fix the syntax error",
     "sonarjs/expression-complexity": "name the condition (a predicate function or a table)",
 }
 # ts.mjs's production extensions; a repo adds `.vue` (or another) with --ext.
@@ -93,27 +121,38 @@ class LintError(Exception):
 
 @dataclass(frozen=True)
 class Run:
-    """One tool invocation: the command (files appended) and what the header line names."""
+    """One tool invocation: the command (files appended) and what the header line names.
+    `ruff_json`: the command prints ruff's JSON, judged by judge_ruff; otherwise the tool's own
+    output and exit stand, which is right only while every rule it runs is in FILE_SCOPED."""
 
     command: list[str]
     rules: str
+    ruff_json: bool = False
 
 
-def ruff_run(args: argparse.Namespace) -> Run:
+def ruff_command(args: argparse.Namespace) -> list[str]:
+    """The ruff to run: the env's (`<python> -m ruff`) or release_tool.sh's pin."""
+    if args.ruff_from == "release":
+        return [str(HERE / "release_tool.sh"), "ruff", "--", "ruff"]
     probe = subprocess.run(
         [args.python, "-c", "import ruff"], capture_output=True, text=True, check=False
     )
     if probe.returncode != 0:
         raise LintError(
             f"ruff is not importable under {args.python}; add it to the dev dependencies (run "
-            "under the repo's interpreter: `uv run python devkit/bin/changed_lint.py ruff ...`)"
+            "under the repo's interpreter: `uv run python devkit/bin/changed_lint.py ruff ...`; "
+            "a repo with no Python env passes --ruff-from release)"
         )
-    rules = ",".join(RUFF_RULES)
+    return [args.python, "-m", "ruff"]
+
+
+def ruff_run(args: argparse.Namespace) -> Run:
+    rules = ",".join([*RUFF_RULES, *args.hold])
     command = [
-        args.python, "-m", "ruff", "check", "--preview", "--select", rules,
-        "--force-exclude", "--output-format", "concise",
+        *ruff_command(args), "check", "--preview", "--select", rules,
+        "--force-exclude", "--output-format", "json",
     ]  # fmt: skip
-    return Run(command, rules)
+    return Run(command, rules, ruff_json=True)
 
 
 def sonarjs_changed_rules() -> dict[str, object]:
@@ -155,6 +194,11 @@ def eslint_run(args: argparse.Namespace) -> Run:
             "dependencies (the fleet pins 4.2.x)"
         )
     rules = sonarjs_changed_rules()
+    if unscoped := sorted(set(rules) - FILE_SCOPED):
+        raise LintError(
+            f"sonarjsChangedRules has {', '.join(unscoped)}, which eslint's run cannot judge by "
+            "changed line; add it to changed_lint.py's FILE_SCOPED or filter eslint's JSON"
+        )
     command = [
         str(eslint), "--no-warn-ignored", "--plugin", "sonarjs", "--rule", json.dumps(rules),
     ]  # fmt: skip
@@ -186,11 +230,61 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--python", default=sys.executable, help="ruff: the interpreter that has it"
     )
+    parser.add_argument(
+        "--ruff-from",
+        choices=("env", "release"),
+        default="env",
+        help="ruff: --python's (the lockfile's) or release_tool.sh's pin, for a repo with no env",
+    )
+    parser.add_argument(
+        "--hold",
+        action="append",
+        default=[],
+        choices=RUFF_HOLDABLE,
+        help="ruff: a base rule the repo's config ignores tree-wide, held in changed files",
+    )
     return parser
 
 
+def judge_ruff(run: Run, root: Path, files: list[str], base_ref: str) -> tuple[int, list[str]]:
+    """Run ruff, print the findings the change is judged on and return (exit, their codes)."""
+    proc = subprocess.run(
+        [*run.command, *files], cwd=root, capture_output=True, text=True, check=False
+    )
+    sys.stderr.write(proc.stderr)
+    if proc.returncode not in (0, EXIT_FOUND):
+        sys.stdout.write(proc.stdout)
+        return proc.returncode, []
+    try:
+        findings = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise LintError(f"ruff printed no JSON (exit {proc.returncode}): {exc}") from exc
+    top = root.resolve()
+    rows = [
+        (Path(f["filename"]).resolve().relative_to(top).as_posix(), f["code"] or SYNTAX, f)
+        for f in findings
+    ]
+    lines = changed.changed_lines(
+        root, base_ref, {path for path, code, _ in rows if code not in FILE_SCOPED}
+    )
+    kept = [
+        (path, code, f)
+        for path, code, f in rows
+        if code in FILE_SCOPED or f["location"]["row"] in lines[path]
+    ]
+    for path, code, f in kept:
+        loc = f["location"]
+        print(f"{path}:{loc['row']}:{loc['column']}: {code} {f['message']}")
+    if skipped := len(rows) - len(kept):
+        print(f"changed-lint ruff: {skipped} held finding(s) on unchanged lines left out")
+    return (EXIT_FOUND if kept else 0), sorted({code for _, code, _ in kept})
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.hold and args.tool != "ruff":
+        parser.error("--hold is a ruff option")
     make_run, suffixes = TOOLS[args.tool]
     root = Path(args.root)
     try:
@@ -199,18 +293,27 @@ def main(argv: list[str] | None = None) -> int:
             print(f"changed-lint {args.tool}: 0 changed file(s) since {args.base_ref}")
             return 0
         run = make_run(args)
+        count = f"{len(files)} changed file(s) since {args.base_ref}"
+        print(f"changed-lint {args.tool}: {count} ({run.rules})")
+        sys.stdout.flush()  # before the tool's own output
+        if run.ruff_json:
+            rc, found = judge_ruff(run, root, files, args.base_ref)
+        else:
+            rc = subprocess.run([*run.command, *files], cwd=root, check=False).returncode
+            found = run.rules.split(",")
     except (changed.ChangedFilesError, LintError) as exc:
         print(f"changed-lint {args.tool}: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    count = f"{len(files)} changed file(s) since {args.base_ref}"
-    print(f"changed-lint {args.tool}: {count} ({run.rules})")
-    sys.stdout.flush()  # before the tool's own output
-    rc = subprocess.run([*run.command, *files], cwd=root, check=False).returncode
     if rc == EXIT_FOUND:
-        fixes = "; ".join(f"{rule}: {FIXES[rule]}" for rule in run.rules.split(","))
+        sys.stdout.flush()  # the findings, then the FAIL line, in a log that merges the two
+        fixes = "; ".join(f"{rule}: {FIXES[rule]}" for rule in found)
+        where = ", ".join(
+            f"{rule} {'in a changed file' if rule in FILE_SCOPED else 'on a changed line'}"
+            for rule in found
+        )
         print(
-            f"changed-lint {args.tool}: FAIL {run.rules} in a changed file ({fixes}); never a "
-            "disable comment (lint/README.md)",
+            f"changed-lint {args.tool}: FAIL {where} ({fixes}); never a disable comment "
+            "(lint/README.md)",
             file=sys.stderr,
         )
     return rc

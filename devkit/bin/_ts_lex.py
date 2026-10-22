@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 
 _ID_START = re.compile(r"[A-Za-z_$]")
 _ID_CHAR = re.compile(r"[A-Za-z0-9_$]")
+_TEMPLATE_SPECIAL = re.compile(r"[\\`$]")
 # After these a `/` starts a regex literal; after an identifier, number, `)` or `]` it divides.
 _REGEX_AFTER_WORDS = frozenset(
     {"return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw",
@@ -155,6 +156,124 @@ def _regex_may_start(prev: Token | None) -> bool:
     return prev.value not in (")", "]")
 
 
+@dataclass
+class _Lexer:
+    """tokenize's state: the offset, the last token (whether a `/` starts a regex), and the
+    open template `${` spans."""
+
+    text: str
+    comments: list[Comment] | None
+    interpolations: list[Interpolation] | None
+    newlines: list[int] = field(init=False)
+    i: int = 0
+    prev: Token | None = None
+    # One entry per open template `${`: the brace depth at which its `}` resumes the template,
+    # and the offset its code starts at.
+    templates: list[tuple[int, int]] = field(default_factory=list)
+    depth: int = 0
+    in_template: bool = False
+
+    def __post_init__(self) -> None:
+        self.newlines = [m.start() for m in re.finditer("\n", self.text)]
+
+    def line(self, at: int) -> int:
+        return bisect.bisect_left(self.newlines, at) + 1
+
+    def emit(self, tok: Token) -> Token:
+        self.prev = tok
+        return tok
+
+    def step(self) -> Token | None:
+        """Moves past one lexeme at self.i; the token to yield, if it is one."""
+        if self.in_template:
+            self.template_step()
+            return None
+        text, i = self.text, self.i
+        ch = text[i]
+        if ch.isspace():
+            self.i += 1
+        elif text.startswith(("//", "/*"), i):
+            self.comment()
+        elif ch in "'\"":
+            self.i, value = _skip_string(text, i, ch)
+            if value is not None:
+                return self.emit(Token("str", value, self.line(i), i))
+        elif ch == "`":
+            self.in_template = True
+            self.i += 1
+        elif ch == "/" and _regex_may_start(self.prev) and not _jsx_slash(text, i):
+            self.i = _skip_regex(text, i)
+            self.prev = Token("str", "")
+        elif _ID_START.match(ch):
+            self.i = self.word_end(i)
+            return self.emit(Token("id", text[i : self.i], self.line(i), i))
+        elif ch.isdigit():
+            self.i = self.word_end(i, ".")
+            self.prev = Token("id", text[i : self.i])
+        else:
+            return self.punct(ch)
+        return None
+
+    def word_end(self, i: int, also: str = "") -> int:
+        """The end of the identifier (or, with also=".", the number) starting at text[i]."""
+        text, j = self.text, i + 1
+        while j < len(text) and (_ID_CHAR.match(text[j]) or text[j] in also):
+            j += 1
+        return j
+
+    def template_step(self) -> None:
+        """One step inside a template literal's text: an escape, its end, a `${` or plain text."""
+        text, i = self.text, self.i
+        if text[i] == "\\":
+            self.i += 2
+        elif text[i] == "`":
+            self.in_template = False
+            self.i += 1
+            self.prev = Token("str", "")
+        elif text.startswith("${", i):
+            self.templates.append((self.depth, i + 2))
+            self.depth += 1
+            self.in_template = False
+            self.i += 2
+            self.prev = Token("punct", "{", self.line(i))
+        else:
+            # Plain template text: jump to the next character that could end it.
+            special = _TEMPLATE_SPECIAL.search(text, i + 1)
+            self.i = special.start() if special else len(text)
+
+    def comment(self) -> None:
+        """Skips the `//` or `/*` comment at self.i, recording it when comments are kept."""
+        text, i = self.text, self.i
+        if text.startswith("//", i):
+            newline = text.find("\n", i)
+            end = len(text) if newline < 0 else newline
+        else:
+            close = text.find("*/", i + 2)
+            if close < 0:
+                raise LexError(f"line {self.line(i)}: block comment never closed")
+            end = close + 2
+        if self.comments is not None:
+            self.comments.append(Comment(i, end, text[i:end]))
+        self.i = end
+
+    def punct(self, ch: str) -> Token | None:
+        """Punctuation; a `}` that closes a template's `${` resumes the template instead."""
+        i = self.i
+        if ch == "{":
+            self.depth += 1
+        elif ch == "}":
+            self.depth -= 1
+            if self.templates and self.templates[-1][0] == self.depth:
+                start = self.templates.pop()[1]
+                if self.interpolations is not None:
+                    self.interpolations.append(Interpolation(start, i))
+                self.in_template = True
+                self.i += 1
+                return None
+        self.i += 1
+        return self.emit(Token("punct", ch, self.line(i), i))
+
+
 def tokenize(
     text: str,
     comments: list[Comment] | None = None,
@@ -163,93 +282,12 @@ def tokenize(
     """Identifiers, string literals and punctuation, each with its 1-based line; the comments
     skipped on the way are appended to `comments`, and each template `${...}` span to
     `interpolations`, when it is given."""
-    newlines = [m.start() for m in re.finditer("\n", text)]
-
-    def line(at: int) -> int:
-        return bisect.bisect_left(newlines, at) + 1
-
-    i, n = 0, len(text)
-    prev: Token | None = None
-    # One entry per open template `${`: the brace depth at which its `}` resumes the template,
-    # and the offset its code starts at.
-    templates: list[tuple[int, int]] = []
-    depth = 0
-    in_template = False
-    while i < n:
-        if in_template:
-            ch = text[i]
-            if ch == "\\":
-                i += 2
-            elif ch == "`":
-                in_template = False
-                i += 1
-                prev = Token("str", "")
-            elif text.startswith("${", i):
-                templates.append((depth, i + 2))
-                depth += 1
-                in_template = False
-                i += 2
-                prev = Token("punct", "{", line(i - 2))
-            else:
-                i += 1
-            continue
-        ch = text[i]
-        if ch.isspace():
-            i += 1
-        elif text.startswith("//", i):
-            newline = text.find("\n", i)
-            end = n if newline < 0 else newline
-            if comments is not None:
-                comments.append(Comment(i, end, text[i:end]))
-            i = end
-        elif text.startswith("/*", i):
-            close = text.find("*/", i + 2)
-            if close < 0:
-                raise LexError(f"line {line(i)}: block comment never closed")
-            if comments is not None:
-                comments.append(Comment(i, close + 2, text[i : close + 2]))
-            i = close + 2
-        elif ch in "'\"":
-            start = i
-            i, value = _skip_string(text, i, ch)
-            if value is not None:
-                prev = Token("str", value, line(start), start)
-                yield prev
-        elif ch == "`":
-            in_template = True
-            i += 1
-        elif ch == "/" and _regex_may_start(prev) and not _jsx_slash(text, i):
-            i = _skip_regex(text, i)
-            prev = Token("str", "")
-        elif _ID_START.match(ch):
-            j = i + 1
-            while j < n and _ID_CHAR.match(text[j]):
-                j += 1
-            prev = Token("id", text[i:j], line(i), i)
-            yield prev
-            i = j
-        elif ch.isdigit():
-            j = i + 1
-            while j < n and (_ID_CHAR.match(text[j]) or text[j] == "."):
-                j += 1
-            prev = Token("id", text[i:j])
-            i = j
-        else:
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if templates and templates[-1][0] == depth:
-                    start = templates.pop()[1]
-                    if interpolations is not None:
-                        interpolations.append(Interpolation(start, i))
-                    in_template = True
-                    i += 1
-                    continue
-            prev = Token("punct", ch, line(i), i)
-            yield prev
-            i += 1
-    if in_template:
+    lexer = _Lexer(text, comments, interpolations)
+    while lexer.i < len(text):
+        tok = lexer.step()
+        if tok is not None:
+            yield tok
+    if lexer.in_template:
         raise LexError("the file ends inside a template literal")
 
 

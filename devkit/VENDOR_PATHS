@@ -4,7 +4,8 @@
 # (a vendored tree holding anything else was vendored by an older sync).
 # Left out on purpose: templates/new/ (stack scaffolds whose .ts/.py/.rs sources broke closet's
 # typecheck, #382; `devkit new` reads them from a full checkout), tests/, .github/, github/
-# (fleet ops) and templates/launchd/ (the monthly audit runs from a full checkout).
+# (fleet ops) and templates/launchd/ (the monthly audit and the nightly dependency merge run from
+# a full checkout).
 VENDOR_PATHS
 AGENTS.md
 CLAUDE.md

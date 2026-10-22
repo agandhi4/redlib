@@ -18,12 +18,21 @@
 # preflight, naming the step, instead of blocking the next commit. A pre-commit step whose
 # target names typecheck or unit (ci-typecheck, ci-unit-backend) is a warning on stderr, never a
 # failure: those belong at pre-push (README "Git hooks"; closet's and rollcall's pre-commit
-# ran tsc on every commit of every lane, p90 33 s and 51 s against the 30 s budget).
+# ran tsc on every commit of every lane, p90 33 s and 51 s against the 30 s budget). A Makefile
+# with a ci-lint target and no pre-commit step running ci-lint, a ci-lint-<area> or ci-quick is
+# a warning too: devkit's own pre-commit skipped it, so lanes met E501 and the changed-file
+# rules (changed_lint.py) only at the gate, a full gate cycle per finding (2026-10-22).
 #
 # --fix also adds `docs/decisions.md merge=union` to the root .gitattributes when it is missing,
 # leaving the edit for the developer to commit: this is the one devkit path that installs
 # repo-side setup (`make install`), and docs_check rule 12 reports the line missing in ci-quick,
 # where this check never runs. Why union: bin/_gitattributes_lib.sh.
+#
+# --fix also gives docs/metrics/{ratchet,report-only,scorecard}.json devkit's per-key merge driver
+# when the repo has docs/metrics/: the .gitattributes lines (left to commit) and this clone's
+# merge.devkit-metrics.driver config, which no commit can carry (bin/_gitattributes_lib.sh). The
+# check warns, never fails, when the lines are committed but this clone's driver is unset or not
+# the vendored command; every hook and devkit-sync set it (metrics_driver_heal).
 #
 # Usage: devkit/bin/hooks_check.sh [--fix] [repo-root]
 #   repo-root defaults to the current checkout. --fix sets core.hooksPath to .githooks (the
@@ -87,6 +96,17 @@ if [ "$FIX" = 1 ]; then
     echo "$DECISIONS_UNION_LINE" >>"$attrs"
     echo "hooks-check: added '$DECISIONS_UNION_LINE' to .gitattributes; commit it"
   fi
+  if [ -d "$ROOT/docs/metrics" ]; then
+    added=0
+    while IFS= read -r line; do
+      grep -qxF "$line" "$attrs" 2>/dev/null && continue
+      if [ -s "$attrs" ] && [ -n "$(tail -c 1 "$attrs")" ]; then echo >>"$attrs"; fi
+      echo "$line" >>"$attrs"
+      added=1
+    done <<<"$METRICS_MERGE_LINES"
+    [ "$added" = 0 ] || echo "hooks-check: added the docs/metrics merge=devkit-metrics lines to .gitattributes; commit it"
+  fi
+  metrics_driver_heal "$ROOT" "$(dirname "${BASH_SOURCE[0]}")" hooks-check
 fi
 
 HOOKS_PATH=$(git -C "$ROOT" config --get core.hooksPath || true)
@@ -108,6 +128,15 @@ done
 
 if grep -qs 'filter=lfs' "$ROOT/.gitattributes" && ! grep -qE 'git lfs pre-push|run_hook_steps pre-push' "$ROOT/.githooks/pre-push"; then
   fail ".gitattributes uses LFS but .githooks/pre-push does not chain 'git lfs pre-push', so LFS objects never upload"
+fi
+
+if want=$(metrics_driver_wanted "$ROOT" "$(dirname "${BASH_SOURCE[0]}")"); then
+  have=$(git -C "$ROOT" config --get merge.devkit-metrics.driver || true)
+  if [ -z "$have" ]; then
+    echo "hooks-check: warning: .gitattributes names merge=devkit-metrics but this clone has no driver, so docs/metrics/*.json merge as text (fix: $0 --fix)" >&2
+  elif [ "$have" != "$want" ]; then
+    echo "hooks-check: warning: this clone's merge.devkit-metrics.driver is '$have', not the vendored '$want' (fix: $0 --fix; the next hook run sets it too)" >&2
+  fi
 fi
 
 CONF=$ROOT/scripts/ci/hooks.conf
@@ -133,6 +162,15 @@ if [ -f "$CONF" ]; then
       done
     done
   }
+  unlinted_precommit() { # <steps...>: a warning line when the Makefile has ci-lint and no step runs it
+    local step
+    case "$(cd "$ROOT" && makefile_targets)" in *" ci-lint "*) ;; *) return 0 ;; esac
+    for step in "$@"; do
+      _hook_parse_step "$step" || continue
+      case "$HOOK_STEP_TARGET" in ci-lint|ci-lint-*|ci-quick) return 0 ;; esac
+    done
+    echo "hooks-check: warning: the Makefile has ci-lint but no PRE_COMMIT_STEPS entry runs it (ci-lint, ci-lint-<area> or ci-quick), so a line-length or changed-file lint finding surfaces only at the gate; add \"lint=ci-lint\" to scripts/ci/hooks.conf"
+  }
   # One subshell sources the conf: "error <reason>" lines fail the check, other lines are warnings.
   conf_report=$(
     PRE_COMMIT_STEPS=() PRE_PUSH_STEPS=() COMMIT_MSG_STEPS=()
@@ -144,6 +182,7 @@ if [ -f "$CONF" ]; then
       _hook_parse_msg_step "$step" || { echo "error COMMIT_MSG_STEPS: $HOOK_STEP_ERROR"; break; }
     done
     slow_precommit_steps ${PRE_COMMIT_STEPS[@]+"${PRE_COMMIT_STEPS[@]}"}
+    unlinted_precommit ${PRE_COMMIT_STEPS[@]+"${PRE_COMMIT_STEPS[@]}"}
   )
   conf_error=$(grep -m1 '^error ' <<<"$conf_report" || true)
   [ -z "$conf_error" ] || fail "scripts/ci/hooks.conf ${conf_error#error }"

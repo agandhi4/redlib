@@ -17,10 +17,19 @@
 # (closet #410). --staged reads the index instead, as secrets_check.sh --staged does, for a hook
 # that must judge exactly what is about to be committed. CI and the gate see one tree either way.
 #
+# Also: GATE_CODEX_REVIEW, if the plan sets it, is one literal line `GATE_CODEX_REVIEW=0` or `=1`
+# (codex_review_setting). pr_merge.sh reads that line without sourcing the plan, so any other
+# form (`="1"`, `export`, `=yes`, a second line) would leave the opt-in silently off or ambiguous.
+#
 # Also (a WARNING, exit 0): an alternative of the plan's GATE_IMAGE_EXCLUDE_PATHS whose every
 # tracked path the root .dockerignore already excludes. The gate reads .dockerignore itself
 # (_dockerignore.py), so such an alternative is a hand copy that drifts (redlib #23, locus #133).
 # Read from a literal assignment, single-quoted or bare, the fleet's two forms.
+#
+# Also (a WARNING, exit 0): a repo tracking a tsconfig*.json and a .dockerignore whose build
+# context would still see a tsbuildinfo beside a tsconfig (probed with _dockerignore.py, so any
+# pattern that excludes it counts). A stale one copied into the image let `tsc -b` call the
+# project up to date and skip the image's type-check (locus #145); the fix is `**/*.tsbuildinfo`.
 #
 # Also (a WARNING, exit 0): a Makefile recipe line that runs `docker` itself (makefile_raw_docker,
 # bin/_makefile_lib.sh), naming the line. It bypasses the daemon probe and per-call bound, so a
@@ -35,8 +44,8 @@
 # closet) is the rule this enforces, not a breach. AGENTS.md is read like the plan: the working
 # tree, or the index under --staged.
 #
-# Also (WARNINGS, exit 0): a throwaway Postgres container name or host port the Makefile fixes
-# to a literal (makefile_fixed_pg): every worktree then shares one container, and concurrent
+# Also (WARNINGS, exit 0): a throwaway Postgres container name or host port, or a `docker run
+# --name`, the Makefile fixes to a literal (makefile_fixed_pg): every worktree then shares one container, and concurrent
 # lanes' `up` removed each other's databases mid-suite (2026-10-19). throwaway_pg.sh `name` and
 # `port` derive both from the checkout. And a Makefile that does not run its recipes on the
 # repo's pinned Node or Rust (no `SHELL := devkit/bin/toolchain_shell.sh` while .nvmrc or
@@ -111,6 +120,16 @@ while IFS= read -r copy; do
   fi
 done <<<"$(swift_format_copies)"
 [ "$copies" -eq 0 ] || exit 1
+# codex_review_setting <plan, comments stripped>: exit 1 unless every GATE_CODEX_REVIEW assignment
+# is the one literal line pr_merge.sh reads (header).
+codex_review_setting() {
+  local all literal
+  all=$(grep -cE '(^|[^A-Za-z0-9_])GATE_CODEX_REVIEW=' <<<"$1" || true)
+  literal=$(grep -cE '^GATE_CODEX_REVIEW=[01][[:space:]]*$' <<<"$1" || true)
+  [ "$all" != "$literal" ] || [ "$all" -gt 1 ] || return 0
+  echo "devkit-check: scripts/ci/gate_plan.sh: GATE_CODEX_REVIEW must be one literal line, GATE_CODEX_REVIEW=0 or GATE_CODEX_REVIEW=1 (bin/pr_merge.sh reads it without sourcing the plan)" >&2
+  exit 1
+}
 # Assignments only: a comment naming a retired variable is history, not a setting.
 if [ "$STAGED" = 1 ]; then
   plan_src=$(git show :scripts/ci/gate_plan.sh 2>/dev/null) || plan_src=""
@@ -127,6 +146,7 @@ if [ -n "$plan_src" ]; then
     fi
   done
   [ "$retired_set" -eq 0 ] || exit 1
+  codex_review_setting "$plan"
   exclude_re="^[[:space:]]*GATE_IMAGE_EXCLUDE_PATHS=('([^']*)'|([^[:space:]'\"]+))"
   while IFS= read -r line; do
     [[ "$line" =~ $exclude_re ]] || continue
@@ -141,13 +161,27 @@ if [ -n "$plan_src" ]; then
     break
   done <<<"$plan"
 fi
+if git ls-files --error-unmatch .dockerignore >/dev/null 2>&1; then
+  # One probe per directory holding a tsconfig: where `tsc -b` writes its tsbuildinfo by default.
+  probes=$(git ls-files -- 'tsconfig*.json' '**/tsconfig*.json' \
+    | awk '{ d = $0; sub(/[^\/]*$/, "", d); print d "tsconfig.tsbuildinfo" }' | sort -u)
+  if [ -n "$probes" ]; then
+    if seen=$(python3 -I "$(dirname "${BASH_SOURCE[0]}")/_dockerignore.py" keep . <<<"$probes"); then
+      [ -z "$seen" ] || echo "devkit-check: WARNING: .dockerignore lets the image build see $(head -n 1 <<<"$seen"): a stale tsbuildinfo makes tsc -b skip the image's type-check (locus #145); add: **/*.tsbuildinfo" >&2
+    else
+      echo "devkit-check: WARNING: could not hold .dockerignore to **/*.tsbuildinfo (above)" >&2
+    fi
+  fi
+fi
 while IFS= read -r raw; do
   [ -z "$raw" ] || echo "devkit-check: WARNING: ${raw%%: *}: docker runs unbounded (no daemon probe, no per-call timeout); use devkit/bin/docker_bounded.sh: ${raw#*: }" >&2
 done <<<"$(makefile_raw_docker)"
 while IFS= read -r raw; do
   [ -n "$raw" ] || continue
   kind=${raw#*: }; value=${kind#* }; kind=${kind%% *}
-  echo "devkit-check: WARNING: ${raw%%: *}: throwaway Postgres $kind $value is fixed, so every worktree shares it and concurrent lanes break each other; derive it: \$(shell devkit/bin/throwaway_pg.sh $kind <base name>)" >&2
+  what="throwaway Postgres $kind"
+  [ "$kind" != container ] || { what="docker run container name"; kind=name; }
+  echo "devkit-check: WARNING: ${raw%%: *}: $what $value is fixed, so every worktree shares it and concurrent lanes break each other; derive it: \$(shell devkit/bin/throwaway_pg.sh $kind <base name>)" >&2
 done <<<"$(makefile_fixed_pg)"
 mk_files=()
 while IFS= read -r f; do mk_files+=("$f"); done < <(makefile_files)
