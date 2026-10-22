@@ -1,17 +1,19 @@
 {
   "metrics": {
     "coupling.app.fan_in_max": 12,
+    "duplication.app.jscpd_percent": 1.79,
     "size.app.max_lines": 572,
     "size.app.over_600": 0,
     "vuln.app.critical": 0,
     "vuln.app.high": 0,
     "vuln.app.packages": 327,
-    "vuln.app.total": 7
+    "vuln.app.total": 5
   },
   "schema_version": 2,
   "skipped": [],
   "sources": {
     "coupling.app.fan_in_max": "rust-app",
+    "duplication.app.jscpd_percent": "dup",
     "size.app.max_lines": "size-app",
     "size.app.over_600": "size-app",
     "vuln.app.critical": "vuln-app",
