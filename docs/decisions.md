@@ -176,3 +176,8 @@ Consequence: devkit-check reads zero warnings; a hand-run `make ci-quick` with n
 Why: The lead's nightly launchd job runs `devkit/bin/dependency_merge.sh`, which needs devkit >= 2dabae7: pr_merge.sh's Codex exemption for bot dependency PRs (devkit #192) and dependency_merge.sh's PR-list fix (#193). redlib vendored 367dc33.
 Decision: Plain `make devkit-sync` to 5daad08 (devkit main); no repo-side changes were needed (hooks-check and devkit-check read ok).
 Consequence: redlib can join the nightly job; the job itself is installed lead-side, not from this repo.
+
+## 2026-10-22 — Firefox add-on declares no data collection; strict_min_version stays 57
+Why: AMO requires `browser_specific_settings.gecko.data_collection_permissions` on new submissions from 2025-11-03 (MDN browser_specific_settings; Extension Workshop "Firefox built-in consent for data collection"), so the add-on could not be signed without it.
+Decision: `"required": ["none"]`, since the extension sends nothing anywhere. `strict_min_version` is not raised to 140: Mozilla's older-version options apply only to extensions that collect data, and `web-ext lint` (8.3.0) reports no finding for the key at 57. `web-ext-artifacts/` (signed .xpi output) is gitignored.
+Consequence: if the add-on ever collects data, the categories go in `required`/`optional` and Firefox < 140 needs `strict_min_version` 140 or a custom consent flow.

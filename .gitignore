@@ -11,3 +11,6 @@ redlib.toml
 
 # tools/metrics/ (jscpd for the metrics ratchet; make metrics-deps)
 node_modules/
+
+# web-ext signing output (signed .xpi lands here)
+web-ext-artifacts/
