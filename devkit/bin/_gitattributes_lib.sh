@@ -26,3 +26,47 @@ has_decisions_union() {
     END { exit !found }
   ' "$1"
 }
+
+# The committed metrics files merge key by key (metrics_ratchet.py merge-driver: why, and the
+# rules), not as text: every lane's tighten rewrites them, so parallel lanes conflicted on rebase.
+# A driver is per-clone git config, never committed, so hooks_check.sh --fix sets both halves:
+# these lines and merge.devkit-metrics.driver (metrics_driver_heal, which the hooks and
+# devkit-sync also run). A clone without the config merges them as text.
+# shellcheck disable=SC2034  # read by the scripts that source this file
+METRICS_MERGE_LINES='docs/metrics/ratchet.json merge=devkit-metrics
+docs/metrics/report-only.json merge=devkit-metrics
+docs/metrics/scorecard.json merge=devkit-metrics'
+
+# metrics_merge_driver <bin dir, relative to the worktree top>: the driver command. git runs it
+# from the worktree's top level; a missing or failing driver (an older devkit in that tree, two
+# sides that changed one key's direction) falls back to git's own text merge.
+metrics_merge_driver() {
+  echo "python3 -I $1/metrics_ratchet.py merge-driver %O %A %B %P || git merge-file -q %A %O %B"
+}
+
+# metrics_driver_wanted <worktree top> <bin dir>: the driver command this clone needs for <bin
+# dir> (relative to the top when inside it, so each worktree runs its own copy), or exit 1 when
+# the top's .gitattributes names no merge=devkit-metrics.
+metrics_driver_wanted() {
+  local top bin
+  grep -qs 'merge=devkit-metrics' "$1/.gitattributes" || return 1
+  # CDPATH= : an exported CDPATH would resolve a relative <bin dir> elsewhere and print it.
+  top=$(CDPATH='' cd -P "$1" && pwd) && bin=$(CDPATH='' cd -P "$2" && pwd) || return 1
+  metrics_merge_driver "${bin#"$top"/}"
+}
+
+# metrics_driver_heal <worktree top> <bin dir> <label>: set this clone's merge.devkit-metrics
+# config to metrics_driver_wanted when it is unset or differs; one "<label>: set ..." line when it
+# changed, nothing otherwise. Used by: hooks_check.sh --fix, every hook (hook_steps.sh) and
+# devkit-sync.sh. Why all three (rollcall #78): the config is per clone, so a clone installed
+# before the driver existed, or before its command changed, text-merged docs/metrics/*.json
+# until someone reran `make install`; a commit or a sync now heals it.
+metrics_driver_heal() {
+  local want
+  want=$(metrics_driver_wanted "$1" "$2") || return 0
+  [ "$(git -C "$1" config --get merge.devkit-metrics.driver || true)" != "$want" ] || return 0
+  # The driver first: it is what git runs; a run stopped between the two still merges per key.
+  git -C "$1" config merge.devkit-metrics.driver "$want" &&
+    git -C "$1" config merge.devkit-metrics.name "devkit metrics bounds, per key" &&
+    echo "$3: set merge.devkit-metrics.driver (docs/metrics/*.json merge per key)"
+}

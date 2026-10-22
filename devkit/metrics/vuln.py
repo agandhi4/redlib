@@ -63,6 +63,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 
@@ -152,69 +153,80 @@ def npm_packages(lock: Path) -> list[tuple[str, str, str]]:
 _PNPM_KEY = re.compile(r"^(@?[^@\s']+)@([^\s'(]+)")  # name@version, before any (peer) suffix
 
 
-def pnpm_packages(lock: Path) -> list[tuple[str, str, str]]:
-    """pnpm-lock.yaml v9 production set. The lock has no per-package dev flag: production is the
-    closure of each importer's `dependencies` (not `devDependencies`/`optionalDependencies` of the
-    importer itself) through the `snapshots` graph. Two-space indentation is the structure, so
-    the sections are walked by indent; versions carry peer suffixes `1.2.3(react@19.0.0)`, which
-    both the snapshot keys and the importer `version:` lines use, so edges are matched on the
-    full string and the version reported is the part before `(`."""
-    try:
-        lines = lock.read_text().splitlines()
-    except OSError as e:
-        raise CollectorError(f"{lock}: {e}") from e
-    roots: set[str] = set()      # "name@version(peers)" the importers' dependencies name
-    edges: dict[str, set[str]] = {}  # snapshot key -> its dependencies' "name@version(peers)"
-    section = ""
-    imp_block = ""   # dependencies | devDependencies | ... within an importer
-    snap_key = ""
-    snap_block = ""
-    pending = ""     # importer dependency name awaiting its version: line
+def _pnpm_section(lines: list[str], section: str) -> Iterator[tuple[int, str]]:
+    """(indent, stripped line) for each line under one top-level section of a pnpm lock,
+    blanks and comments skipped. Two-space indentation is the structure."""
+    current = ""
     for raw in lines:
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
         indent = len(raw) - len(raw.lstrip(" "))
         line = raw.strip()
         if indent == 0:
-            section = line.rstrip(":")
-            continue
-        if section == "importers":
-            if indent == 4:
-                imp_block = line.rstrip(":")
-                pending = ""
-            elif indent == 6 and imp_block == "dependencies":
-                pending = line.rstrip(":").strip("'\"")
-            elif indent == 8 and pending and line.startswith("version:"):
-                roots.add(f"{pending}@{line.split(':', 1)[1].strip().strip(chr(39))}")
-                pending = ""
-        elif section == "snapshots":
-            if indent == 2:
-                snap_key = line.rstrip(":").strip("'\"")
-                if line.endswith("{}"):
-                    snap_key = snap_key.rstrip(": {}")
-                edges.setdefault(snap_key, set())
-                snap_block = ""
-            elif indent == 4:
-                snap_block = line.rstrip(":")
-            elif indent == 6 and snap_block in ("dependencies", "optionalDependencies"):
-                name, _, version = line.partition(":")
-                edges[snap_key].add(f"{name.strip().strip(chr(39))}@{version.strip().strip(chr(39))}")
+            current = line.rstrip(":")
+        elif current == section:
+            yield indent, line
+
+
+def _pnpm_roots(lines: list[str]) -> set[str]:
+    """Each importer's `dependencies` entry (not dev or optional) as "name@version(peers)"."""
+    roots: set[str] = set()
+    block = ""    # dependencies | devDependencies | ... within an importer
+    pending = ""  # a dependency name awaiting its version: line
+    for indent, line in _pnpm_section(lines, "importers"):
+        if indent == 4:
+            block = line.rstrip(":")
+            pending = ""
+        elif indent == 6 and block == "dependencies":
+            pending = line.rstrip(":").strip("'\"")
+        elif indent == 8 and pending and line.startswith("version:"):
+            roots.add(f"{pending}@{line.split(':', 1)[1].strip().strip(chr(39))}")
+            pending = ""
+    return roots
+
+
+def _pnpm_edges(lines: list[str]) -> dict[str, set[str]]:
+    """Snapshot key -> its dependencies' (and optional dependencies') "name@version(peers)"."""
+    edges: dict[str, set[str]] = {}
+    key = ""
+    block = ""
+    for indent, line in _pnpm_section(lines, "snapshots"):
+        if indent == 2:
+            key = line.rstrip(":").strip("'\"")
+            if line.endswith("{}"):
+                key = key.rstrip(": {}")
+            edges.setdefault(key, set())
+            block = ""
+        elif indent == 4:
+            block = line.rstrip(":")
+        elif indent == 6 and block in ("dependencies", "optionalDependencies"):
+            name, _, version = line.partition(":")
+            edges[key].add(f"{name.strip().strip(chr(39))}@{version.strip().strip(chr(39))}")
+    return edges
+
+
+def pnpm_packages(lock: Path) -> list[tuple[str, str, str]]:
+    """pnpm-lock.yaml v9 production set. The lock has no per-package dev flag: production is the
+    closure of each importer's `dependencies` (not `devDependencies`/`optionalDependencies` of the
+    importer itself) through the `snapshots` graph. Versions carry peer suffixes
+    `1.2.3(react@19.0.0)`, which both the snapshot keys and the importer `version:` lines use, so
+    edges are matched on the full string and the version reported is the part before `(`."""
+    try:
+        lines = lock.read_text().splitlines()
+    except OSError as e:
+        raise CollectorError(f"{lock}: {e}") from e
+    edges = _pnpm_edges(lines)
     if not edges:
         raise CollectorError(f"{lock}: no `snapshots` section (pnpm lockfileVersion 9 expected)")
     seen: set[str] = set()
-    todo = list(roots)
+    todo = list(_pnpm_roots(lines))
     while todo:
         key = todo.pop()
         if key in seen:
             continue
         seen.add(key)
         todo.extend(edges.get(key, ()))
-    out = []
-    for key in seen:
-        m = _PNPM_KEY.match(key)
-        if m:
-            out.append(("npm", m.group(1), m.group(2)))
-    return out
+    return [("npm", m.group(1), m.group(2)) for m in map(_PNPM_KEY.match, seen) if m]
 
 
 def cargo_packages(lock: Path) -> list[tuple[str, str, str]]:

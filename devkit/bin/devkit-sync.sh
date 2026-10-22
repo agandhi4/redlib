@@ -44,6 +44,10 @@
 # template (a repo that adopted the hooks gets every hook devkit adds: commit-msg, 2026-10-18),
 # executable when its base is; a repo with no .githooks/ gets none.
 #
+# Merge driver: after vendoring, every path below runs metrics_driver_heal
+# (bin/_gitattributes_lib.sh) with the new devkit/bin, so this clone's merge.devkit-metrics.driver
+# matches the vendored command without another `make install` (rollcall #78).
+#
 # Hooks: the sync's commit only vendors (devkit/ at .devkit-rev's tree, base copies), so the
 # repo's pre-commit runs none of its steps for it (hook_steps.sh _hook_vendoring_only) and the
 # sync commits in a fresh worktree before any install (closet, 2026-10-19).
@@ -57,6 +61,8 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_vendor_paths.sh"
 # shellcheck source=bin/_trailer_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_trailer_lib.sh"
+# shellcheck source=bin/_gitattributes_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_gitattributes_lib.sh"
 readonly DEVKIT_URL=${DEVKIT_URL:-https://github.com/agandhi4/devkit.git}
 STAGE=0
 REF=
@@ -126,6 +132,8 @@ while IFS=' ' read -r base copy; do
   echo "devkit-sync: $verb $copy from devkit/$base"
   REFRESHED+=("$copy")
 done <<<"$(base_copies)"
+metrics_driver_heal "$ROOT" "$ROOT/devkit/bin" devkit-sync \
+  || echo "devkit-sync: cannot set merge.devkit-metrics.driver (git above); make install sets it" >&2
 if [ "$CURRENT" = 1 ]; then
   [ "${#REFRESHED[@]}" -gt 0 ] || { echo "devkit at ${UPSTREAM:0:7} (tree ${UPSTREAM_TREE:0:7}), already current"; exit 0; }
   [ "$STAGE" = 1 ] || commit_sync "Refresh devkit base copies to ${UPSTREAM:0:7}" -- "${REFRESHED[@]}"

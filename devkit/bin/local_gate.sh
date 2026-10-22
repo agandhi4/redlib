@@ -68,12 +68,22 @@
 #   → 480 s` inside their parentheses. closet's db
 #   tier ran 61-65 s alone and failed 110 s twice at load ~13 on 8 cores (closet #410). The
 #   whole-gate budget is not scaled: it is the owner's wall-clock promise, load or not.
+#   The job's start-sample factor reaches its make as DEVKIT_LOAD_SCALE ("1" unscaled), and
+#   tier_guard.sh re-exports its own: lint/vitest.base.mjs multiplies vitest's testTimeout and
+#   hookTimeout by it (finplat #689's frontend-unit timed out at load 169 on 10 cores).
 #
 # Job seconds: after each job the gate writes $WT/build/metrics/gate.json, flat keys
 #   gate.<job>.seconds, plus gate.total.seconds once the jobs are done (docs/metrics-keys.md,
 #   domain `gate`, direction lower). Rewritten after every job, so a metrics job the plan runs
 #   last can merge the earlier jobs' seconds. Job names are therefore [A-Za-z0-9_-]+ and never
 #   `total` (exit 2 otherwise).
+#
+# Run logs: each run keeps its own dir, $STATE/logs/<pr>/<head7>-<n>/ (nohead-<n> when the fetch
+#   failed before a head was known), n counting up per PR. logs/<pr>/latest names the newest and
+#   logs/<pr>/gate.json is a symlink to latest/gate.json, the path every reader already uses.
+#   A run that opens removes all but the newest 5 dirs of its PR (KEEP_RUNS). Why
+#   (2026-10-20): the gate used to clear logs/<pr>/ each run, so a failure's logs were gone once
+#   the next run passed, and a triage of 40 failures found the cause of several only in runs.tsv.
 #
 # Outcome record: once a run has a log dir, its EXIT trap (every exit, an interrupt included)
 #   hands each job's verdict to bin/gate_record.py, which writes $LOGDIR/gate.json (the seconds
@@ -82,15 +92,26 @@
 #   README "Gate record". A fork refusal ends before the log dir and leaves no record. The
 #   recorder never changes the verdict or exit code; a failure to write is one stderr line.
 #
-# Concurrency: GATE_SLOTS (default 1; an integer >= 1) is how many gates may run on this machine
-#   at once, across every repo. 1 is the 2026-10-05 rule: overlapping full suites caused
-#   load-induced timing-test failures in suites the PR never touched. The merge queues and
-#   linux-box keep 1, and with 1 the lock file is exactly $GATE_LOCK, so they keep sharing it.
-#   With N > 1 the slots are $GATE_LOCK.1 .. $GATE_LOCK.N; a gate takes the first free one,
-#   else prints the waiting line and polls each slot with `flock -w 5` until one frees. A human
-#   raising it on a laptop (eight PR gates once queued serially for over an hour, 2026-10-13)
-#   accepts that timing-test risk. Gates run with different GATE_SLOTS lock different files and
-#   do not bound each other: set it once per machine (gate.env below), not per invocation.
+# Concurrency: GATE_SLOTS (an integer >= 1; default ceil(cores / 4), at least 1, from
+#   _load_lib.sh's devkit_ncpu) is how many gates may run on this machine at once, across every
+#   repo. With 1 the lock file is exactly $GATE_LOCK, the file the merge queues and linux-box
+#   have always shared; with N > 1 the slots are $GATE_LOCK.1 .. $GATE_LOCK.N. The holder writes
+#   `<repo>#<pr> pid <pid> since <utc>` into its slot file; a waiting gate opens slots for append,
+#   so it never truncates a holder's line. A gate takes the first free slot, else prints
+#   `GATE waiting for a gate slot (<n> running: <repo>#<pr>, ...)` at once and every 30 s,
+#   counting every held $GATE_LOCK* file whatever its owner's GATE_SLOTS, and polls each second.
+#   1 was the 2026-10-05 rule (overlapping full suites caused load-induced timing-test failures);
+#   load-stretched budgets and test timeouts (DEVKIT_LOAD_SCALE, "Budgets") since make a quarter of
+#   the cores the default (2026-10-20). Locks are flock(1), released by the kernel when a gate
+#   dies, so a crashed gate never leaves a stale slot. Gates run with different GATE_SLOTS lock
+#   different files and do not bound each other: set it once per machine (gate.env below).
+#   The pool is bin/_slot_lib.sh's, shared with tier_guard.sh: a tier run by hand outside a gate
+#   takes a slot too (holder `<repo>:<tier>`). The gate exports DEVKIT_SLOT_HOLDER=<its pid> to
+#   its jobs, so a tier inside a job runs on the gate's slot instead of waiting for a second.
+#   Two gates of ONE PR never overlap, whatever GATE_SLOTS: before its slot a gate locks
+#   $STATE/pr-<pr>.lock, printing `GATE waiting for another gate of PR #<pr> (pid <pid> since
+#   <utc>)` at once and every 30 s, since both would share refs/gate/pr-<pr>, the worktree and the
+#   run numbers under logs/<pr>/ (2026-10-21).
 #
 # Load: GATE_LOAD_MAX (default unset: no check; a number, decimals allowed). Before taking a
 #   slot, the gate waits while EITHER the 1- or 5-minute load average exceeds it, printing one
@@ -142,10 +163,6 @@
 set -uo pipefail
 
 readonly STATUS_CONTEXT=local-gate
-# Machine-wide, shared with every repo's gate on this box (closet's included): parallel full
-# suites on one machine cause load-induced test timeouts, so by default only one gate runs at a
-# time. GATE_SLOTS widens that deliberately (header, "Concurrency").
-readonly LOCK=${GATE_LOCK:-/tmp/linux-box-local-gate.lock}
 
 usage() { echo "usage: $0 <pr-number> [--no-post] [--expect-head <sha>]"; }
 
@@ -182,6 +199,8 @@ devkit_stay_awake
 # shellcheck source=bin/_gate_env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_gate_env.sh"
 gate_env_load local_gate "$GATE_LOCAL_KEYS" "$GATE_REMOTE_KEYS"
+# shellcheck source=bin/_load_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_load_lib.sh"
 # minutes_to_secs <VAR> <minutes>: whole seconds; a positive fraction never rounds to 0 (which
 # means "off"). Junk is a usage error naming the variable.
 minutes_to_secs() {
@@ -205,10 +224,12 @@ readonly JOB_BUDGET_SECS GATE_BUDGET_SECS
 readonly BUDGET_ENFORCE=${GATE_BUDGET_ENFORCE:-1}
 [[ "$BUDGET_ENFORCE" =~ ^[01]$ ]] \
   || { echo "local_gate: GATE_BUDGET_ENFORCE must be 0 or 1 (got '$BUDGET_ENFORCE')" >&2; exit 2; }
-readonly SLOTS=${GATE_SLOTS:-1}
-[[ "$SLOTS" =~ ^[1-9][0-9]*$ ]] \
-  || { echo "local_gate: GATE_SLOTS must be an integer >= 1 (got '$SLOTS')" >&2; exit 2; }
-command -v flock >/dev/null || { echo "local_gate: flock not found (macOS: brew install flock)" >&2; exit 2; }
+# Machine-wide, shared with every repo's gate and hand-run tier on this box (closet's included):
+# parallel full suites on one machine cause load-induced test timeouts (header, "Concurrency").
+# shellcheck source=bin/_slot_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_slot_lib.sh"
+slot_pool_init local_gate
+readonly SLOT_LOCK SLOTS
 readonly LOAD_MAX=${GATE_LOAD_MAX:-}
 [ -z "$LOAD_MAX" ] || [[ "$LOAD_MAX" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
   || { echo "local_gate: GATE_LOAD_MAX must be a number (got '$LOAD_MAX')" >&2; exit 2; }
@@ -241,8 +262,6 @@ GATE_ALLOW_FORKS=0   # set here, not read from the environment: only the plan ma
 . "$(dirname "${BASH_SOURCE[0]}")/_paths_lib.sh"
 # shellcheck source=bin/_timeout_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_timeout_lib.sh"
-# shellcheck source=bin/_load_lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/_load_lib.sh"
 # shellcheck source=/dev/null  # the repo's plan; its contract is in the header
 . "$PLAN"
 for required in GATE_SLUG GATE_STATE_NAME; do
@@ -254,7 +273,9 @@ declare -F gate_cleanup >/dev/null || gate_cleanup() { :; }
 readonly SLUG=$GATE_SLUG
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/$GATE_STATE_NAME"
 WT="$STATE/$GATE_WORKTREE_PREFIX$PR"
-LOGDIR="$STATE/logs/$PR"
+PRDIR="$STATE/logs/$PR"
+LOGDIR=""   # this run's own dir under $PRDIR, once open_run names it (header, "Run logs")
+readonly KEEP_RUNS=5
 GATE_REF="refs/gate/pr-$PR"
 
 JOB_OUTCOMES="" # "<name> <verdict> <seconds|->" lines, in run order, for the outcome record
@@ -294,19 +315,6 @@ fi
 # would otherwise leak its command-line variables into every nested make via MAKEFLAGS.
 unset MAKEFLAGS MFLAGS MAKELEVEL
 
-# slot_lock <n>: one slot keeps the plain $LOCK path, so the queues and linux-box share the file.
-slot_lock() { if [ "$SLOTS" = 1 ]; then echo "$LOCK"; else echo "$LOCK.$1"; fi; }
-# try_slots <flock-args...>: lock fd 9 on the first slot that yields; sets SLOT. The fd stays
-# open (and the lock held) until the process exits; reopening fd 9 on a miss drops nothing held.
-try_slots() {
-  local n=1
-  while [ "$n" -le "$SLOTS" ]; do
-    exec 9>"$(slot_lock "$n")"
-    if flock "$@" 9; then SLOT=$n; return 0; fi
-    n=$((n + 1))
-  done
-  return 1
-}
 # wait_for_load: header, "Load". Returns once both averages are <= LOAD_MAX, or after
 # LOAD_WAIT_SECS, or at once when the load cannot be read; never fails the gate.
 wait_for_load() {
@@ -347,11 +355,12 @@ wait_for_head() {
 wait_for_head
 wait_for_load
 
-SLOT=""
-if ! try_slots -n; then
-  echo "GATE waiting for another repo's gate to finish"
-  until try_slots -w 5; do :; done
-fi
+# Two gates of one PR share $GATE_REF, $WT and the run-number pick in $PRDIR: one would remove
+# the other's worktree and both could open the same log dir. With GATE_SLOTS > 1 nothing else
+# keeps them apart, so the second waits here for the first, before it takes a pool slot.
+mkdir -p "$STATE" || { echo "local_gate: cannot create $STATE" >&2; exit 2; }
+run_lock_acquire GATE "$STATE/pr-$PR.lock" "another gate of PR #$PR"
+slot_acquire GATE "${GATE_STATE_NAME%-gate}#$PR"
 echo "GATE slot $SLOT/$SLOTS"
 readonly GATE_T0=$SECONDS   # the whole-gate budget starts once a slot is held
 
@@ -488,7 +497,10 @@ job() { # <name> <make target> [VAR=val...]
   # The child opens $log after it is forked; create it first so the watchdog's first size read
   # never races a missing file (it printed a `wc` error line before the job's redirect ran).
   : >"$log"
-  make -C "$WT" --no-print-directory "$@" </dev/null >"$log" 2>&1 &
+  # 7>&- 9>&-: the PR lock and the slot stay with this process. A job's descendant that outlives
+  # the gate (a dev server) would otherwise hold both, and the PR's next gate would wait forever.
+  # A tier inside the job finds the slot through DEVKIT_SLOT_HOLDER, not the fd.
+  DEVKIT_LOAD_SCALE=$LOAD_SCALE make -C "$WT" --no-print-directory "$@" </dev/null >"$log" 2>&1 7>&- 9>&- &
   JOB_PGID=$!
   set +m
   if job_went_silent "$log"; then
@@ -531,10 +543,34 @@ pr_has_label() { # fail closed: a gh error means "no label", so label-relaxed ch
 # when the gate ran on another host.
 nothing_to_run() { echo "GATE all SKIPPED ($1)"; verdict PASS "$1; nothing to run on main ${MAIN_SHA:0:7}"; }
 
+# ---- run logs (header, "Run logs") --------------------------------------------------------------
+# run_numbers: "<n> <dir>" for each run dir under $PRDIR, any order.
+run_numbers() {
+  local d n
+  for d in "$PRDIR"/*-*; do
+    n=${d##*-}
+    [ -d "$d" ] && [ ! -L "$d" ] && [[ "$n" =~ ^[0-9]+$ ]] && echo "$n $d"
+  done
+}
+# open_run <head7|nohead>: create this run's dir, point latest (and gate.json) at it, prune the
+# oldest past KEEP_RUNS, and from now on leave an outcome record.
+open_run() {
+  local n d
+  mkdir -p "$PRDIR" || { echo "local_gate: cannot create $PRDIR" >&2; exit 2; }
+  # The old layout kept one run's files straight in $PRDIR; a new run replaces them, as it did.
+  for d in "$PRDIR"/*; do
+    if [ -f "$d" ] && [ ! -L "$d" ]; then rm -f "$d"; fi
+  done
+  n=$(run_numbers | sort -n | tail -1 | cut -d' ' -f1)
+  LOGDIR=$PRDIR/$1-$(( ${n:-0} + 1 ))
+  mkdir -p "$LOGDIR" || { echo "local_gate: cannot create $LOGDIR" >&2; exit 2; }
+  ln -sfn "${LOGDIR##*/}" "$PRDIR/latest"
+  ln -sfn latest/gate.json "$PRDIR/gate.json"
+  run_numbers | sort -rn | tail -n +$((KEEP_RUNS + 1)) | while read -r _ d; do rm -rf "$d"; done
+  RECORD=1
+}
+
 # ---- fetch, worktree, merge ----------------------------------------------------------------
-rm -rf "$LOGDIR"
-mkdir -p "$LOGDIR"
-RECORD=1
 
 # `+` because a force-pushed PR head is not a fast-forward of a ref a killed run left behind.
 if ! git -C "$ROOT" fetch -q origin main "+pull/$PR/head:$GATE_REF"; then
@@ -547,11 +583,13 @@ if ! git -C "$ROOT" fetch -q origin main "+pull/$PR/head:$GATE_REF"; then
   if [ "$PR_CROSS" != false ] || [ -z "$PR_BRANCH" ] || [ -z "$PR_OID" ] \
       || ! git -C "$ROOT" fetch -q origin main "+refs/heads/$PR_BRANCH:$GATE_REF" \
       || [ "$(git -C "$ROOT" rev-parse "$GATE_REF")" != "$PR_OID" ]; then
+    open_run nohead
     fail_unposted fetch
   fi
   note "pull/$PR/head missing; fetched branch $PR_BRANCH @ $PR_OID"
 fi
 HEAD_SHA=$(git -C "$ROOT" rev-parse "$GATE_REF")
+open_run "${HEAD_SHA:0:7}"
 if [ -n "$EXPECT_HEAD" ] && [ "$HEAD_SHA" != "$EXPECT_HEAD" ]; then
   fail_unposted head "GitHub head $HEAD_SHA ≠ local $EXPECT_HEAD after ${HEAD_WAIT_SECS}s; push or wait"
 fi
