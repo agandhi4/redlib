@@ -1,3 +1,6 @@
 target
 .github
 Dockerfile*
+# Dev-only metrics tooling (jscpd and its Node pin): never in the image
+tools/
+.nvmrc
