@@ -8,7 +8,10 @@ reads --json.
 Usage: gate_bite.py [--days N] [--json] [--state-home DIR] [REPO]   (REPO default: .)
 
 Sources, per machine (a remote gate's runs.tsv is on the gate host, not here):
-  gates   $XDG_STATE_HOME/<GATE_STATE_NAME>/runs.tsv; the plan's literal GATE_STATE_NAME
+  gates   $XDG_STATE_HOME/<GATE_STATE_NAME>/runs.tsv; the plan's literal GATE_STATE_NAME. A
+          `job:<name>:<hash>` rule (a failure no pattern names, gate_record.py) gets an evidence
+          row from the newest run that had it: the run's own logs/<pr>/<head7>-<n>/gate.json
+          (local_gate.sh "Run logs") holds the job's first error line and sits beside its log
   hooks   $XDG_STATE_HOME/devkit/hooks/<repo>.tsv; rows `<date> <hook> <step> <s> ok|fail [note]`;
           a failed hook run is its `total` row, a failed step any other row
   merges  `gh pr list --state merged` on the plan's GATE_SLUG, one call: each PR's head
@@ -17,10 +20,13 @@ A source that cannot be read is UNMEASURED (summary line and `"unmeasured": "<wh
 object), never a zero: no runs.tsv yet is not "no failures".
 
 Output: one summary line,
-  bite <repo> <N>d: gates <n> (fail <f>, error <e>) · hooks <n> (fail <f>) · merged <m>, unguarded <u>
-then a table, `section  key  count` rows: rule, job, hook-step, and one `unguarded #<pr>` row per
-unguarded merge with its head and local-gate state. --json prints one object instead (the
-summary's numbers, the same breakdowns, the unguarded PR list). Exit: 0, 2 a bad call.
+  bite <repo> <N>d: gates <n> (fail <f>, error <e>) · hooks <n> (fail <f>) · merged <m>,
+    unguarded <u>
+then a table, `section  key  count` rows: rule, job, evidence (`#<pr> <first error line>` per
+job:<name>:<hash> rule; `run dir pruned` once its logs are gone), hook-step, and one
+`unguarded #<pr>` row per unguarded merge with its head and local-gate state. --json prints one
+object instead (the summary's numbers, the same breakdowns, the unguarded PR list). Exit: 0,
+2 a bad call.
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ import subprocess
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 
@@ -66,6 +72,8 @@ class Gates:
     verdicts: Counter[str] = field(default_factory=Counter)
     rules: Counter[str] = field(default_factory=Counter)
     jobs: Counter[str] = field(default_factory=Counter)
+    # job:<name>:<hash> rule -> {"pr", "run", "error"} from the newest run that had it
+    evidence: dict[str, dict[str, object]] = field(default_factory=dict)
     unmeasured: str = ""
 
 
@@ -84,6 +92,36 @@ class Merges:
     unmeasured: str = ""
 
 
+def run_record(logs: Path, run: gate_record.Run) -> tuple[Path, dict[str, object]] | None:
+    """The run's own record in logs/<pr>/<head7>-<n>/, matched on head and finish time; None
+    when it was pruned or predates the per-run layout."""
+    finished = run.finished.strftime("%Y-%m-%dT%H:%M:%SZ")
+    for record in sorted((logs / str(run.pr)).glob(f"{run.head[:7] or 'nohead'}-*/gate.json")):
+        try:
+            doc = json.loads(record.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if (
+            isinstance(doc, dict)
+            and doc.get("head", "") == run.head
+            and doc.get("finished") == finished
+        ):
+            return record.parent, doc
+    return None
+
+
+def job_evidence(logs: Path, run: gate_record.Run, rule: str) -> dict[str, object]:
+    """What the run recorded for an unparsed `job:<name>:<hash>` rule."""
+    found = run_record(logs, run)
+    if found is None:
+        return {"pr": run.pr, "run": None, "error": None}
+    run_dir, doc = found
+    jobs = doc.get("jobs")
+    job = jobs.get(rule.split(":")[1], {}) if isinstance(jobs, dict) else {}
+    error = job.get("error") if isinstance(job, dict) else None
+    return {"pr": run.pr, "run": str(run_dir), "error": error}
+
+
 def read_gates(path: Path, since: datetime) -> Gates:
     g = Gates()
     if not path.is_file():
@@ -94,13 +132,16 @@ def read_gates(path: Path, since: datetime) -> Gates:
     except ValueError as exc:
         g.unmeasured = str(exc)
         return g
-    for run in runs:
+    for run in sorted(runs, key=lambda r: r.finished):
         if run.finished < since:
             continue
         g.runs += 1
         g.verdicts[run.verdict] += 1
         g.rules.update(run.rules)
         g.jobs.update(run.failed_jobs)
+        for rule in run.rules:
+            if rule.startswith("job:") and rule.count(":") == 2:
+                g.evidence[rule] = job_evidence(path.parent / "logs", run, rule)
     return g
 
 
@@ -140,15 +181,30 @@ def read_merges(slug: str, since: date) -> Merges:
     if not slug:
         m.unmeasured = "no literal GATE_SLUG in scripts/ci/gate_plan.sh"
         return m
-    cmd = ["gh", "pr", "list", "--repo", slug, "--state", "merged", "--limit", str(MERGED_LIMIT),
-           "--search", f"merged:>={since.isoformat()}", "--json", "number,mergedAt,headRefOid,statusCheckRollup"]
+    cmd = [
+        "gh",
+        "pr",
+        "list",
+        "--repo",
+        slug,
+        "--state",
+        "merged",
+        "--limit",
+        str(MERGED_LIMIT),
+        "--search",
+        f"merged:>={since.isoformat()}",
+        "--json",
+        "number,mergedAt,headRefOid,statusCheckRollup",
+    ]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     except FileNotFoundError:
         m.unmeasured = "gh not found (brew install gh)"
         return m
     if proc.returncode != 0:
-        m.unmeasured = f"gh pr list failed: {(proc.stderr.strip().splitlines() or ['no output'])[-1]}"
+        m.unmeasured = (
+            f"gh pr list failed: {(proc.stderr.strip().splitlines() or ['no output'])[-1]}"
+        )
         return m
     try:
         prs = json.loads(proc.stdout or "[]")
@@ -169,7 +225,9 @@ def summary(repo: str, days: int, g: Gates, h: Hooks, m: Merges) -> str:
     gates = ("gates unmeasured" if g.unmeasured
              else f"gates {g.runs} (fail {g.verdicts['fail']}, error {g.verdicts['error']})")
     hooks = "hooks unmeasured" if h.unmeasured else f"hooks {h.runs} (fail {h.fails})"
-    merges = "merges unmeasured" if m.unmeasured else f"merged {m.merged}, unguarded {len(m.unguarded)}"
+    merges = (
+        "merges unmeasured" if m.unmeasured else f"merged {m.merged}, unguarded {len(m.unguarded)}"
+    )
     return f"bite {repo} {days}d: {gates} · {hooks} · {merges}"
 
 
@@ -177,15 +235,39 @@ def table(g: Gates, h: Hooks, m: Merges) -> list[str]:
     rows: list[tuple[str, str, str]] = []
     rows += [("rule", k, str(n)) for k, n in g.rules.most_common()]
     rows += [("job", k, str(n)) for k, n in g.jobs.most_common()]
+    rows += [
+        (
+            "evidence",
+            k,
+            f"#{e['pr']} "
+            f"{e['error'] or ('run dir pruned' if e['run'] is None else 'no error line')}",
+        )
+        for k, e in g.evidence.items()
+    ]
     rows += [("hook-step", k, str(n)) for k, n in h.steps.most_common()]
-    rows += [("unguarded", f"#{u['pr']}", f"{str(u['head'])[:12]} {GATE_CONTEXT}={u[GATE_CONTEXT]} merged {u['merged_at']}")
-             for u in m.unguarded]
-    rows += [("unmeasured", name, why) for name, why in (("gates", g.unmeasured), ("hooks", h.unmeasured),
-                                                           ("merges", m.unmeasured)) if why]
+    rows += [
+        (
+            "unguarded",
+            f"#{u['pr']}",
+            f"{str(u['head'])[:12]} {GATE_CONTEXT}={u[GATE_CONTEXT]} merged {u['merged_at']}",
+        )
+        for u in m.unguarded
+    ]
+    rows += [
+        ("unmeasured", name, why)
+        for name, why in (
+            ("gates", g.unmeasured),
+            ("hooks", h.unmeasured),
+            ("merges", m.unmeasured),
+        )
+        if why
+    ]
     if not rows:
         return []
     width = max(len(k) for _, k, _ in rows)
-    return [f"{'section':<10}  {'key':<{width}}  count"] + [f"{s:<10}  {k:<{width}}  {c}" for s, k, c in rows]
+    return [f"{'section':<10}  {'key':<{width}}  count"] + [
+        f"{s:<10}  {k:<{width}}  {c}" for s, k, c in rows
+    ]
 
 
 def as_json(repo: str, days: int, since: date, g: Gates, h: Hooks, m: Merges) -> dict[str, object]:
@@ -196,11 +278,25 @@ def as_json(repo: str, days: int, since: date, g: Gates, h: Hooks, m: Merges) ->
         "repo": repo,
         "days": days,
         "since": since.isoformat(),
-        "gates": part(g.unmeasured, {"runs": g.runs, "pass": g.verdicts["pass"], "fail": g.verdicts["fail"],
-                                     "error": g.verdicts["error"], "rules": dict(g.rules.most_common()),
-                                     "jobs": dict(g.jobs.most_common())}),
-        "hooks": part(h.unmeasured, {"runs": h.runs, "fail": h.fails, "steps": dict(h.steps.most_common())}),
-        "merges": part(m.unmeasured, {"merged": m.merged, "unguarded": len(m.unguarded), "unguarded_prs": m.unguarded}),
+        "gates": part(
+            g.unmeasured,
+            {
+                "runs": g.runs,
+                "pass": g.verdicts["pass"],
+                "fail": g.verdicts["fail"],
+                "error": g.verdicts["error"],
+                "rules": dict(g.rules.most_common()),
+                "jobs": dict(g.jobs.most_common()),
+                "evidence": g.evidence,
+            },
+        ),
+        "hooks": part(
+            h.unmeasured, {"runs": h.runs, "fail": h.fails, "steps": dict(h.steps.most_common())}
+        ),
+        "merges": part(
+            m.unmeasured,
+            {"merged": m.merged, "unguarded": len(m.unguarded), "unguarded_prs": m.unguarded},
+        ),
     }
 
 
@@ -217,7 +313,7 @@ class Bite:
 def measure(root: Path, days: int, home: Path) -> Bite:
     """The three sources for `root` over the last `days`. Used by main and by scorecard.py's
     BITE readout, so both read the same numbers."""
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    since = datetime.now(UTC) - timedelta(days=days)
     state = identity.gate_state_name(root)
     g = (read_gates(home / state / "runs.tsv", since) if state
          else Gates(unmeasured="no literal GATE_STATE_NAME in scripts/ci/gate_plan.sh"))
@@ -227,11 +323,15 @@ def measure(root: Path, days: int, home: Path) -> Bite:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("repo", nargs="?", default=".")
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--json", action="store_true")
-    ap.add_argument("--state-home", type=Path, default=None, help="default $XDG_STATE_HOME or ~/.local/state")
+    ap.add_argument(
+        "--state-home", type=Path, default=None, help="default $XDG_STATE_HOME or ~/.local/state"
+    )
     args = ap.parse_args(argv)
     if args.days < 1:
         ap.error("--days must be >= 1")

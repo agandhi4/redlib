@@ -68,6 +68,7 @@ QUERY_TIMEOUT_SECONDS = 30.0
 RULE_SUFFIXES = (".yml", ".yaml")
 SINCE_RE = re.compile(r"(?:[0-9]+(?:ms|[smhdwy]))+")
 
+# TypeAlias, not `type Node = …`: python3 3.11 is supported (ruff.toml target-version).
 Node: TypeAlias = "str | list[Node] | dict[str, Node] | None"
 
 

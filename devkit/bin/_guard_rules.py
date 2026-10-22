@@ -750,85 +750,117 @@ def _export_list(tokens: Sequence[Tok], i: int) -> tuple[list[tuple[str, str]], 
     return names, close + 1, _id(tokens, close + 1, "from")
 
 
+@dataclass
+class _ModuleScan:
+    """module_functions' pass over one module's top level: the module it builds, the exports
+    still to resolve against its declarations, and its non-function declarations' names."""
+
+    tokens: Sequence[Tok]
+    comments: Sequence[Note]
+    module: TsModule = field(default_factory=TsModule)
+    exported: list[tuple[str, str, int]] = field(default_factory=list)  # (local, exported, line)
+    others: set[str] = field(default_factory=set)
+
+    def statement(self, i: int) -> int:
+        """Reads the top-level statement at tokens[i]; the index after it."""
+        tokens = self.tokens
+        tok = tokens[i]
+        if tok.kind == "punct":
+            return _close(tokens, i) + 1 if tok.value in _OPENERS else i + 1
+        start, exporting = i, False
+        if tok.value == "export":
+            after = self.export_form(i)
+            if after is not None:
+                return after
+            exporting, i = True, i + 1
+            tok = tokens[i] if i < len(tokens) else tok
+        if tok.value == "declare":
+            return i + 1
+        return self.declaration(i, start, exporting)
+
+    def export_form(self, i: int) -> int | None:
+        """`export {…}`, `export type {…}`, `export *` or `export default …` at tokens[i]: the
+        index after it; None for `export <declaration>`, which declaration() reads."""
+        tokens, module, nxt = self.tokens, self.module, i + 1
+        line = tokens[i].line
+        if _id(tokens, nxt, "type") and _p(tokens, nxt + 1, "{"):
+            return _export_list(tokens, nxt + 1)[1]  # type-only: erased
+        if _p(tokens, nxt, "{"):
+            names, after, chained = _export_list(tokens, nxt)
+            if chained and names:
+                module.unjudgeable.append((line, "`export { ... } from` re-exports"))
+            self.exported.extend((n, public, line) for n, public in ([] if chained else names))
+            return after
+        if _p(tokens, nxt, "*"):
+            module.unjudgeable.append((line, "`export * from` re-exports"))
+            return nxt + 1
+        if _id(tokens, nxt, "default"):
+            return self.export_default(nxt + 1, i)
+        return None
+
+    def export_default(self, i: int, start: int) -> int:
+        """`export default` whose value starts at tokens[i]; start is the `export`."""
+        tokens = self.tokens
+        comment = _leading_comment(tokens, self.comments, start)
+        if _id(tokens, i, "function") or (_id(tokens, i, "async") and _id(tokens, i + 1, "function")):
+            fn, i = _function(tokens, i, "", comment)
+            if fn is not None:
+                self.module.exported.append(replace(fn, name=fn.name or "default"))
+        elif _id(tokens, i) and tokens[i].value not in _OTHER_DECLARATIONS and _ends(tokens, i + 1):
+            self.exported.append((tokens[i].value, "default", tokens[start].line))
+            i += 1
+        elif not _id(tokens, i, "class"):
+            fn, i = _initializer(tokens, i, "default", tokens[i].line, comment)
+            self.module.exported.append(fn)
+        return i
+
+    def declaration(self, i: int, start: int, exporting: bool) -> int:
+        """A function, variable or other declaration at tokens[i] (start: its `export`, if
+        any, where the leading comment ends); the index after it."""
+        tokens, local = self.tokens, self.module.local
+        tok = tokens[i]
+        comment = _leading_comment(tokens, self.comments, start)
+        if tok.value == "function" or (tok.value == "async" and _id(tokens, i + 1, "function")):
+            fn, i = _function(tokens, i, "", comment)
+            fns = [] if fn is None else [fn]
+        elif tok.value in ("const", "let", "var"):
+            fns, i = _variables(tokens, i, comment)
+        else:
+            if tok.value in _OTHER_DECLARATIONS or tok.value == "abstract":
+                j = i + 2 if tok.value == "abstract" else i + 1
+                if _id(tokens, j):
+                    self.others.add(tokens[j].value)
+            return i + 1
+        for fn in fns:
+            local[fn.name] = fn
+            if exporting:
+                self.exported.append((fn.name, fn.name, fn.line))
+        return i
+
+    def resolve_exports(self) -> None:
+        """Each exported name, once, as its local declaration's body; one this module did not
+        declare (an import passed on) is unjudgeable."""
+        seen: set[str] = set()
+        for name, public, line in self.exported:
+            if public in seen or name in self.others:
+                continue
+            seen.add(public)
+            if name in self.module.local:
+                self.module.exported.append(replace(self.module.local[name], name=public))
+            else:
+                self.module.unjudgeable.append((line, f"exports {name}, which it does not declare"))
+
+
 def module_functions(tokens: Sequence[Tok], comments: Sequence[Note]) -> TsModule:
     """The module's exported functions, each named as exported (`export { authed as GET }` is
     GET, with authed's body); a re-export chain, or an exported name this module did not
     declare (an import passed on), is unjudgeable: the body is in another file."""
-    module = TsModule()
-    local = module.local
-    others: set[str] = set()
-    exported: list[tuple[str, str, int]] = []  # (local name, exported name, line)
+    scan = _ModuleScan(tokens, comments)
     i = 0
     while i < len(tokens):
-        tok = tokens[i]
-        if tok.kind == "punct":
-            i = _close(tokens, i) + 1 if tok.value in _OPENERS else i + 1
-            continue
-        start, exporting = i, False
-        if tok.value == "export":
-            nxt = i + 1
-            if _id(tokens, nxt, "type") and _p(tokens, nxt + 1, "{"):
-                i = _export_list(tokens, nxt + 1)[1]  # type-only: erased
-                continue
-            if _p(tokens, nxt, "{"):
-                names, i, chained = _export_list(tokens, nxt)
-                if chained and names:
-                    module.unjudgeable.append((tok.line, "`export { ... } from` re-exports"))
-                exported.extend((n, public, tok.line) for n, public in ([] if chained else names))
-                continue
-            if _p(tokens, nxt, "*"):
-                module.unjudgeable.append((tok.line, "`export * from` re-exports"))
-                i = nxt + 1
-                continue
-            if _id(tokens, nxt, "default"):
-                i = nxt + 1
-                comment = _leading_comment(tokens, comments, start)
-                if _id(tokens, i, "function") or (_id(tokens, i, "async") and _id(tokens, i + 1, "function")):
-                    fn, i = _function(tokens, i, "", comment)
-                    if fn is not None:
-                        module.exported.append(replace(fn, name=fn.name or "default"))
-                elif _id(tokens, i) and tokens[i].value not in _OTHER_DECLARATIONS and _ends(tokens, i + 1):
-                    exported.append((tokens[i].value, "default", tok.line))
-                    i += 1
-                elif not _id(tokens, i, "class"):
-                    fn, i = _initializer(tokens, i, "default", tokens[i].line, comment)
-                    module.exported.append(fn)
-                continue
-            exporting, i = True, nxt
-            tok = tokens[i] if i < len(tokens) else tok
-        if tok.value == "declare":
-            i += 1
-            continue
-        comment = _leading_comment(tokens, comments, start)
-        if tok.value == "function" or (tok.value == "async" and _id(tokens, i + 1, "function")):
-            fn, i = _function(tokens, i, "", comment)
-            if fn is not None:
-                local[fn.name] = fn
-                if exporting:
-                    exported.append((fn.name, fn.name, fn.line))
-            continue
-        if tok.value in ("const", "let", "var"):
-            fns, i = _variables(tokens, i, comment)
-            for fn in fns:
-                local[fn.name] = fn
-                if exporting:
-                    exported.append((fn.name, fn.name, fn.line))
-            continue
-        if tok.value in _OTHER_DECLARATIONS or tok.value == "abstract":
-            j = i + 2 if tok.value == "abstract" else i + 1
-            if _id(tokens, j):
-                others.add(tokens[j].value)
-        i += 1
-    seen: set[str] = set()
-    for name, public, line in exported:
-        if public in seen or name in others:
-            continue
-        seen.add(public)
-        if name in local:
-            module.exported.append(replace(local[name], name=public))
-        else:
-            module.unjudgeable.append((line, f"exports {name}, which it does not declare"))
-    return module
+        i = scan.statement(i)
+    scan.resolve_exports()
+    return scan.module
 
 
 def _ends(tokens: Sequence[Tok], i: int) -> bool:

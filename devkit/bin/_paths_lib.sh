@@ -29,16 +29,20 @@ DEVKIT_AREA_ORDER="docs backend frontend native tooling other"
 
 # Never run from the merged tree by a job: the gate and hook machinery (run from the invoking
 # checkout, main's copy), the guards ci-quick runs (devkit-check, docs/toolchain/workflows/
-# release/ci-targets checks, own-commit, hooks_check and their libs), and fleet operations run
-# from a devkit checkout or after merge (sync, new, monthly audit, ship_tag in publish.yml), and
-# machine setup (install_gh_shim.sh, whose --check the scorecard reads).
-DEVKIT_TOOLING_BIN="local_gate.sh gate.sh remote_gate.sh _gate_env.sh _paths_lib.sh
+# release/ci-targets checks, own-commit, ios-check, hooks_check and their libs), and fleet
+# operations run from a devkit checkout or after merge (sync, new, monthly audit, ship_tag in
+# publish.yml, the nightly dependency merge), machine setup (install_gh_shim.sh, whose --check
+# the scorecard reads; install_dependency_merge.sh), and
+# ios_device.sh, which only a person's `make ios-install` runs against a phone.
+DEVKIT_TOOLING_BIN="local_gate.sh gate.sh remote_gate.sh _paths_lib.sh
   hook_steps.sh quiet_run.sh push_ranges.sh hooks_check.sh
   devkit-check.sh _vendor_paths.sh docs_check.sh toolchain_check.sh ci_targets_check.sh
   _makefile_lib.sh workflows_check.sh _workflows_lib.sh release_check.sh _dockerfile_lib.sh
   _gitattributes_lib.sh _trailer_lib.sh own_commit_check.py _dockerignore.py py_cognitive_lint.py changed_lint.py _changed_files.py
   devkit-sync.sh devkit-new.sh monthly_audit.sh dead_alert_audit.py ship_tag.sh scorecard.py agent_cost.py secrets_check.sh migration_check.py
-  gate_record.py pr_merge.sh gate_bite.py _repo_identity.py _renovate.py install_gh_shim.sh"
+  gate_record.py pr_merge.sh codex_review.py gate_bite.py _repo_identity.py _renovate.py install_gh_shim.sh
+  dependency_merge.sh _dependency_pr.py install_dependency_merge.sh
+  ios_check.py ios_device.sh"
 # What the image group exercises (ci-smoke/ci-image boot through them): tooling, but a change
 # to one runs the image group even when nothing else would.
 DEVKIT_IMAGE_BIN="boot_image.sh contract_probe.sh"
@@ -48,14 +52,17 @@ DEVKIT_IMAGE_BIN="boot_image.sh contract_probe.sh"
 # pinned linter metrics/shell.py and a lint step run); layer_check.py
 # and guard_check.py, ci-quick guards that are also the metrics job's `layers` and `guards`
 # collectors, and the modules they load, _source_tree.py, _ts_lex.py, _guard_rules.py and
-# _compose.py (vuln.py --compose reads it too); the
-# timeout and load libs, and docker_bounded.sh, which a recipe's docker call runs through): other. Only
+# _compose.py (vuln.py --compose reads it too); codegen_drift.sh, which finplat's drift job
+# runs; the
+# timeout and load libs, docker_bounded.sh, which a recipe's docker call runs through, and the
+# slot pool and gate.env parser tier_guard.sh sources): other. Only
 # a record of the decision; the classification needs no lookup for other.
 # shellcheck disable=SC2034  # read by tests/gate_contract.bats (every bin/ file listed once)
 DEVKIT_JOB_BIN="tier_guard.sh throwaway_pg.sh playwright_browsers.sh node_toolchain.sh
   rust_toolchain.sh toolchain_path.sh toolchain_exec.sh toolchain_shell.sh cargo_tool.sh metrics_ratchet.py metrics_collect.sh layer_check.py
   guard_check.py _source_tree.py _ts_lex.py _guard_rules.py _compose.py _timeout_lib.sh _load_lib.sh
-  docker_bounded.sh release_tool.sh shellcheck.sh _awake_lib.sh"
+  docker_bounded.sh release_tool.sh shellcheck.sh _awake_lib.sh _slot_lib.sh _gate_env.sh
+  codegen_drift.sh"
 
 # <path>: set DEVKIT_AREA (no subshell; devkit_areas calls it once per changed path).
 _devkit_area() {
@@ -100,9 +107,12 @@ _devkit_area() {
         *) DEVKIT_AREA=other ;;
       esac
       ;;
+    # kitchen server/vue3/: Tandoor's Vue 3 frontend, vendored inside its Django server/.
+    # Above server/* so a UI-only change runs the frontend group, not the backend's.
+    server/vue3/*) DEVKIT_AREA=frontend ;;
     # finplat, Orbit backend/; locus server/ plus its root-level Python project (tests/,
-    # alembic, pyproject.toml, uv.lock). rollcall's tests/ lands here too, harmlessly: its
-    # steps are generic targets, which run for any non-docs area.
+    # alembic, pyproject.toml, uv.lock); kitchen server/ (Tandoor's Django). rollcall's tests/
+    # lands here too, harmlessly: its steps are generic targets, which run for any non-docs area.
     backend/*|server/*|tests/*|alembic/*|alembic.ini|pyproject.toml|uv.lock) DEVKIT_AREA=backend ;;
     # finplat, Orbit frontend/; locus, instalite web/; Orbit's Playwright e2e/.
     frontend/*|web/*|e2e/*) DEVKIT_AREA=frontend ;;

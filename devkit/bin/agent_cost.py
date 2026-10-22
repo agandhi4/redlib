@@ -19,15 +19,17 @@ cache_read_tokens gate_rounds gate_fails gate_total_s merged
   api_calls          distinct assistant message ids (one API response is written as several
                      records sharing `message.id`; usage is taken once, from the last),
                      attributed to the PR the agent was working on: from the PR's first URL until
-                     its `gh pr merge` or `make merge PR=`; calls made before a PR exists (its run-up, including the
-                     `gh pr create`) go to the next PR that appears, trailing calls to the last.
+                     its `gh pr merge` or `make merge PR=`; calls made before a PR exists (its
+                     run-up, including the `gh pr create`) go to the next PR that appears,
+                     trailing calls to the last.
                      An agent that shipped three PRs is split, never triple-counted.
   tool_calls         tool_use blocks
   output_tokens      sum of usage.output_tokens; cache_read_tokens sum of cache_read_input_tokens
   gate_rounds        `make gate PR=<n>` / `gate.sh <n>` invocations the agent made for this PR
   gate_fails         `GATE <job> FAIL` lines the agent saw in tool results while working on it
   gate_total_s       gate.total.seconds from the state dir, or - when the gate ran elsewhere
-  merged             1 when `gh pr merge <n>` or `make merge PR=<n>` ran or a merge result was seen, else 0
+  merged             1 when `gh pr merge <n>` or `make merge PR=<n>` ran or a merge result was
+                     seen, else 0
 
 Project dir: ~/.claude/projects/<cwd with / replaced by ->, as Claude Code lays it out; pass
 --project-dir for another checkout. The reference parser is claude-kit's
@@ -42,12 +44,26 @@ import json
 import os
 import re
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from statistics import mean, median
 
-COLUMNS = ["date", "repo", "pr", "agent", "api_calls", "tool_calls", "output_tokens", "cache_read_tokens", "gate_rounds", "gate_fails", "gate_total_s", "merged"]
+COLUMNS = [
+    "date",
+    "repo",
+    "pr",
+    "agent",
+    "api_calls",
+    "tool_calls",
+    "output_tokens",
+    "cache_read_tokens",
+    "gate_rounds",
+    "gate_fails",
+    "gate_total_s",
+    "merged",
+]
 PR_URL = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/(\d+)")
 REPOS_JSON = Path(__file__).resolve().parent.parent / "github" / "repos.json"
 
@@ -61,7 +77,9 @@ def default_owner() -> str:
         return ""
 GATE_CMD = re.compile(r"(?:make\s+(?:-C\s+\S+\s+)?gate\s+PR=|gate\.sh\s+)(\d+)")
 GATE_FAIL = re.compile(r"^GATE \S+ FAIL", re.M)
-MERGE_CMD = re.compile(r"(?:gh pr merge\s+|make\s+(?:-C\s+\S+\s+)?merge\s+PR=|pr_merge\.sh\s+)(\d+)")
+MERGE_CMD = re.compile(
+    r"(?:gh pr merge\s+|make\s+(?:-C\s+\S+\s+)?merge\s+PR=|pr_merge\.sh\s+)(\d+)"
+)
 
 
 @dataclass
@@ -110,12 +128,13 @@ def note_pr(run: AgentRun, repo: str, pr: int) -> dict:
     return run.prs.setdefault((repo.lower(), pr), {"gate_rounds": 0, "gate_fails": 0, "merged": 0})
 
 
-def read_agent(name: str, path: Path, owner: str = "") -> AgentRun:
-    run = AgentRun(name=name, path=path)
-    usage_by_id: dict[str, dict] = {}
-    # (kind, id or None, PR current when it happened); kind "u" = an API response, "t" = a tool call.
-    events: list[tuple[str, str, tuple[str, int] | None]] = []
-    current: tuple[str, int] | None = None  # the PR the agent is working on, from the last NEW URL seen
+# An event: (kind, usage id or "", the PR current when it happened); kind "u" = an API
+# response, "t" = a tool call.
+Event = tuple[str, str, tuple[str, int] | None]
+
+
+def transcript_records(path: Path) -> Iterator[dict]:
+    """The transcript's JSON records, skipping blank and unparseable lines."""
     with path.open(encoding="utf-8") as fh:
         for raw in fh:
             raw = raw.strip()
@@ -125,52 +144,82 @@ def read_agent(name: str, path: Path, owner: str = "") -> AgentRun:
                 rec = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-            ts = rec.get("timestamp")
-            if isinstance(ts, str) and len(ts) >= 10:
-                run.last_day = ts[:10]
-            msg = rec.get("message")
-            if not isinstance(msg, dict):
+            if isinstance(rec, dict):
+                yield rec
+
+
+@dataclass
+class TranscriptScan:
+    """read_agent's pass over one transcript: what each record adds to the run, in order."""
+
+    run: AgentRun
+    owner: str
+    usage_by_id: dict[str, dict] = field(default_factory=dict)
+    events: list[Event] = field(default_factory=list)
+    current: tuple[str, int] | None = None  # the PR being worked on, from the last NEW URL seen
+
+    def record(self, rec: dict) -> None:
+        ts = rec.get("timestamp")
+        if isinstance(ts, str) and len(ts) >= 10:
+            self.run.last_day = ts[:10]
+        msg = rec.get("message")
+        if not isinstance(msg, dict):
+            return
+        content = msg.get("content")
+        if rec.get("type") == "assistant":
+            self.assistant(rec, msg, content)
+        text = text_of(content)
+        self.pr_mentions(text)
+        if rec.get("type") == "user" and self.current and GATE_FAIL.search(text):
+            self.run.prs[self.current]["gate_fails"] += len(GATE_FAIL.findall(text))
+
+    def assistant(self, rec: dict, msg: dict, content: object) -> None:
+        mid = msg.get("id") or rec.get("uuid") or ""
+        if isinstance(msg.get("usage"), dict):
+            if mid not in self.usage_by_id:
+                self.events.append(("u", mid, self.current))
+            self.usage_by_id[mid] = msg["usage"]
+        if not isinstance(content, list):
+            return
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                self.events.append(("t", "", self.current))
+                tool_input = b.get("input")
+                cmd = tool_input.get("command") if isinstance(tool_input, dict) else None
+                if isinstance(cmd, str):
+                    self.command(cmd)
+
+    def pr_key(self, n: int) -> tuple[str, int] | None:
+        """The PR a bare number in a command names: an earlier-seen PR with that number."""
+        return next((k for k in self.run.prs if k[1] == n), None)
+
+    def command(self, cmd: str) -> None:
+        for n in map(int, GATE_CMD.findall(cmd)):
+            key = self.current if self.current and self.current[1] == n else self.pr_key(n)
+            if key:
+                self.run.prs[key]["gate_rounds"] += 1
+        for n in map(int, MERGE_CMD.findall(cmd)):
+            key = self.pr_key(n)
+            if key:
+                self.run.prs[key]["merged"] = 1
+                if self.current == key:
+                    self.current = None  # what follows is the next PR's run-up
+
+    def pr_mentions(self, text: str) -> None:
+        for url_owner, repo, n in PR_URL.findall(text):
+            if self.owner and url_owner.lower() != self.owner.lower():
                 continue
-            content = msg.get("content")
-            if rec.get("type") == "assistant":
-                mid = msg.get("id") or rec.get("uuid") or ""
-                if isinstance(msg.get("usage"), dict):
-                    if mid not in usage_by_id:
-                        events.append(("u", mid, current))
-                    usage_by_id[mid] = msg["usage"]
-                if isinstance(content, list):
-                    for b in content:
-                        if isinstance(b, dict) and b.get("type") == "tool_use":
-                            events.append(("t", "", current))
-                            cmd = b.get("input", {}).get("command") if isinstance(b.get("input"), dict) else None
-                            if isinstance(cmd, str):
-                                for n in GATE_CMD.findall(cmd):
-                                    key = current if current and current[1] == int(n) else next((k for k in run.prs if k[1] == int(n)), None)
-                                    if key:
-                                        run.prs[key]["gate_rounds"] += 1
-                                for n in MERGE_CMD.findall(cmd):
-                                    key = next((k for k in run.prs if k[1] == int(n)), None)
-                                    if key:
-                                        run.prs[key]["merged"] = 1
-                                        if current == key:
-                                            current = None  # what follows is the next PR's run-up
-            text = text_of(content)
-            for url_owner, repo, n in PR_URL.findall(text):
-                if owner and url_owner.lower() != owner.lower():
-                    continue
-                key = (repo.lower(), int(n))
-                if key not in run.prs:
-                    current = key  # a new PR starts a segment; re-mentions of an old one do not
-                note_pr(run, repo, int(n))
-            if rec.get("type") == "user" and current and GATE_FAIL.search(text):
-                run.prs[current]["gate_fails"] += len(GATE_FAIL.findall(text))
-    run.api_calls = len(usage_by_id)
-    for key in run.prs:
-        run.prs[key].update(api_calls=0, output_tokens=0, cache_read_tokens=0, tool_calls=0)
-    # Events with no PR (a run-up, or after a merge) belong to the next PR that appears; trailing
-    # ones to the last PR.
-    assigned: list[tuple[str, str, tuple[str, int] | None]] = []
-    pending: list[tuple[str, str, None]] = []
+            key = (repo.lower(), int(n))
+            if key not in self.run.prs:
+                self.current = key  # a new PR starts a segment; re-mentions of an old one do not
+            note_pr(self.run, repo, int(n))
+
+
+def assign_events(events: list[Event], prs: dict[tuple[str, int], dict]) -> list[Event]:
+    """Events with no PR (a run-up, or after a merge) belong to the next PR that appears;
+    trailing ones to the last PR."""
+    assigned: list[Event] = []
+    pending: list[Event] = []
     for ev in events:
         if ev[2] is None:
             pending.append(ev)
@@ -178,23 +227,40 @@ def read_agent(name: str, path: Path, owner: str = "") -> AgentRun:
         assigned.extend((k, i, ev[2]) for k, i, _ in pending)
         pending.clear()
         assigned.append(ev)
-    last = next(reversed(run.prs), None)
+    last = next(reversed(prs), None)
     assigned.extend((k, i, last) for k, i, _ in pending)
+    return assigned
+
+
+def tally(run: AgentRun, assigned: list[Event], usage_by_id: dict[str, dict]) -> None:
+    """Add each event to the run's totals and to its PR's counters."""
+    for key in run.prs:
+        run.prs[key].update(api_calls=0, output_tokens=0, cache_read_tokens=0, tool_calls=0)
     for kind, mid, key in assigned:
-        if kind == "u":
-            u = usage_by_id[mid]
-            run.output_tokens += int(u.get("output_tokens") or 0)
-            run.cache_read_tokens += int(u.get("cache_read_input_tokens") or 0)
-        else:
+        pr = run.prs.get(key) if key else None
+        if kind == "t":
             run.tool_calls += 1
-        if key not in run.prs:
+            if pr is not None:
+                pr["tool_calls"] += 1
             continue
-        if kind == "u":
-            run.prs[key]["api_calls"] += 1
-            run.prs[key]["output_tokens"] += int(u.get("output_tokens") or 0)
-            run.prs[key]["cache_read_tokens"] += int(u.get("cache_read_input_tokens") or 0)
-        else:
-            run.prs[key]["tool_calls"] += 1
+        u = usage_by_id[mid]
+        output = int(u.get("output_tokens") or 0)
+        cache_read = int(u.get("cache_read_input_tokens") or 0)
+        run.output_tokens += output
+        run.cache_read_tokens += cache_read
+        if pr is not None:
+            pr["api_calls"] += 1
+            pr["output_tokens"] += output
+            pr["cache_read_tokens"] += cache_read
+
+
+def read_agent(name: str, path: Path, owner: str = "") -> AgentRun:
+    scan = TranscriptScan(AgentRun(name=name, path=path), owner)
+    for rec in transcript_records(path):
+        scan.record(rec)
+    run = scan.run
+    run.api_calls = len(scan.usage_by_id)
+    tally(run, assign_events(scan.events, run.prs), scan.usage_by_id)
     return run
 
 
@@ -212,7 +278,11 @@ def gate_total(state_home: Path, repo: str, pr: int) -> str:
 
 def transcripts(project: Path, sessions: list[str]) -> list[Path]:
     paths: list[Path] = []
-    roots = [Path(s) if s.endswith(".jsonl") else project / f"{s}.jsonl" for s in sessions] if sessions else sorted(project.glob("*.jsonl"))
+    roots = (
+        [Path(s) if s.endswith(".jsonl") else project / f"{s}.jsonl" for s in sessions]
+        if sessions
+        else sorted(project.glob("*.jsonl"))
+    )
     for lead in roots:
         if lead.is_file():
             paths.append(lead)
@@ -228,7 +298,7 @@ def load_ledger(path: Path) -> list[dict[str, str]]:
     lines = path.read_text().splitlines()
     if not lines or lines[0].split("\t") != COLUMNS:
         sys.exit(f"agent_cost: {path}: header is not {' '.join(COLUMNS)}")
-    return [dict(zip(COLUMNS, l.split("\t"))) for l in lines[1:] if l.strip()]
+    return [dict(zip(COLUMNS, line.split("\t"))) for line in lines[1:] if line.strip()]
 
 
 def summary(rows: list[dict[str, str]]) -> str:
@@ -246,15 +316,28 @@ def summary(rows: list[dict[str, str]]) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--project-dir")
     ap.add_argument("--session", action="append", default=[])
     ap.add_argument("--since", help="skip agents whose last activity is before YYYY-MM-DD")
-    ap.add_argument("--out", default=str(Path(__file__).resolve().parent.parent / "docs" / "agent-cost.tsv"))
-    ap.add_argument("--state-home", default=os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state"))
+    ap.add_argument(
+        "--out", default=str(Path(__file__).resolve().parent.parent / "docs" / "agent-cost.tsv")
+    )
+    ap.add_argument(
+        "--state-home",
+        default=os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state"),
+    )
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--summary", action="store_true", help="print per-repo medians from the ledger and exit")
-    ap.add_argument("--owner", default=default_owner(), help="only PRs under this GitHub owner (default: github/repos.json)")
+    ap.add_argument(
+        "--summary", action="store_true", help="print per-repo medians from the ledger and exit"
+    )
+    ap.add_argument(
+        "--owner",
+        default=default_owner(),
+        help="only PRs under this GitHub owner (default: github/repos.json)",
+    )
     args = ap.parse_args()
     out = Path(args.out)
     rows = load_ledger(out)
@@ -268,24 +351,36 @@ def main() -> int:
     seen = {(r["repo"], r["pr"], r["agent"]) for r in rows}
     new: list[dict[str, str]] = []
     for path in transcripts(project, args.session):
-        run = read_agent(agent_name(path) if "subagents" in path.parts else "lead", path, args.owner)
+        run = read_agent(
+            agent_name(path) if "subagents" in path.parts else "lead", path, args.owner
+        )
         if args.since and run.last_day and run.last_day < args.since:
             continue
         for (repo, pr), c in sorted(run.prs.items()):
             key = (repo, str(pr), run.name)
             if key in seen:
                 continue
-            # A PR only mentioned in passing (a link in a brief or a report) cost this agent nothing.
+            # A PR only mentioned in passing (a link in a brief or a report) cost this agent
+            # nothing.
             if c["api_calls"] == 0 and c["gate_rounds"] == 0 and not c["merged"]:
                 continue
             seen.add(key)
-            new.append({
-                "date": run.last_day or date.today().isoformat(), "repo": repo, "pr": str(pr), "agent": run.name,
-                "api_calls": str(c["api_calls"]), "tool_calls": str(c["tool_calls"]),
-                "output_tokens": str(c["output_tokens"]), "cache_read_tokens": str(c["cache_read_tokens"]),
-                "gate_rounds": str(c["gate_rounds"]), "gate_fails": str(c["gate_fails"]),
-                "gate_total_s": gate_total(Path(args.state_home), repo, pr), "merged": str(c["merged"]),
-            })
+            new.append(
+                {
+                    "date": run.last_day or date.today().isoformat(),
+                    "repo": repo,
+                    "pr": str(pr),
+                    "agent": run.name,
+                    "api_calls": str(c["api_calls"]),
+                    "tool_calls": str(c["tool_calls"]),
+                    "output_tokens": str(c["output_tokens"]),
+                    "cache_read_tokens": str(c["cache_read_tokens"]),
+                    "gate_rounds": str(c["gate_rounds"]),
+                    "gate_fails": str(c["gate_fails"]),
+                    "gate_total_s": gate_total(Path(args.state_home), repo, pr),
+                    "merged": str(c["merged"]),
+                }
+            )
     for r in new:
         print("agent-cost: " + " ".join(f"{k}={r[k]}" for k in COLUMNS))
     if not args.dry_run and new:

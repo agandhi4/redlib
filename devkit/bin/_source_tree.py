@@ -117,12 +117,16 @@ class SourceTree:
         return self.root.rstrip("/") or "."
 
 
+# TypeVar, not `def f[T]`/`type X[T]`: consumers run this on python3 3.11 (ruff.toml
+# target-version), where PEP 695 syntax is a SyntaxError.
 T = TypeVar("T", bound=SourceTree)
 # (section, tokens, "<conf>:<line>", line number): a tool's own directives.
 Directive = Callable[[T, list[str], str, int], None]
 
 
-def parse_sections(path: Path, make: Callable[[str, int], T], directive: Directive[T]) -> list[T]:
+def parse_sections(
+    path: Path, make: Callable[[str, int], T], directive: Directive[T]
+) -> list[T]:
     """Every section of the conf, its tree keys applied here and every other directive handed
     to `directive`, which raises ConfError for a word it does not know."""
     try:
