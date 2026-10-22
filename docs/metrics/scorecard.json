@@ -1,4 +1,4 @@
 {
   "_comment": "scorecard ratchet: the committed WIRED share of the repo-scoped checks (bin/scorecard.py --mode check|tighten|rebaseline); never edit by hand",
-  "wired": 0.933
+  "wired": 1.0
 }

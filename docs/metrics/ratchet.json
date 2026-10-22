@@ -28,5 +28,10 @@
     "bound": 0,
     "direction": "lower",
     "source": "rust-app"
+  },
+  "duplication.app.clones": {
+    "bound": 16,
+    "direction": "lower",
+    "source": "dup"
   }
 }

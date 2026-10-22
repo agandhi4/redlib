@@ -14,6 +14,7 @@ Personal fork by agandhi4, single instance at `reddit.box`. The README covers co
 
   Cherry-pick (`git cherry-pick -x <sha>`) security fixes and Reddit API/OAuth changes (new app versions in `oauth_resources.rs`, endpoint or JSON shape changes); skip UI, themes, layout and deployment recipes, which this fork replaced. Record each pick, or a skipped change that matters, in this file. When a pick moves the effective upstream base, note the new upstream sha here.
 - **Removed upstream files (2026-10-13):** `docker-compose.yml` (the homelab repo owns the stack), `redlib.container` (Podman Quadlet), `contrib/` (systemd, launchd), `.replit`, `app.json` (Heroku), `flake.nix`/`flake.lock`/`.envrc` (nix), `.devcontainer/`, `.github/ISSUE_TEMPLATE/`, `.github/FUNDING.yml`, `seccomp-redlib.json` (upstream's Docker seccomp profile; the homelab stack does not use it). `Dockerfile.alpine` became `Dockerfile`. Kept on purpose: `CREDITS` + `scripts/gen-credits.sh` (attribution), `scripts/update_oauth_resources.sh` and `scripts/update_hls_js.sh` (still how those vendored resources refresh), `scripts/load_test.py`.
+- **Fork-only tooling (never upstream's, so never a cherry-pick conflict):** `devkit/` (vendored), `scripts/ci/`, `docs/metrics/`, and since 2026-10-21 `tools/metrics/` (the pinned, dev-only jscpd and its lockfile) with the root `.nvmrc` that pins its Node. Upstream has none of these paths; if a pick ever touches one, keep this fork's side.
 
 ## Layout: oldreddit only (v0.36–0.37)
 

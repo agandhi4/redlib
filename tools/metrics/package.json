@@ -1,0 +1,8 @@
+{
+  "name": "metrics-tools",
+  "private": true,
+  "description": "The npm tools scripts/ci/metrics.conf runs in this Rust repo (jscpd); make metrics-deps installs them",
+  "devDependencies": {
+    "jscpd": "5.4.2"
+  }
+}
