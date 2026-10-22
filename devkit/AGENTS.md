@@ -13,8 +13,9 @@ agent more than it catches is overhead, not standardization.
 - Portable shell: macOS bash 3.2 + GNU bash; BSD + GNU coreutils. Empty arrays under `set -u`
   use `${a[@]+"${a[@]}"}`. No `readarray`, no `declare -A`, no GNU-only `sed -i` without `''`.
 - `shellcheck -s bash` (0.11) clean; `bats tests/` green before any push. CI runs both. On a
-  Mac, bats runs under /bin/bash 3.2, where a false `[[ … ]]` that is not a test's last line
-  passes silently: a Mac run is a smoke test, CI (bash 5, mawk) is the verdict.
+  Mac, bats runs under /bin/bash 3.2, where a false `[[ … ]]` or `(( … ))` mid-test fails
+  nothing (and `! cmd` or `[ a ] && [ b ]` never do, on any bash): every such assertion ends
+  `|| false`. ci-lint holds it (`bin/bats_assert_check.py`, `--fix` appends it).
 
 ## Architecture
 Scripts in `bin/` and the shared metrics collectors in `metrics/`, vendored by consumers (the
@@ -22,7 +23,7 @@ paths in `VENDOR_PATHS`); fleet operations in `github/`; `devkit new` scaffolds 
 is README.md "Architecture". Invariants of the design:
 - Output contracts are APIs. `bin/local_gate.sh` prints `GATE <job> PASS|FAIL|SKIPPED|WATCHDOG|OVERBUDGET …` and
   `VERDICT PASS|FAIL head=<sha> main=<sha>`; `finplat_merge_queue.sh`, `mac_merge_queue.sh`
-  and `worker.py` parse them. `bin/tier_guard.sh` prints `TIER <tier>: …|FAIL|FLOOR|OVERBUDGET …`
+  and `worker.py` parse them. `bin/tier_guard.sh` prints `TIER <tier>: …|FAIL|FLOOR|OVERBUDGET|NOSHIFT …`
   and exits with the command's code, 1 for its own verdict, 2 for a bad call. The gate's outcome
   record (`logs/<pr>/gate.json`, `runs.tsv`; README "Gate record") is an API too. `.devkit-rev` is `<upstream commit> <tree sha>`,
   the tree filtered to `VENDOR_PATHS`. A new file consumers run must sit under a listed path.
@@ -36,10 +37,20 @@ is README.md "Architecture". Invariants of the design:
   provision them through `toolchain_path.sh`, the one code path; never inline it again.
   `toolchain_check.sh` holds Dockerfiles, workflows and manifests to them. Never pin a
   toolchain version anywhere else.
+- devkit's own .py tools run on `"$DEVKIT_PYTHON"` (`devkit_python`, `bin/_toolchain_lib.sh`) in
+  bin/*.sh and on `bin/python.sh` in Makefiles, never a bare `python3`: under launchd that is
+  Xcode's 3.9 (tests/toolchain_resolver.bats greps for it).
+- A tool a gate job calls by bare name that this Mac installs off launchd's PATH is found by
+  `_toolchain_lib.sh` (`devkit_tool`, one entry in `DEVKIT_TOOLCHAIN_TOOLS` plus its marker in
+  `devkit_declared_tools`) and linked alone into the toolchain directory, never a second
+  resolver and never an interpreter's whole bin/. The gate preflight (`devkit_preflight`) names
+  every missing tool in one error.
 - Every repo's `gate` target is `devkit/bin/gate.sh "$(PR)" $(GATE_ARGS)`. Where gates run is
   per machine (`GATE_REMOTE_HOST` in `~/.config/devkit/gate.env`), never per repo, except a plan's
   literal `GATE_REMOTE=0` for a gate only a Mac can run.
 - Fail loudly on a missing tool (`flock`, `gh`) with the install hint; never degrade silently.
+- A pytest or vitest tier must not rot with real time: the plan reruns it shifted (`GATE_JOBS_CLOCK`, README
+  "Clock shift"), and what a shift cannot reach is a `scripts/ci/clock_shift.conf` line with its reason.
 - `ci-metrics` is `bin/metrics_collect.sh` over the repo's `scripts/ci/metrics.conf`, run as
   the gate's last job and nowhere else (not a hook, not Actions). Bounds never track `gate.*`,
   `tier.*` or `tests.*`; a collector that cannot run is exit 2, never a silent skip.

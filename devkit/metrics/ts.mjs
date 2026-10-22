@@ -603,7 +603,7 @@ function collect(opts) {
   const excluded = excludedFiles(opts, production);
   const files = production.filter((f) => !excluded.has(f));
   if (opts.exclude.length > 0) {
-    process.stderr.write(`metrics/${SCRIPT}: excluded ${excluded.size} files: ${[...excluded].map((f) => shown(opts, f)).join(" ")}\n`);
+    process.stderr.write(`metrics/${SCRIPT}: excluded ${excluded.size} files: ${[...excluded].sort().map((f) => shown(opts, f)).join(" ")}\n`);
     add({ keys: { [`meta.${opts.scope}.excluded_files`]: excluded.size }, findings: {} });
   }
   if (opts.cyclomatic) add(collectCyclomatic(opts, files));

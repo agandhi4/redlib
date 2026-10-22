@@ -124,6 +124,8 @@ set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 RATCHET=$HERE/metrics_ratchet.py
+# shellcheck source=bin/_gate_env.sh  # fetch_main: merge_needed reads a current origin/main
+. "$HERE/_gate_env.sh"
 # Where every collector writes, and where local_gate.sh and tier_guard.sh already wrote: the
 # merge reads the whole directory.
 readonly COLLECT_DIR=build/metrics
@@ -204,7 +206,7 @@ quick_args() {
 # outside the gate, not already inside one, and with an origin/main HEAD does not contain).
 merge_needed() {
   [ "$SUB" = tighten ] && [ -z "${GATE_AREAS+x}" ] && [ -z "${METRICS_TIGHTEN_MERGED:-}" ] || return 1
-  if git remote get-url origin >/dev/null 2>&1 && ! git fetch -q origin main 2>/dev/null; then
+  if git remote get-url origin >/dev/null 2>&1 && ! fetch_main . 2>/dev/null; then
     echo "metrics tighten: could not fetch origin main; using the local origin/main" >&2
   fi
   MERGE_MAIN=$(git rev-parse -q --verify "origin/main^{commit}" 2>/dev/null) || return 1
@@ -233,15 +235,33 @@ in_checkout() {
   local top path dir
   top=$(pwd -P)
   case "$1" in /*) path=$1 ;; *) path=$PWD/$1 ;; esac
-  # A directory that does not exist yet (--out build/x.json before any build) stays logical.
+  # A directory that does not exist yet (--out build/x.json before any build) stays logical,
+  # with its `..` folded first: `../new/x.json` is outside, not under "$PWD"/ (Codex, orbit #116).
   if dir=$(CDPATH='' cd -P "$(dirname "$path")" 2>/dev/null && pwd); then
     path=$dir/$(basename "$path")
+  else
+    path=$(lexical_path "$path")
   fi
   case "$path" in
     "$top"/*) echo "${path#"$top"/}" ;;
     "$PWD"/*) echo "${path#"$PWD"/}" ;;
     *) echo "$path" ;;
   esac
+}
+# lexical_path <absolute path>: the path with `.`, `..` and repeated slashes folded, touching
+# no filesystem (for a path that does not exist yet, which cd -P cannot resolve).
+lexical_path() {
+  local part parts kept=()
+  IFS=/ read -ra parts <<<"$1"
+  for part in ${parts[@]+"${parts[@]}"}; do
+    case "$part" in
+      '' | .) ;;
+      ..) [ "${#kept[@]}" -eq 0 ] || unset 'kept[${#kept[@]}-1]' ;;
+      *) kept+=("$part") ;;
+    esac
+  done
+  local IFS=/
+  echo "/${kept[*]+"${kept[*]}"}"  # bash 3.2: an empty array is unbound under set -u
 }
 # copy_back <dir>: the files tighten writes, from the merged worktree into this checkout. An
 # absolute path (outside this checkout: in_checkout) was written in place by the merged run.
@@ -398,6 +418,7 @@ plan_job_target() {
     want=$1 CHANGED=devkit-plan-probe
     # shellcheck source=bin/_paths_lib.sh
     . "$HERE/_paths_lib.sh"
+    GATE_CODE_PATHS=  # the plan's alone, never the environment's (_paths_lib.sh header)
     # shellcheck source=/dev/null  # the repo's plan, as local_gate.sh sources it
     . scripts/ci/gate_plan.sh
     # shellcheck disable=SC2329  # the skeleton's helpers (local_gate.sh), which the plan calls
@@ -582,7 +603,7 @@ for f in "$COLLECT_DIR"/*.json; do
 done
 MERGE_ARGS=()
 for name in ${SKIPPED[@]+"${SKIPPED[@]}"}; do MERGE_ARGS+=(--skipped "$name"); done
-python3 -I "$RATCHET" merge --out "$OUT" ${MERGE_ARGS[@]+"${MERGE_ARGS[@]}"} \
+"$DEVKIT_PYTHON" -I "$RATCHET" merge --out "$OUT" ${MERGE_ARGS[@]+"${MERGE_ARGS[@]}"} \
   -- ${INPUTS[@]+"${INPUTS[@]}"} || exit $?
 [ "$SUB" != snapshot ] || exit 0
 
@@ -597,13 +618,13 @@ case "$SUB" in tighten|rebaseline) RATCHET_ARGS+=(--report-only "$(dirname "$BOU
 # quick_ratchet: --quick's ratchet, its lines then the pre-push hint; exits with the ratchet's code.
 quick_ratchet() {
   local out rc=0
-  out=$(python3 -I "$RATCHET" "${RATCHET_ARGS[@]}") || rc=$?
+  out=$("$DEVKIT_PYTHON" -I "$RATCHET" "${RATCHET_ARGS[@]}") || rc=$?
   printf '%s\n' "$out"
   ! grep -q ' BETTER — run make metrics-tighten' <<<"$out" || echo "BETTER: run make metrics-tighten before push"
   exit "$rc"
 }
 [ "$QUICK" = 0 ] || quick_ratchet
-python3 -I "$RATCHET" "${RATCHET_ARGS[@]}"
+"$DEVKIT_PYTHON" -I "$RATCHET" "${RATCHET_ARGS[@]}"
 ratchet_rc=$?
 # A failing tighten (rc 1: a WORSE key) has still written its BETTER bounds; the scorecard's
 # tighten runs too, so one command locks in everything that improved before reporting the rest.
@@ -624,7 +645,7 @@ if [ -f "$SCORECARD_BOUNDS" ] \
   if [ "$SC_MODE" = check ] && { [ "${METRICS_REBASELINE:-0}" = 1 ] || [ "$KEYED" = 1 ]; }; then
     SC_ARGS+=(--rebaseline-ok)
   fi
-  python3 -I "$HERE/scorecard.py" "${SC_ARGS[@]}" | grep -E '^(scorecard-ratchet(-bound)?|scorecard|metrics-rebaseline:) ' || exit "${PIPESTATUS[0]}"
+  "$DEVKIT_PYTHON" -I "$HERE/scorecard.py" "${SC_ARGS[@]}" | grep -E '^(scorecard-ratchet(-bound)?|scorecard|metrics-rebaseline:) ' || exit "${PIPESTATUS[0]}"
   if [ "$SUB" = rebaseline ] && [ "$KEYED" = 0 ]; then
     echo "metrics_collect: WARNING: $SCORECARD_BOUNDS was rewritten too (every track to today's share); to loosen only named bounds, restore both files and run \`make metrics-rebaseline KEYS=<key>[,<key>]\`" >&2
   fi

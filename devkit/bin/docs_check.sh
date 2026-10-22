@@ -2,6 +2,12 @@
 # Guard: agent docs stay in one shape across every repo. Reads the git index (`git ls-files -s`),
 # so untracked trees (node_modules, DerivedData, .claude/worktrees) never count and Actions sees
 # what a laptop sees.
+#   0. Payload: a repo that ships agent instruction files for OTHER places (dotfiles: the stowed
+#      ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md) names their trees in scripts/ci/docs_payload.txt,
+#      `<dir> <reason>` per line (`#` comments). Their AGENTS.md/CLAUDE.md are deliverables whose
+#      names and shapes the consuming tool fixes, not this repo's agent docs, so no rule below
+#      sees them. A dir matches itself and everything under it; the root, a path leaving the repo,
+#      an entry without a reason and an entry matching no tracked AGENTS.md/CLAUDE.md all fail.
 #   1. Every directory holding AGENTS.md or CLAUDE.md has AGENTS.md as a regular file and
 #      CLAUDE.md as a symlink whose target is exactly `AGENTS.md`. Owner decision 2026-10-12:
 #      AGENTS.md is canonical (every agent reads it); CLAUDE.md exists only so Claude Code loads it.
@@ -105,6 +111,7 @@ ROOT_CAP=$((30 * 1024))
 AREA_CAP=$((16 * 1024))
 ALLOWLIST=scripts/ci/docs_oversize.txt
 EXTRAS=scripts/ci/docs_rules.sh
+PAYLOAD=scripts/ci/docs_payload.txt
 BANNED=${DOCS_CHECK_BANNED-graphify repomix serena nexus graphiti engram}
 
 # When each rule stops warning and starts failing; the one place these dates live.
@@ -145,17 +152,58 @@ docs_rule() {
   if [[ "$TODAY" < "$from" ]]; then docs_warn "$* (fails from $from)"; else docs_fail "$*"; fi
 }
 
+# Payload trees (rule 0): `<dir> <reason>` per line in $PAYLOAD, read before the index so every
+# rule below sees only the repo's own agent docs. Functions, not top-level code: the metrics
+# ratchet counts this script's top level as one function (complexity.kit.branches_max).
+payload_dirs=() payload_hits=()
+payload_read() {
+  local pdir preason
+  [ -f "$PAYLOAD" ] || return 0
+  # `|| [ -n ]`: a last line without its newline is still an entry.
+  while read -r pdir preason || [ -n "${pdir:-}" ]; do
+    case "$pdir" in ''|'#'*) continue ;; esac
+    pdir=${pdir%/}
+    case "$pdir" in
+      .|/*|..|../*|*/../*|*/..) docs_fail "$PAYLOAD: '$pdir' must be a directory inside the repo, not its root"; continue ;;
+    esac
+    [ -n "${preason:-}" ] || { docs_fail "$PAYLOAD: '$pdir' needs a reason: <dir> <reason>"; continue; }
+    payload_dirs+=("$pdir"); payload_hits+=(0)
+  done < "$PAYLOAD"
+}
+# in_payload <dir> -> 0 when <dir> is a payload dir or under one (and counts the hit)
+in_payload() {
+  local i
+  for i in ${payload_dirs[@]+"${!payload_dirs[@]}"}; do
+    case "$1" in "${payload_dirs[$i]}"|"${payload_dirs[$i]}"/*) payload_hits[i]=1; return 0 ;; esac
+  done
+  return 1
+}
+# A payload entry that excuses nothing is stale: it would silently excuse a future repo doc.
+payload_stale() {
+  local i
+  for i in ${payload_dirs[@]+"${!payload_dirs[@]}"}; do
+    [ "${payload_hits[$i]}" = 1 ] || docs_fail "$PAYLOAD: '${payload_dirs[$i]}' holds no tracked AGENTS.md or CLAUDE.md; remove the stale entry"
+  done
+}
+
 # Index entries for both file names, as parallel arrays. Mode 120000 is a symlink; 100644/100755
-# are regular files.
+# are regular files. Payload dirs are left out here, so no rule sees them.
 dirs=() names=() modes=()
-while IFS= read -r -d '' entry; do
-  mode=${entry%% *}
-  path=${entry#*$'\t'}
-  name=${path##*/}
-  case "$name" in AGENTS.md|CLAUDE.md) ;; *) continue ;; esac
-  dir=.; case "$path" in */*) dir=${path%/*} ;; esac
-  dirs+=("$dir"); names+=("$name"); modes+=("$mode")
-done < <(git ls-files -s -z)
+index_read() {
+  local entry mode path name dir
+  while IFS= read -r -d '' entry; do
+    mode=${entry%% *}
+    path=${entry#*$'\t'}
+    name=${path##*/}
+    case "$name" in AGENTS.md|CLAUDE.md) ;; *) continue ;; esac
+    dir=.; case "$path" in */*) dir=${path%/*} ;; esac
+    in_payload "$dir" && continue
+    dirs+=("$dir"); names+=("$name"); modes+=("$mode")
+  done < <(git ls-files -s -z)
+}
+payload_read
+index_read
+payload_stale
 
 # mode_of <dir> <name> -> index mode, or empty when the dir has no such entry
 mode_of() {
@@ -227,7 +275,7 @@ for f in ${agents_files[@]+"${agents_files[@]}"}; do
 done
 
 if [ -f "$ALLOWLIST" ]; then
-  while read -r path bytes extra; do
+  while read -r path bytes extra || [ -n "${path:-}" ]; do
     case "$path" in ''|'#'*) continue ;; esac
     case "$bytes" in ''|*[!0-9]*) docs_fail "$ALLOWLIST: '$path' needs a byte count: <path> <max-bytes>"; continue ;; esac
     [ -z "${extra:-}" ] || docs_fail "$ALLOWLIST: '$path' has trailing fields; expected <path> <max-bytes>"

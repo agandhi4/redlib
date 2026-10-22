@@ -52,6 +52,24 @@
 # ratchet's other collectors do. One file per tier, so ci-unit and ci-db in the
 # same gate worktree never overwrite each other and `metrics_ratchet.py merge` sees no clash.
 #
+# Clock shift (devkit decisions 2026-10-22): DEVKIT_CLOCK_SHIFT=<n>d runs the command with the
+# wall clock <n> days ahead, so a test dated from the real clock beside a pinned one fails the
+# day it is written, not a month later (finplat #706). The gate's CLOCK group sets it per offset
+# (bin/_paths_lib.sh); by hand, `make <tier target> DEVKIT_CLOCK_SHIFT=30d`. pytest and vitest:
+# the guard puts devkit/clock_shift/ on PYTHONPATH and its plugin in PYTEST_PLUGINS (contract in
+# clock_shift/devkit_clock_shift.py) with DEVKIT_CLOCK_SHIFT_CONF=<root>/scripts/ci/clock_shift.conf,
+# the repo's exceptions (pytest only), and names vitest's setup file as DEVKIT_CLOCK_SHIFT_VITEST,
+# which the repo's vitest config lists through lint/vitest.base.mjs's clockShiftSetupFiles
+# (contract in clock_shift/vitest_clock_shift.mjs). Every floor must be one of those two (exit 2
+# otherwise: another runner would run on the real clock and read as shifted). Shifted, the tier
+# writes no metrics file (the unshifted run of the same tier owns tier.<tier>.*), the success
+# line ends ` shift=+<n>d`, and
+#   TIER <tier> NOSHIFT <runner> (no shifted <runner> process: it ran on the real clock)  exit 1
+# when the command passed but no process of a floored runner recorded its shift in the guard's
+# DEVKIT_CLOCK_SHIFT_PROOF file (a recipe that drops the environment, a pytest in a container, a
+# vitest config without clockShiftSetupFiles). A file, not an output line: vitest prints a setup
+# file's output per test file, or not at all under `silent`.
+#
 # Budgets are set from GATE timings with headroom and only ever go down; floors are the current
 # counts and move only in the PR that removes tests, saying why in docs/decisions.md.
 set -uo pipefail
@@ -188,9 +206,37 @@ ENFORCE=${TIER_BUDGET_ENFORCE:-1}
 TAKE_SLOT=${TIER_SLOT:-1}
 [[ "$TAKE_SLOT" =~ ^[01]$ ]] || die "TIER_SLOT must be 0 or 1 (got '$TAKE_SLOT')"
 
+# Inside a git hook GIT_DIR (and sometimes GIT_WORK_TREE) is exported, which makes rev-parse
+# report the current directory as the top level: a tier run after `cd backend` would then write
+# backend/build/metrics/ (Orbit #59). Drop both so the lookup answers for the real checkout.
+root=$(env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --show-toplevel 2>/dev/null) || root=$PWD
+
+SHIFT=${DEVKIT_CLOCK_SHIFT:-}
+if [ -n "$SHIFT" ]; then
+  [[ "$SHIFT" =~ ^[1-9][0-9]*d$ ]] || die "DEVKIT_CLOCK_SHIFT must be whole days ahead, like 30d (got '$SHIFT')"
+  [ "${#FLOORS[@]}" -gt 0 ] || die "DEVKIT_CLOCK_SHIFT needs --floor pytest=<min> or vitest=<min>: the floor is how the shift is checked"
+  for f in "${FLOORS[@]}"; do
+    case ${f%% *} in
+      pytest | vitest) ;;
+      *) die "DEVKIT_CLOCK_SHIFT shifts pytest and vitest only; tier $TIER floors ${f%% *}, which would run on the real clock (give the CLOCK group a target without it)" ;;
+    esac
+  done
+  plugin_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../clock_shift" 2>/dev/null && pwd) \
+    || die "no clock_shift/ beside $(dirname "${BASH_SOURCE[0]}") (an older devkit-sync; VENDOR_PATHS lists it)"
+  export PYTHONPATH="$plugin_dir${PYTHONPATH:+:$PYTHONPATH}"
+  export PYTEST_PLUGINS="devkit_clock_shift${PYTEST_PLUGINS:+,$PYTEST_PLUGINS}"
+  export DEVKIT_CLOCK_SHIFT_CONF="$root/scripts/ci/clock_shift.conf"
+  export DEVKIT_CLOCK_SHIFT_VITEST="$plugin_dir/vitest_clock_shift.mjs"
+fi
+
 tmp=${TMPDIR:-/tmp}
 LOG=$(mktemp "${tmp%/}/tier-$TIER.XXXXXX") || die "mktemp failed"
-trap 'rm -f "$LOG"' EXIT
+PROOF=""
+trap 'rm -f "$LOG" ${PROOF:+"$PROOF"}' EXIT
+if [ -n "$SHIFT" ]; then
+  PROOF=$(mktemp "${tmp%/}/tier-$TIER-shift.XXXXXX") || die "mktemp failed"
+  export DEVKIT_CLOCK_SHIFT_PROOF=$PROOF
+fi
 
 # A tier's budget is wall time; a nap mid-run would read as test time (bin/_awake_lib.sh).
 devkit_stay_awake
@@ -214,6 +260,10 @@ budget_text="budget ${BUDGET}s"
 
 if [ "$rc" -ne 0 ]; then
   echo "TIER $TIER FAIL (exit $rc, ${secs}s)"
+  # pytest exits 1 when tests failed; a usage error (4, a bad clock_shift.conf line) is not rot.
+  if [ -n "$SHIFT" ] && [ "$rc" -eq 1 ]; then
+    echo "tier_guard: failed with the wall clock $SHIFT ahead: a fixture dated from the real clock beside a pinned one, or a fixed date the clock will pass. Date it from the pinned clock; list a test the shift cannot reach (a database's now(), a file's mtime) in scripts/ci/clock_shift.conf with the reason" >&2
+  fi
   exit "$rc"
 fi
 
@@ -224,6 +274,14 @@ stripped=$(strip_ansi <"$LOG")
 for f in ${FLOORS[@]+"${FLOORS[@]}"}; do
   runner=${f%% *}
   min=${f#* }
+  if [ -n "$SHIFT" ] && ! grep -q "^$runner +$SHIFT " "$PROOF"; then
+    echo "TIER $TIER NOSHIFT $runner (no shifted $runner process: it ran on the real clock)"
+    case $runner in
+      pytest) echo "tier_guard: pytest did not load devkit_clock_shift: the recipe must run pytest in this environment (PYTEST_PLUGINS, PYTHONPATH)" >&2 ;;
+      vitest) echo "tier_guard: vitest never ran devkit's clock-shift setup file: list clockShiftSetupFiles (devkit/lint/vitest.base.mjs) first in the root config's setupFiles, and keep the environment (DEVKIT_CLOCK_SHIFT_VITEST)" >&2 ;;
+    esac
+    failed=1
+  fi
   n=$(printf '%s\n' "$stripped" | tier_count "$runner")
   if [ -z "$n" ]; then
     echo "TIER $TIER FLOOR $runner no summary line (floor $min)"
@@ -240,12 +298,8 @@ for f in ${FLOORS[@]+"${FLOORS[@]}"}; do
   fi
 done
 
-# Inside a git hook GIT_DIR (and sometimes GIT_WORK_TREE) is exported, which makes rev-parse
-# report the current directory as the top level: a tier run after `cd backend` would then write
-# backend/build/metrics/ (Orbit #59). Drop both so the lookup answers for the real checkout.
-root=$(env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --show-toplevel 2>/dev/null) || root=$PWD
 out=$root/build/metrics/tier-$TIER.json
-if ! { mkdir -p "${out%/*}" && printf '{\n%s\n}\n' "$metrics" >"$out"; }; then
+if [ -z "$SHIFT" ] && ! { mkdir -p "${out%/*}" && printf '{\n%s\n}\n' "$metrics" >"$out"; }; then
   die "could not write $out"
 fi
 
@@ -260,4 +314,4 @@ if [ "$secs" -gt "$LOAD_BUDGET" ]; then
 fi
 
 [ "$failed" = 0 ] || exit 1
-echo "TIER $TIER: ${secs}s ($budget_text)$counts"
+echo "TIER $TIER: ${secs}s ($budget_text)$counts${SHIFT:+ shift=+$SHIFT}"

@@ -63,7 +63,6 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_trailer_lib.sh"
 # shellcheck source=bin/_gitattributes_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_gitattributes_lib.sh"
-readonly DEVKIT_URL=${DEVKIT_URL:-https://github.com/agandhi4/devkit.git}
 STAGE=0
 REF=
 for arg in "$@"; do
@@ -97,10 +96,7 @@ else
   git fetch -q "$DEVKIT_URL" "$REF"
   UPSTREAM=$(git rev-parse FETCH_HEAD)
 fi
-UPSTREAM_TREE=$(git rev-parse "$UPSTREAM^{tree}")
-if MANIFEST=$(git show "$UPSTREAM:VENDOR_PATHS" 2>/dev/null); then
-  UPSTREAM_TREE=$(vendor_filter_tree "$UPSTREAM_TREE" "$MANIFEST") || exit 2
-fi
+UPSTREAM_TREE=$(vendor_tree_of "$UPSTREAM") || exit 2
 CURRENT=0
 if [ -f .devkit-rev ] && [ "$(cut -d' ' -f1 .devkit-rev)" = "$UPSTREAM" ] && [ "$(git rev-parse HEAD:devkit 2>/dev/null)" = "$UPSTREAM_TREE" ]; then
   CURRENT=1
