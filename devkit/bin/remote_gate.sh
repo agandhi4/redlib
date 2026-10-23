@@ -80,6 +80,8 @@ done
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
 # shellcheck source=bin/_gate_env.sh
 . "$HERE/_gate_env.sh"
+# shellcheck source=bin/_toolchain_lib.sh
+. "$HERE/_toolchain_lib.sh"
 gate_env_load remote_gate "$GATE_REMOTE_KEYS" "$GATE_LOCAL_KEYS"
 gate_remote_settings_check
 HOST=${GATE_REMOTE_HOST:-}
@@ -122,7 +124,7 @@ remote_main() {
     */"$slug" | */"$slug".git | *:"$slug" | *:"$slug".git) ;;
     *) echo "remote_gate: $dir on $(hostname) has origin $url, not $slug" >&2; exit 2 ;;
   esac
-  git -C "$dir" fetch -q origin main \
+  fetch_main "$dir" \
     || { echo "remote_gate: git fetch origin main failed in $dir on $(hostname)" >&2; exit 2; }
   if ! git -C "$dir" checkout -q -f -B main origin/main || ! git -C "$dir" clean -q -ffd; then
     echo "remote_gate: could not reset $dir to origin/main on $(hostname)" >&2
@@ -188,7 +190,8 @@ remote_ledger() {
 }
 
 SHARED_SCRIPT=$(declare -f remote_root_dir)
-REMOTE_SCRIPT="$SHARED_SCRIPT; $(declare -f remote_main); remote_main \"\$@\""
+# fetch_main is _gate_env.sh's: the host runs remote_main before its own checkout is current.
+REMOTE_SCRIPT="$SHARED_SCRIPT; $(declare -f fetch_main remote_main); remote_main \"\$@\""
 LEDGER_SCRIPT="$SHARED_SCRIPT; $(declare -f remote_ledger); remote_ledger \"\$@\""
 case "$REMOTE_SCRIPT$LEDGER_SCRIPT$REMOTE_ROOT" in
   *"'"*) echo "remote_gate: the remote command must not contain a single quote" >&2; exit 2 ;;
@@ -289,7 +292,11 @@ copy_ledger() {
     echo "remote_gate: WARNING: ledger not copied from $HOST: $(tail -n 1 "$TMP/ledger.err")" >&2
     return
   fi
-  python3 -I "$HERE/gate_record.py" import --pr "$PR" --runs "$state/runs.tsv" \
+  if ! devkit_python; then
+    echo "remote_gate: WARNING: ledger from $HOST not merged: $DEVKIT_PYTHON_ERROR" >&2
+    return
+  fi
+  "$DEVKIT_PYTHON" -I "$HERE/gate_record.py" import --pr "$PR" --runs "$state/runs.tsv" \
     --logdir "$state/logs/$PR" <"$TMP/ledger" >&2 \
     || echo "remote_gate: WARNING: ledger from $HOST not merged into $state (above)" >&2
 }

@@ -39,18 +39,22 @@ one stderr line (load_metrics).
   bin/scorecard.py <repo-root> --mode check|tighten|rebaseline
                    [--bounds-file docs/metrics/scorecard.json]  the WIRED ratchet
 
-The ratchet holds one number, `{"wired": <share>}`: the WIRED share of the repo-scoped checks.
-Machine-scoped checks (hooks ledger live, gh shim) and fleet-scoped ones (devkit-rev age, the
-repos.json listing) are printed in n/m but never ratcheted: they change without a code change,
-and a gate on another host would fail on them, so `--mode` does not run the fleet ones. Run from
-a consumer's vendored devkit/, those two read GitHub through `gh api` (repos.json cached 7 days
-in <state>/devkit/scorecard/), so they measure there too. `check` holds the share to the PR's
-file and that file to main's copy (the metrics ratchet's semantics: the metrics-rebaseline label
-admits a lower committed share, never a share below the committed one), and, as the metrics
-ratchet does since gains lock in, fails a share ABOVE the committed one until
-`make metrics-tighten` commits it. A v1 file (per-track `tracks`) on the branch fails with the
-tighten hint; on main it reads as first adoption. Exit 0 when it ran (1 for a ratchet failure
-in --mode), 2 on usage.
+The ratchet holds, per repo-scoped check, whether it is wired: `{"checks": {<id>: true|false}}`.
+The share stays a reported number; it is not the bound, because a check devkit adds would lower
+it in every repo on the sync that vendors it. A check the file does not record is new devkit
+backlog (printed, never a failure); a recorded wired check now unwired, or NA, fails. Machine-scoped
+checks (hooks ledger live, gh shim) and fleet-scoped ones (devkit-rev age, the repos.json
+listing) are printed in n/m but never ratcheted: they change without a code change, and a gate
+on another host would fail on them, so `--mode` does not run the fleet ones. Run from a
+consumer's vendored devkit/, those two read GitHub through `gh api` (repos.json cached 7 days in
+<state>/devkit/scorecard/), so they measure there too. `check` holds the checks to the PR's file
+and that file to main's copy (the metrics ratchet's semantics: the metrics-rebaseline label
+admits a check main records wired going unrecorded or unwired in the PR's file, never a measured
+loss against the PR's own file), and, as the metrics ratchet does since gains lock in, fails a
+recorded unwired check now wired until `make metrics-tighten` commits it. An older file (the v1
+per-track schema, or the share-only one before 2026-10-22) records no check by name: it reads
+as first adoption on either side and its scorecard_file check fails until tightened. Exit 0 when
+it ran (1 for a ratchet failure in --mode), 2 on usage.
 
 Every WIRED check prints `wired <id> <scope> PASS|FAIL|D|UNMEASURED|NA <evidence>`; D is a
 `scorecard: <id>` line under the AGENTS.md `## Convention deltas` (counts as wired), a
@@ -694,6 +698,130 @@ def wired_tiers(repo: Repo) -> None:
     repo.add("tiers", not unbudgeted, f"{evidence}; unbudgeted: {', '.join(unbudgeted) or 'none'}")
 
 
+# A tier_guard command that floors a runner: the runner the tier's suite is.
+TIER_FLOOR = re.compile(r"--floor\s+(pytest|vitest)=")
+
+
+def logical_lines(recipe: list[str]) -> list[str]:
+    """Recipe lines with `\\` continuations joined: Orbit's unit-backend floors pytest on the
+    line after its tier_guard call."""
+    joined: list[str] = []
+    pending = ""
+    for line in recipe:
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+        else:
+            joined.append(pending + line)
+            pending = ""
+    return [*joined, pending] if pending else joined
+
+
+def plan_literal(root: Path, name: str) -> str | None:
+    """The plan's `<name>=<value>` on one line, quoted or not; None when it has none."""
+    plan = root / identity.PLAN
+    pattern = rf"""^{name}=(["']?)(.*?)\1\s*(?:#.*)?$"""
+    m = re.search(pattern, plan.read_text(errors="replace"), re.M) if plan.is_file() else None
+    return m.group(2) if m else None
+
+
+# The areas a pytest or vitest tier's inputs can sit in (docs, tooling and native run no tier),
+# and every area the gate knows (_paths_lib.sh DEVKIT_AREA_ORDER): another name exits it 2.
+APP_AREAS = ("backend", "frontend", "other")
+GATE_AREAS = {"docs", "backend", "frontend", "native", "tooling", "other"}
+
+
+def app_areas(repo: Repo) -> set[str]:
+    """The APP_AREAS the repo's own tracked files fall in, by the gate's table (_paths_lib.sh,
+    with the plan's GATE_CODE_PATHS), the one the gate decides groups by. All of them when bash
+    cannot say: a check that cannot tell must not pass."""
+    script = (
+        '. "$1" && devkit_load_code_paths "$2" && devkit_areas "$(cat)" && echo "$DEVKIT_AREAS"'
+    )
+    lib, plan = str(HERE / "_paths_lib.sh"), str(repo.root / identity.PLAN)
+    try:
+        proc = subprocess.run(
+            ["bash", "-c", script, "_", lib, plan],
+            input="\n".join(sorted(repo.tracked)), capture_output=True, text=True, check=False,
+        )
+    except FileNotFoundError:
+        return set(APP_AREAS)
+    if proc.returncode != 0:
+        return set(APP_AREAS)
+    return set(APP_AREAS) & set(proc.stdout.split())
+
+
+def clock_targets(root: Path) -> set[str]:
+    """The make targets GATE_JOBS_CLOCK names (each `<name> <target> ...` spec's second word)."""
+    jobs = plan_literal(root, "GATE_JOBS_CLOCK") or ""
+    return {words[1] for spec in jobs.split("|") if len(words := spec.split()) >= 2}
+
+
+def wired_clock_shift(repo: Repo) -> None:
+    """Every pytest or vitest tier reruns with the wall clock shifted: GATE_JOBS_CLOCK names its
+    target, or a target whose recipe runs it (finplat's `test-db` starts Postgres, then `ci-db`)
+    (devkit decisions 2026-10-22). Whether a vitest config lists clockShiftSetupFiles is the
+    gate's to say (tier_guard's NOSHIFT); a repo with neither runner (Rust, Swift, bats) is out
+    of scope. A plan whose GATE_AREAS_CLOCK omits an area the repo has paths in (backend,
+    frontend, other) fails too: a change only there shifts no tier, and which tiers it reaches
+    (a vitest suite, a pytest e2e/) is not knowable from here (kitchen #10, #219 Codex). An area
+    with no paths (node-service has no frontend: its app is `other`) loses nothing."""
+    rules = makefile_rules(repo.root)
+    floors = {
+        target: {
+            m.group(1)
+            for line in logical_lines(recipe) if TIER_GUARD_CALL.search(line)
+            for m in TIER_FLOOR.finditer(line)
+        }
+        for target, recipe in rules.items()
+        if TIER_TARGET.match(target)
+    }
+    tiers = {target for target, runners in floors.items() if runners}
+    if not tiers:
+        repo.na("clock_shift", "no pytest or vitest tier; Rust, Swift and bats are out of scope")
+        return
+    declared = clock_targets(repo.root)
+    covered = {
+        tier
+        for tier in tiers
+        for target in declared
+        if tier == target
+        or any(re.search(rf"(?<![\w-]){re.escape(tier)}(?![\w-])", line)
+               for line in rules.get(target, []))
+    }
+    missing = sorted(tiers - covered)
+    areas = plan_literal(repo.root, "GATE_AREAS_CLOCK")
+    named = set(areas.split()) if areas is not None else set(APP_AREAS)
+    unknown = sorted(named - GATE_AREAS)
+    omitted = sorted(app_areas(repo) - named) if not set(APP_AREAS) <= named else []
+    unshifted = sorted(covered) if omitted else []
+    evidence = f"pytest/vitest tiers {', '.join(sorted(tiers))}; "
+    if not declared:
+        evidence += f"no GATE_JOBS_CLOCK in {identity.PLAN} (devkit README \"Clock shift\")"
+    elif missing:
+        evidence += f"GATE_JOBS_CLOCK runs none of {', '.join(missing)}"
+    elif unknown:
+        evidence += f"GATE_AREAS_CLOCK names {', '.join(unknown)}, no gate area: the gate exits 2"
+    elif unshifted:
+        evidence += (f"GATE_AREAS_CLOCK omits {', '.join(omitted)}, so a change only there "
+                     f"never shifts {', '.join(unshifted)}")
+    else:
+        evidence += "GATE_JOBS_CLOCK runs every one"
+    ok = bool(declared) and not missing and not unknown and not unshifted
+    repo.add("clock_shift", ok, evidence)
+
+
+def scorecard_file(path: Path) -> tuple[bool, str]:
+    """An older schema records no check by name, so it bounds nothing until tightened."""
+    if not path.is_file():
+        return False, "no docs/metrics/scorecard.json (scorecard.py . --mode rebaseline)"
+    committed = parse_bounds(path.read_text())
+    if committed is None:
+        return False, "docs/metrics/scorecard.json is not a scorecard bounds file"
+    if committed.checks is None:
+        return False, f"docs/metrics/scorecard.json is the {committed.legacy}: make metrics-tighten"
+    return True, "docs/metrics/scorecard.json"
+
+
 def wired_process(repo: Repo, state_home: Path, conf: dict[str, float]) -> None:
     hooks_conf = (repo.root / "scripts/ci/hooks.conf").is_file()
     tracked_hooks = any(f.startswith(".githooks/") for f in repo.tracked)
@@ -738,14 +866,7 @@ def wired_process(repo: Repo, state_home: Path, conf: dict[str, float]) -> None:
             else "no scripts/ci/gate_plan.sh"
         ),
     )
-    sc = (repo.root / "docs/metrics/scorecard.json").is_file()
-    repo.add(
-        "scorecard_file",
-        sc,
-        "docs/metrics/scorecard.json"
-        if sc
-        else "no docs/metrics/scorecard.json (scorecard.py . --mode rebaseline)",
-    )
+    repo.add("scorecard_file", *scorecard_file(repo.root / "docs/metrics/scorecard.json"))
     workflow = "\n".join(section_lines(agents_text(repo), r"workflow"))
     named = "make merge" in workflow
     repo.add(
@@ -1059,6 +1180,7 @@ def score_wired(
     wired_ratchet(repo, stack)
     wired_guards(repo, stack)
     wired_tiers(repo)
+    wired_clock_shift(repo)
     wired_process(repo, state_home, conf)
     wired_gh_shim(repo)
     if fleet:
@@ -1460,33 +1582,68 @@ def fleet_markdown(docs: list[dict]) -> str:
 
 
 # ---- the WIRED ratchet ----------------------------------------------------------------------
+# Per check, not one share (2026-10-22): a check devkit adds is absent from every repo's file,
+# so the first sync that vendors it lowered the share and failed as a regression in every repo
+# that had not wired it yet (instalite #59, locus #148, Orbit #118 on clock_shift). A check the
+# file has never recorded is devkit backlog; only a recorded wired check going unwired fails.
 
 BOUNDS_COMMENT = (
-    "scorecard ratchet: the committed WIRED share of the repo-scoped checks "
+    "scorecard ratchet: whether each repo-scoped check is wired "
     "(bin/scorecard.py --mode check|tighten|rebaseline); never edit by hand"
 )
+WIRED_STATUSES = ("PASS", "D")
 
 
 @dataclass(frozen=True)
 class Committed:
-    """A scorecard bounds file as read: share None with v1 True is the per-track v1 schema."""
+    """A scorecard bounds file as read. `checks` None is an older schema, named by `legacy`:
+    it records no check by name, so it bounds nothing and reads as first adoption."""
 
-    share: float | None
-    v1: bool = False
+    checks: dict[str, bool] | None
+    legacy: str = ""
 
 
-def parse_bounds(text: str, label: str) -> Committed | None:
-    """None (printed) when the text is not a scorecard bounds file."""
+def parse_bounds(text: str) -> Committed | None:
+    """None when the text is not a scorecard bounds file."""
     try:
         doc = json.loads(text)
     except ValueError:
-        doc = None
-    if isinstance(doc, dict) and _number(doc.get("wired")):
-        return Committed(float(doc["wired"]))
-    if isinstance(doc, dict) and isinstance(doc.get("tracks"), dict):
-        return Committed(None, v1=True)
-    print(f"scorecard-ratchet: {label}: not a scorecard bounds file", file=sys.stderr)
+        return None
+    if not isinstance(doc, dict):
+        return None
+    checks = doc.get("checks")
+    if isinstance(checks, dict) and all(isinstance(v, bool) for v in checks.values()):
+        return Committed(dict(checks))
+    if _number(doc.get("wired")):
+        return Committed(None, "share-only schema")
+    if isinstance(doc.get("tracks"), dict):
+        return Committed(None, "v1 per-track schema")
     return None
+
+
+def read_bounds(text: str, label: str) -> Committed | None:
+    """parse_bounds, printing why when it is not a bounds file (a usage error)."""
+    parsed = parse_bounds(text)
+    if parsed is None:
+        print(f"scorecard-ratchet: {label}: not a scorecard bounds file", file=sys.stderr)
+    return parsed
+
+
+def ratcheted_checks(checks: list[Check]) -> dict[str, Check]:
+    """The checks the ratchet reads: the repo-scoped ones, NOT_RATCHETED left out, and
+    UNMEASURED too (devkit's backlog moves it, never the repo). NA stays in: a PR's own content
+    makes a check NA (its last tier target deleted), so a recorded wired check gone NA is a loss
+    the label must admit."""
+    return {
+        c.cid: c
+        for c in checks
+        if c.scope == "repo" and c.status != "UNMEASURED" and c.cid not in NOT_RATCHETED
+    }
+
+
+def measured(now: dict[str, Check]) -> dict[str, bool]:
+    """Each applicable check, wired or not: what tighten and rebaseline record."""
+    return {cid: c.status in WIRED_STATUSES for cid, c in now.items() if c.status != "NA"}
 
 
 def base_bounds(
@@ -1497,7 +1654,7 @@ def base_bounds(
     if base_file is not None:
         if not base_file.is_file():
             return None, str(base_file)
-        parsed = parse_bounds(base_file.read_text(), str(base_file))
+        parsed = read_bounds(base_file.read_text(), str(base_file))
         return (parsed, str(base_file)) if parsed is not None else None
     rel = bounds_file.resolve().relative_to(repo.root).as_posix()
     if not git(repo.root, "rev-parse", "--verify", "--quiet", f"{base_ref}^{{commit}}"):
@@ -1511,28 +1668,70 @@ def base_bounds(
     shown = git(repo.root, "show", f"{base_ref}:{rel}")
     if not shown:
         return None, f"{base_ref}:{rel}"
-    parsed = parse_bounds(shown, f"{base_ref}:{rel}")
+    parsed = read_bounds(shown, f"{base_ref}:{rel}")
     return (parsed, f"{base_ref}:{rel}") if parsed is not None else None
 
 
+def hold_checks(
+    now: dict[str, Check], held: dict[str, bool], bounds_file: Path, rebaseline_ok: bool
+) -> int:
+    """Today's checks against the PR's file: a recorded wired check now unwired is WORSE, a
+    recorded unwired one now wired is BETTER (gains lock in, as in the metrics ratchet); both
+    fail. A check the file does not record is new devkit backlog and passes either way."""
+    rc = 0
+    new_wired = []
+    for cid, check in sorted(now.items()):
+        wired = check.status in WIRED_STATUSES
+        if cid not in held:
+            if check.status == "NA":
+                continue
+            if wired:
+                new_wired.append(cid)
+            else:
+                print(
+                    f"scorecard-ratchet {cid} new, unwired: devkit backlog, not a regression "
+                    f"({check.evidence})"
+                )
+        elif held[cid] and not wired:
+            rc = EXIT_RATCHET
+            print(f"scorecard-ratchet {cid} wired -> {check.status} WORSE: {check.evidence}")
+            if rebaseline_ok:
+                print(
+                    f"metrics-rebaseline: {cid} is unwired; record it in {bounds_file} "
+                    "(scorecard.py . --mode rebaseline) or wire the mechanism back"
+                )
+        elif wired and not held[cid]:
+            rc = EXIT_RATCHET
+            print(
+                f"scorecard-ratchet {cid} unwired -> wired BETTER — run make metrics-tighten "
+                f"and commit {bounds_file}"
+            )
+        elif not wired and check.status != "NA":
+            print(f"scorecard-ratchet {cid} unwired, held: {check.evidence}")
+    if new_wired:
+        print(
+            f"scorecard-ratchet new, wired: {', '.join(new_wired)} (make metrics-tighten records "
+            "them)"
+        )
+    return rc
+
+
 def ratchet_check(
-    now: float, bounds_file: Path, rebaseline_ok: bool, base: tuple[Committed | None, str] | None
+    now: dict[str, Check],
+    bounds_file: Path,
+    rebaseline_ok: bool,
+    base: tuple[Committed | None, str] | None,
 ) -> int:
     if base is None:
         return EXIT_USAGE
     main, label = base
-    if main is not None and main.v1:
-        label, main = f"{label} (v1 per-track schema: first adoption of the WIRED share)", None
+    adoption = " (none: first adoption)"
+    if main is not None and main.checks is None:
+        adoption, main = f" ({main.legacy}: first adoption of per-check bounds)", None
     if bounds_file.is_file():
-        committed = parse_bounds(bounds_file.read_text(), str(bounds_file))
+        committed = read_bounds(bounds_file.read_text(), str(bounds_file))
         if committed is None:
             return EXIT_USAGE
-        if committed.v1:
-            print(
-                f"scorecard-ratchet FAIL: {bounds_file} is the v1 per-track schema; run make "
-                f"metrics-tighten and commit {bounds_file} (it now holds the WIRED share)"
-            )
-            return EXIT_RATCHET
     elif main is None:
         print(
             f"scorecard-ratchet: no bounds at {bounds_file} or {label}; run --mode rebaseline once "
@@ -1540,48 +1739,31 @@ def ratchet_check(
         )
         return 0
     else:
-        committed = Committed(None)
-    print(f"scorecard-ratchet base {label}" + (" (none: first adoption)" if main is None else ""))
-    lowered = (
-        main is not None
-        and main.share is not None
-        and (committed.share is None or committed.share < main.share)
-    )
-    if lowered:
-        was = main.share if main is not None else 0.0
+        committed = Committed({})
+    print(f"scorecard-ratchet base {label}" + (adoption if main is None else ""))
+    if committed.checks is None:
         print(
-            f"scorecard-ratchet-bound wired {was:g} -> "
-            f"{'-' if committed.share is None else f'{committed.share:g}'} LOOSENED"
+            f"scorecard-ratchet: {bounds_file} is the {committed.legacy} and bounds no check; "
+            f"run make metrics-tighten and commit {bounds_file} to record each one"
         )
-    rc = 0
-    if committed.share is not None:
-        bound = committed.share
-        status = "SAME" if now == bound else "BETTER" if now > bound else "WORSE"
-        note = ""
-        if status == "BETTER":
-            # Gains lock in, as in the metrics ratchet: a share is a ratio, so any rise is real.
-            note = f" — run make metrics-tighten and commit {bounds_file}"
-            rc = EXIT_RATCHET
-        print(f"scorecard-ratchet wired {now:g} vs {bound:g} {status}{note}")
-        if status == "WORSE":
-            rc = EXIT_RATCHET
-            if rebaseline_ok:
-                print(
-                    f"metrics-rebaseline: wired {now:g} is past its bound {bound:g}; lower it in "
-                    f"{bounds_file} (scorecard.py . --mode rebaseline) or wire the mechanism back"
-                )
-    if lowered and not rebaseline_ok:
-        rc = EXIT_RATCHET
+    held = committed.checks or {}
+    recorded = main.checks if main is not None and main.checks is not None else {}
+    loosened = [cid for cid, w in sorted(recorded.items()) if w and not held.get(cid, False)]
+    for cid in loosened:
+        was = "unwired" if cid in held else "absent"
+        print(f"scorecard-ratchet-bound {cid} wired -> {was} LOOSENED")
+    rc = EXIT_RATCHET if loosened and not rebaseline_ok else 0
+    rc = max(rc, hold_checks(now, held, bounds_file, rebaseline_ok))
     if rc:
         print(
-            "scorecard-ratchet FAIL: wire the mechanism back, commit a raised share with make "
+            "scorecard-ratchet FAIL: wire the mechanism back, commit the gain with make "
             "metrics-tighten, or, when a tool change moved it, commit the lower file (--mode "
             "rebaseline) and label the PR metrics-rebaseline"
         )
     else:
         print(
-            "scorecard-ratchet ok: wired share held"
-            + ("; rebaseline accepted: lowered from main" if lowered else "")
+            "scorecard-ratchet ok: every recorded wired check held"
+            + ("; rebaseline accepted: lowered from main" if loosened else "")
         )
     return rc
 
@@ -1595,26 +1777,40 @@ def ratchet(
     base_ref: str = "origin/main",
     base_file: Path | None = None,
 ) -> int:
-    wired, measured = wired_share(repo.checks, "repo")
-    now = round(wired / measured, 3) if measured else 1.0
-    print(f"scorecard {repo.name} wired {wired}/{measured} repo-scoped (ratcheted share {now:g})")
+    now = ratcheted_checks(repo.checks)
+    current = measured(now)
+    wired = sum(current.values())
+    share = round(wired / len(current), 3) if current else 1.0
+    print(
+        f"scorecard {repo.name} wired {wired}/{len(current)} repo-scoped (share {share:g}, "
+        "reported; the ratchet holds each check)"
+    )
     if mode == "check":
         return ratchet_check(
             now, bounds_file, rebaseline_ok, base_bounds(repo, bounds_file, base_ref, base_file)
         )
-    committed: Committed | None = Committed(None)
+    held: dict[str, bool] = {}
     if bounds_file.is_file():
-        committed = parse_bounds(bounds_file.read_text(), str(bounds_file))
+        committed = read_bounds(bounds_file.read_text(), str(bounds_file))
         if committed is None:
             return EXIT_USAGE
+        held = committed.checks or {}
+    # tighten never unrecords: a held check today's run does not measure (NA after a stack
+    # change) keeps its entry, and a held wired check stays wired so check still fails its loss.
     new = (
-        now
-        if mode == "rebaseline" or committed.share is None or now > committed.share
-        else committed.share
+        current
+        if mode == "rebaseline"
+        else held | {cid: held.get(cid, False) or w for cid, w in current.items()}
     )
     bounds_file.parent.mkdir(parents=True, exist_ok=True)
-    bounds_file.write_text(json.dumps({"_comment": BOUNDS_COMMENT, "wired": new}, indent=2) + "\n")
-    print(f"scorecard-ratchet {mode}: wired {new:g} written to {bounds_file}")
+    bounds_file.write_text(
+        json.dumps({"_comment": BOUNDS_COMMENT, "checks": dict(sorted(new.items()))}, indent=2)
+        + "\n"
+    )
+    print(
+        f"scorecard-ratchet {mode}: {sum(new.values())}/{len(new)} checks wired written to "
+        f"{bounds_file}"
+    )
     return 0
 
 
@@ -1685,12 +1881,13 @@ def main() -> int:
         help="the WIRED ratchet over --bounds-file (one repo)",
     )
     ap.add_argument(
-        "--bounds-file", default="docs/metrics/scorecard.json", help="repo-relative committed share"
+        "--bounds-file", default="docs/metrics/scorecard.json", help="repo-relative bounds file"
     )
     ap.add_argument(
         "--rebaseline-ok",
         action="store_true",
-        help="with --mode check: a lower committed share is allowed (metrics-rebaseline)",
+        help="with --mode check: a check main holds wired may go unwired or unrecorded "
+        "(metrics-rebaseline)",
     )
     ap.add_argument(
         "--base-ref",

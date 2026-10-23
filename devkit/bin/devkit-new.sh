@@ -34,7 +34,7 @@
 #      install in ci-quick has a lockfile to be frozen to; none for a stack without one
 #   6. make metrics-rebaseline: the collectors scripts/ci/metrics.conf declares fill
 #      docs/metrics/ratchet.json, so `make ci-metrics` holds from the first commit
-#   7. scorecard.py --mode rebaseline: docs/metrics/scorecard.json, the WIRED share's first bound
+#   7. scorecard.py --mode rebaseline: docs/metrics/scorecard.json, the WIRED checks' first record
 #   8. core.hooksPath=.githooks, then ONE commit with everything. pre-commit runs
 #      `make ci-quick` on the scaffold: devkit-check (index tree), toolchain-check, docs-check,
 #      release-check, workflows-check, the stack's own guards and linters. A scaffold the hooks
@@ -245,10 +245,10 @@ echo "devkit-new: make metrics-rebaseline"
 git config core.hooksPath .githooks
 git add -A
 # The WIRED ratchet's first bound, over the staged tree (scorecard.py reads the index), so the
-# scorecard_file check passes and ci-metrics holds the share from the first gate on. A new
-# project must read wired n/n; the share it commits is what a later PR may not lower.
+# scorecard_file check passes and ci-metrics holds every check from the first gate on. A new
+# project must read wired n/n; each check it records wired is one a later PR may not unwire.
 echo "devkit-new: devkit/bin/scorecard.py . --mode rebaseline"
-python3 -I devkit/bin/scorecard.py . --mode rebaseline || die "scorecard.py --mode rebaseline failed"
+devkit/bin/python.sh -I devkit/bin/scorecard.py . --mode rebaseline || die "scorecard.py --mode rebaseline failed"
 git add docs/metrics/scorecard.json
 echo "devkit-new: first commit, through the hooks (pre-commit runs make ci-quick)"
 # devkit-sync's trailer (_trailer_lib.sh): a Claude trailer by default, so an agent's scaffold
