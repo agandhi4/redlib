@@ -262,9 +262,6 @@ async fn main() {
 	app
 		.at("/highlighted.js")
 		.get(|_| resource(include_str!("../static/highlighted.js"), "text/javascript", true).boxed());
-	app
-		.at("/check_update.js")
-		.get(|_| resource(include_str!("../static/check_update.js"), "text/javascript", true).boxed());
 	app.at("/copy.js").get(|_| resource(include_str!("../static/copy.js"), "text/javascript", true).boxed());
 	app
 		.at("/prefetch.js")

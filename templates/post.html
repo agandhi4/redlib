@@ -2,7 +2,7 @@
 {% import "utils.html" as utils %}
 
 {% block title %}
-	{% if single_thread %}
+	{% if single_thread && !comments.is_empty() %}
 		{{ comments[0].author.name }} comments on {{ post.title }} - r/{{ post.community }}
 	{% else %}
 		{{ post.title }} - r/{{ post.community }}
@@ -86,6 +86,9 @@
       </div>
 
 		<!-- COMMENTS -->
+		{% if comments_unavailable %}
+		<p class="thread_nav" id="comments_unavailable">Reddit now requires a logged-in account to read comments. <a href="{{ reddit_url }}" rel="noreferrer">Open this thread on reddit.com</a></p>
+		{% endif %}
 		{% for c in comments -%}
 		<div class="thread">
 			{% if single_thread %}

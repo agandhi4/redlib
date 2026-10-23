@@ -1,9 +1,10 @@
 use cached::{Cached, SizedCache};
 use log::{debug, warn};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -18,7 +19,11 @@ pub(crate) struct SwrCache<K, V> {
 	stale_max: Duration,
 	entries: Mutex<SizedCache<K, (Instant, V)>>,
 	// Keys with a background refresh in flight, so a burst of stale hits spawns one fetch.
-	refreshing: Mutex<HashSet<K>>,
+	/// Keys with a background refresh in flight, each with the generation it was spawned under.
+	/// `invalidate` drops the key, so a refresh started before the eviction finds its generation
+	/// gone and discards its result. Lock order: `refreshing`, then `entries`.
+	refreshing: Mutex<HashMap<K, u64>>,
+	next_generation: AtomicU64,
 }
 
 impl<K, V> SwrCache<K, V>
@@ -31,8 +36,19 @@ where
 			fresh,
 			stale_max,
 			entries: Mutex::new(SizedCache::with_size(size)),
-			refreshing: Mutex::new(HashSet::new()),
+			refreshing: Mutex::new(HashMap::new()),
+			next_generation: AtomicU64::new(0),
 		}
+	}
+
+	/// Drop `key` so the next `get` fetches. For a value that parsed but proved wrong for its caller
+	/// (`client::distrust_listing`); otherwise the bad value keeps being served until `stale_max`.
+	/// Also disowns an in-flight refresh of `key`: it was likely fetched with the same bad token,
+	/// and writing its result back would undo the eviction.
+	pub(crate) fn invalidate(&self, key: &K) {
+		let mut refreshing = self.refreshing.lock().unwrap();
+		refreshing.remove(key);
+		self.entries.lock().unwrap().cache_remove(key);
 	}
 
 	/// `&'static self` because a stale hit spawns a refresh task that outlives the call.
@@ -70,18 +86,30 @@ where
 		F: FnOnce(K) -> Fut + Send + 'static,
 		Fut: Future<Output = Result<V, String>> + Send + 'static,
 	{
-		if !self.refreshing.lock().unwrap().insert(key.clone()) {
-			return;
-		}
+		let generation = {
+			let mut refreshing = self.refreshing.lock().unwrap();
+			if refreshing.contains_key(&key) {
+				return;
+			}
+			let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+			refreshing.insert(key.clone(), generation);
+			generation
+		};
 		tokio::spawn(async move {
-			match fetch(key.clone()).await {
+			let result = fetch(key.clone()).await;
+			let mut refreshing = self.refreshing.lock().unwrap();
+			if refreshing.get(&key) != Some(&generation) {
+				debug!("Discarding a refresh of {key:?} that was invalidated while in flight");
+				return;
+			}
+			refreshing.remove(&key);
+			match result {
 				Ok(value) => {
-					self.entries.lock().unwrap().cache_set(key.clone(), (Instant::now(), value));
+					self.entries.lock().unwrap().cache_set(key, (Instant::now(), value));
 				}
 				// Keep serving the stale copy; it ages out at stale_max on its own.
 				Err(e) => warn!("Background refresh failed for {key:?}: {e}"),
 			}
-			self.refreshing.lock().unwrap().remove(&key);
 		});
 	}
 }
@@ -125,6 +153,42 @@ mod tests {
 	/// once every other task is idle.
 	async fn settle() {
 		tokio::time::sleep(Duration::from_millis(1)).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn swr_refresh_in_flight_at_invalidate_does_not_write_back() {
+		let cache = cache();
+		cache.get("k", |_| async { Ok(1) }.boxed()).await.unwrap();
+		tokio::time::advance(FRESH + Duration::from_secs(1)).await;
+
+		// A stale hit starts a refresh that is still fetching (with the bad token) when the caller
+		// invalidates; when it finishes, its value must not reappear.
+		let release = Arc::new(Notify::new());
+		let gate = release.clone();
+		assert_eq!(
+			cache
+				.get("k", move |_| async move {
+					gate.notified().await;
+					Ok(99)
+				}
+				.boxed())
+				.await,
+			Ok(1)
+		);
+		settle().await;
+		cache.invalidate(&"k");
+		release.notify_one();
+		settle().await;
+
+		assert_eq!(cache.get("k", |_| async { Ok(2) }.boxed()).await, Ok(2), "the in-flight 99 was discarded");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn swr_invalidated_entry_is_fetched_again_even_when_fresh() {
+		let (cache, calls) = (cache(), Arc::new(AtomicUsize::new(0)));
+		assert_eq!(cache.get("k", counting(&calls)).await, Ok(1));
+		cache.invalidate(&"k");
+		assert_eq!(cache.get("k", counting(&calls)).await, Ok(2), "no stale copy survives invalidate");
 	}
 
 	#[tokio::test(start_paused = true)]
