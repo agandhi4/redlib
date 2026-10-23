@@ -35,6 +35,12 @@ where
 		}
 	}
 
+	/// Drop `key` so the next `get` fetches. For a value that parsed but proved wrong for its caller
+	/// (`client::distrust_listing`); otherwise the bad value keeps being served until `stale_max`.
+	pub(crate) fn invalidate(&self, key: &K) {
+		self.entries.lock().unwrap().cache_remove(key);
+	}
+
 	/// `&'static self` because a stale hit spawns a refresh task that outlives the call.
 	pub(crate) async fn get<F, Fut>(&'static self, key: K, fetch: F) -> Result<V, String>
 	where
@@ -125,6 +131,14 @@ mod tests {
 	/// once every other task is idle.
 	async fn settle() {
 		tokio::time::sleep(Duration::from_millis(1)).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn swr_invalidated_entry_is_fetched_again_even_when_fresh() {
+		let (cache, calls) = (cache(), Arc::new(AtomicUsize::new(0)));
+		assert_eq!(cache.get("k", counting(&calls)).await, Ok(1));
+		cache.invalidate(&"k");
+		assert_eq!(cache.get("k", counting(&calls)).await, Ok(2), "no stale copy survives invalidate");
 	}
 
 	#[tokio::test(start_paused = true)]

@@ -1,6 +1,6 @@
 use crate::dbg_msg;
 use crate::oauth::{force_refresh_token, oauth_client, oauth_session, refresh_blocked_token};
-use crate::reddit_response::{interpret_response, TokenAction};
+use crate::reddit_response::{interpret_response, TokenAction, THREAD_LOGIN_REQUIRED};
 use crate::rewrite::format_url;
 use crate::swr_cache::SwrCache;
 use crate::transport::CLIENT;
@@ -122,26 +122,6 @@ fn reddit_get(path: String, quarantine: bool) -> Boxed<Result<WreqResponse, Stri
 	request(&Method::GET, path, true, quarantine, REDDIT_URL_BASE, REDDIT_URL_BASE_HOST)
 }
 
-/// Since 2026-10-20 ~18:40 UTC, Reddit's edge answers the literal thread route
-/// `/{r,u,user}/<name>/comments/...` with its HTML "blocked by network security" 403 for the
-/// app-only tokens redlib mints, on every instance, while listings keep working. The same
-/// request with the slash before `comments` percent-encoded is not matched and returns the
-/// thread JSON (redlib-org/redlib#591, #592). A bare `/comments/<id>` has no such slash and
-/// stays blocked. If thread pages 403 again, Reddit has started normalising `%2F`.
-/// Used by `fetch_json` only: the cache key and error messages keep the readable path.
-fn encode_thread_route(path: &str) -> String {
-	let (route, query) = path.split_once('?').map_or((path, None), |(route, query)| (route, Some(query)));
-	let encoded = ["/r/", "/u/", "/user/"].iter().find_map(|prefix| {
-		let (name, tail) = route.strip_prefix(prefix)?.split_once('/')?;
-		tail.starts_with("comments/").then(|| format!("{prefix}{name}%2F{tail}"))
-	});
-	match (encoded, query) {
-		(Some(route), Some(query)) => format!("{route}?{query}"),
-		(Some(route), None) => route,
-		(None, _) => path.to_string(),
-	}
-}
-
 /// Makes a HEAD request to Reddit at `path, using the short URL base. This will not follow redirects.
 fn reddit_short_head(path: String, quarantine: bool, base_path: &'static str, host: &'static str) -> Boxed<Result<WreqResponse, String>> {
 	request(&Method::HEAD, path, false, quarantine, base_path, host)
@@ -258,6 +238,45 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 	JSON_CACHE.get((path, quarantine), |(path, quarantine)| fetch_json(path, quarantine)).await
 }
 
+/// Whether a `json()` error is Reddit refusing a thread to a logged-out token (since 2026-10-23),
+/// which `post::item` answers with the post alone. A predicate rather than the classifier's
+/// constant, so callers depend on `client` only.
+pub fn thread_needs_login(err: &str) -> bool {
+	err == THREAD_LOGIN_REQUIRED
+}
+
+/// A listing answered with 200 JSON that holds no posts (`data.children` missing). Reddit does this
+/// to a long-lived token instead of sending the 403 block page: on 2026-10-23 every listing read
+/// "No posts found" for a 35h-old token while a fresh token from the same IP got 25 posts. So it is
+/// handled like that 403: drop the cached copy (or it is served stale for minutes) and rotate, under
+/// the same cooldown. Logs the shape only, never values. Used by `Post::fetch`.
+pub async fn distrust_listing(path: &str, quarantine: bool, body: &Value) {
+	warn!(
+		"[🚫] Reddit answered {path} with JSON holding no posts ({}); treating the token as degraded",
+		json_shape(body)
+	);
+	JSON_CACHE.invalidate(&(path.to_string(), quarantine));
+	refresh_blocked_token().await;
+}
+
+/// `kind`, top-level keys and `data` keys of a Reddit response: enough to recognise what came back.
+fn json_shape(body: &Value) -> String {
+	let keys = |v: &Value| match v.as_object() {
+		Some(map) => map.keys().take(10).cloned().collect::<Vec<_>>().join(","),
+		None => format!(
+			"<{}>",
+			if v.is_null() {
+				"null"
+			} else if v.is_array() {
+				"array"
+			} else {
+				"scalar"
+			}
+		),
+	};
+	format!("kind={} keys=[{}] data=[{}]", body["kind"].as_str().unwrap_or("-"), keys(body), keys(&body["data"]))
+}
+
 /// Fetch and parse one Reddit JSON document. Uncached; every caller goes through `json()`.
 async fn fetch_json(path: String, quarantine: bool) -> Result<Value, String> {
 	let session = oauth_session();
@@ -271,8 +290,8 @@ async fn fetch_json(path: String, quarantine: bool) -> Result<Value, String> {
 	}
 	session.ratelimit_remaining().fetch_sub(1, Ordering::SeqCst);
 
-	// Fetch the url (thread routes with one slash encoded, see encode_thread_route)...
-	let response = match reddit_get(encode_thread_route(&path), quarantine).await {
+	// Fetch the url...
+	let response = match reddit_get(path.clone(), quarantine).await {
 		Ok(response) => response,
 		Err(e) => return Err(format!("Couldn't send request to Reddit: {e} | {path}")),
 	};
@@ -320,37 +339,14 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn thread_routes_get_the_slash_before_comments_encoded() {
-		assert_eq!(
-			encode_thread_route("/r/politics/comments/1x9xx9e/.json?&sort=confidence&raw_json=1"),
-			"/r/politics%2Fcomments/1x9xx9e/.json?&sort=confidence&raw_json=1"
-		);
-		assert_eq!(
-			encode_thread_route("/r/rust/comments/18t5968/title/kfbqlbc/.json?raw_json=1"),
-			"/r/rust%2Fcomments/18t5968/title/kfbqlbc/.json?raw_json=1"
-		);
-		assert_eq!(
-			encode_thread_route("/user/spez/comments/abc123/title/.json?raw_json=1"),
-			"/user/spez%2Fcomments/abc123/title/.json?raw_json=1"
-		);
-		assert_eq!(encode_thread_route("/u/spez/comments/abc123/title.json"), "/u/spez%2Fcomments/abc123/title.json");
-		// A subreddit called `comments` is still a subreddit.
-		assert_eq!(encode_thread_route("/r/comments/comments/1x9xx9e/.json"), "/r/comments%2Fcomments/1x9xx9e/.json");
+	fn json_shape_names_keys_never_values() {
+		let body = serde_json::json!({"kind": "Listing", "data": {"after": "t3_secret", "dist": 0}});
+		let shape = json_shape(&body);
+		assert_eq!(shape, "kind=Listing keys=[data,kind] data=[after,dist]");
+		assert!(!shape.contains("t3_secret"));
+		assert_eq!(json_shape(&serde_json::json!([1, 2])), "kind=- keys=[<array>] data=[<null>]");
 	}
 
-	#[test]
-	fn non_thread_routes_are_untouched() {
-		for path in [
-			"/r/politics/hot.json?&raw_json=1",
-			"/r/politics/about.json?raw_json=1",
-			"/user/spez/comments.json?raw_json=1",
-			"/r/politics/search.json?q=comments/x",
-			"/comments/1x9xx9e/.json?raw_json=1",
-			"/r/politics+stocks/new.json",
-		] {
-			assert_eq!(encode_thread_route(path), path);
-		}
-	}
 	use crate::oauth::init_oauth_client;
 
 	const POPULAR_URL: &str = "/r/popular/hot.json?&raw_json=1&geo_filter=GLOBAL";

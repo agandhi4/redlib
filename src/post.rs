@@ -1,5 +1,5 @@
 #![allow(clippy::cmp_owned)]
-use crate::client::{canonical_path, json};
+use crate::client::{canonical_path, json, thread_needs_login};
 use crate::config::get_setting;
 use crate::db;
 use crate::model::{parse_post, Author, Awards, Comment, Flair, FlairPart, Post, Subreddit};
@@ -12,6 +12,7 @@ use askama::Template;
 use cached::{Cached, TimedSizedCache};
 use hyper::{Body, Request, Response};
 use regex::Regex;
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
 
@@ -28,6 +29,8 @@ struct PostTemplate {
 	url_without_query: String,
 	comment_query: String,
 	sub: Subreddit,
+	/// Reddit refused the thread (`client::thread_needs_login`): the post renders alone with a notice.
+	comments_unavailable: bool,
 }
 
 #[derive(Template)]
@@ -52,11 +55,10 @@ fn html_response(html: String) -> Response<Body> {
 	Response::builder().status(200).header("content-type", "text/html").body(html.into()).unwrap_or_default()
 }
 
-/// A post link with no subreddit (`/comments/<id>/…`, and the `/<id>` short link). Reddit 403s the
-/// bare JSON route for app-only tokens (2026-10-20) and `client::encode_thread_route` has no
-/// subreddit slash to encode there, so resolve the canonical `/r/<sub>/comments/<id>/<title>/`
-/// with the short-link HEAD on www.reddit.com (not blocked) and redirect, keeping a linked
-/// comment and the query. Used by the `/comments/:id…` routes and `/:id` in `main.rs`.
+/// A post link with no subreddit (`/comments/<id>/…`, and the `/<id>` short link): resolve the
+/// canonical `/r/<sub>/comments/<id>/<title>/` with the short-link HEAD on www.reddit.com (not
+/// blocked, unlike the bare JSON route) and redirect, keeping a linked comment and the query, so
+/// every post link lands in `item`. Used by the `/comments/:id…` routes and `/:id` in `main.rs`.
 pub async fn canonical_redirect(req: Request<Body>) -> Result<Response<Body>, String> {
 	let id = req.param("id").unwrap_or_default();
 	let resolved = canonical_path(format!("/comments/{id}"), 3).await;
@@ -125,68 +127,79 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 	// The thread JSON and the subreddit sidebar are independent Reddit calls; fetch them
 	// concurrently so a cache-cold post page costs one round-trip, not two.
 	let (response, sidebar) = tokio::join!(json(path, quarantined), crate::subreddit::subreddit(&sub, quarantined));
-	match response {
-		// Otherwise, grab the JSON output from the request
-		Ok(response) => {
-			// Parse the JSON into Post and Comment structs
-			let mut post = parse_post(&response[0]["data"]["children"][0]).await;
-
-			let req_url = req.uri().to_string();
-			// Return landing page if this post if this Reddit deems this post
-			// NSFW, but we have also disabled the display of NSFW content
-			// or if the instance is SFW-only.
-			if post.nsfw && crate::utils::should_be_nsfw_gated(&req, &req_url) {
-				return Ok(nsfw_landing(req, req_url).await.unwrap_or_default());
-			}
-
-			let query_body = match COMMENT_SEARCH_CAPTURE.captures(&url) {
-				Some(captures) => captures.get(1).unwrap().as_str().replace("%20", " ").replace('+', " "),
-				None => String::new(),
-			};
-
-			let query_string = format!("q={query_body}&type=comment");
-			let form = url::form_urlencoded::parse(query_string.as_bytes()).collect::<HashMap<_, _>>();
-			let query = form.get("q").unwrap().clone().to_string();
-
-			let comments = match query.as_str() {
-				"" => parse_comments(&response[1], &post.permalink, &post.author.name, highlighted_comment, &get_filters(&req), &req),
-				_ => query_comments(&response[1], &post.permalink, &post.author.name, highlighted_comment, &get_filters(&req), &query, &req),
-			};
-
-			let sub_data = sidebar.unwrap_or_default();
-
-			// Record visit and check saved status
-			db::record_visit(&post.id, &post.title, &post.community, &post.permalink);
-			db::cleanup_history();
-			post.is_saved = db::is_saved(&post.id);
-
-			// Use the Post and Comment structs to generate a website to show users
-			let html = PostTemplate {
-				comments,
-				post,
-				url_without_query: url.clone().trim_end_matches(&format!("?q={query}&type=comment")).to_string(),
-				sort,
-				prefs: Preferences::new(&req),
-				single_thread,
-				url: req_url,
-				comment_query: query,
-				sub: sub_data,
-			}
-			.render()
-			.unwrap_or_default();
-			RENDERED_POST_CACHE.lock().unwrap().cache_set(cache_key, html.clone());
-			Ok(html_response(html))
+	let (post_json, comments_json) = match response {
+		Ok(response) => (response.pointer("/0/data/children/0").cloned().unwrap_or_default(), response.get(1).cloned()),
+		Err(msg) if thread_needs_login(&msg) => match post_without_comments(&req, quarantined).await {
+			Ok(post_json) => (post_json, None),
+			Err(msg) => return error(req, &msg).await,
+		},
+		Err(msg) if msg == "quarantined" || msg == "gated" => {
+			let sub = req.param("sub").unwrap_or_default();
+			return Ok(quarantine(&req, sub, &msg));
 		}
 		// If the Reddit API returns an error, exit and send error page to user
-		Err(msg) => {
-			if msg == "quarantined" || msg == "gated" {
-				let sub = req.param("sub").unwrap_or_default();
-				Ok(quarantine(&req, sub, &msg))
-			} else {
-				error(req, &msg).await
-			}
-		}
+		Err(msg) => return error(req, &msg).await,
+	};
+
+	// Parse the JSON into Post and Comment structs
+	let mut post = parse_post(&post_json).await;
+
+	let req_url = req.uri().to_string();
+	// Return landing page if this post if this Reddit deems this post
+	// NSFW, but we have also disabled the display of NSFW content
+	// or if the instance is SFW-only.
+	if post.nsfw && crate::utils::should_be_nsfw_gated(&req, &req_url) {
+		return Ok(nsfw_landing(req, req_url).await.unwrap_or_default());
 	}
+
+	let query_body = match COMMENT_SEARCH_CAPTURE.captures(&url) {
+		Some(captures) => captures.get(1).unwrap().as_str().replace("%20", " ").replace('+', " "),
+		None => String::new(),
+	};
+
+	let query_string = format!("q={query_body}&type=comment");
+	let form = url::form_urlencoded::parse(query_string.as_bytes()).collect::<HashMap<_, _>>();
+	let query = form.get("q").unwrap().clone().to_string();
+
+	let filters = get_filters(&req);
+	let comments = match (&comments_json, query.as_str()) {
+		(None, _) => Vec::new(),
+		(Some(json), "") => parse_comments(json, &post.permalink, &post.author.name, highlighted_comment, &filters, &req),
+		(Some(json), _) => query_comments(json, &post.permalink, &post.author.name, highlighted_comment, &filters, &query, &req),
+	};
+
+	let sub_data = sidebar.unwrap_or_default();
+
+	// Record visit and check saved status
+	db::record_visit(&post.id, &post.title, &post.community, &post.permalink);
+	db::cleanup_history();
+	post.is_saved = db::is_saved(&post.id);
+
+	// Use the Post and Comment structs to generate a website to show users
+	let html = PostTemplate {
+		comments,
+		post,
+		url_without_query: url.clone().trim_end_matches(&format!("?q={query}&type=comment")).to_string(),
+		sort,
+		prefs: Preferences::new(&req),
+		single_thread,
+		url: req_url,
+		comment_query: query,
+		sub: sub_data,
+		comments_unavailable: comments_json.is_none(),
+	}
+	.render()
+	.unwrap_or_default();
+	RENDERED_POST_CACHE.lock().unwrap().cache_set(cache_key, html.clone());
+	Ok(html_response(html))
+}
+
+/// The post alone, from `/by_id/` (still served to app-only tokens), for a thread Reddit refuses
+/// (`client::thread_needs_login`). `item` then renders it with a note that comments need a login.
+async fn post_without_comments(req: &Request<Body>, quarantined: bool) -> Result<Value, String> {
+	let id = req.param("id").unwrap_or_default();
+	let listing = json(format!("/by_id/t3_{id}.json?raw_json=1"), quarantined).await?;
+	listing.pointer("/data/children/0").cloned().ok_or_else(|| "Post not found".to_string())
 }
 
 // COMMENTS

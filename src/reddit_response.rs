@@ -12,11 +12,30 @@ pub(crate) enum TokenAction {
 	RotateInBackground,
 	/// JSON 401 "Unauthorized": the token expired. Rotate before answering.
 	Rotate,
-	/// Non-JSON 403: Reddit's network-policy block page. For a flagged token/device pair a
-	/// rotation fixes it (Oct 2026). The same page also answers a ROUTE Reddit blocks for every
-	/// logged-out client (threads, 2026-10-20), which no rotation fixes: hence the hedged message
-	/// and the 60s cooldown in `oauth::refresh_blocked_token`. Same body, so they can't be told apart here.
+	/// Non-JSON 403 off the thread routes: Reddit's network-policy block page for a flagged
+	/// token/device pair, which a rotation fixes (Oct 2026). The same page answers the thread
+	/// routes for every logged-out token, which no rotation fixes, so `is_thread_route` keeps those
+	/// out of here; a 403 on some other route Reddit starts blocking still lands here, hence the
+	/// hedged message and the 60s cooldown in `oauth::refresh_blocked_token`.
 	RotateBlocked,
+}
+
+/// The error for a thread Reddit no longer serves to logged-out tokens. `post::item` answers it with
+/// the post alone (from `/by_id/`) and a note that comments need a Reddit login.
+pub(crate) const THREAD_LOGIN_REQUIRED: &str = "thread_login_required";
+
+/// `/{r,u,user}/<name>/comments/…` or a bare `/comments/…`. Since 2026-10-23 (when the `%2F`
+/// spelling that worked from 2026-10-20 was closed) Reddit 403s these for every app-only token,
+/// so their 403 is a route block, not a flagged token, and must never rotate one.
+pub(crate) fn is_thread_route(path: &str) -> bool {
+	let route = path.split('?').next().unwrap_or_default();
+	route.starts_with("/comments/")
+		|| ["/r/", "/u/", "/user/"].iter().any(|prefix| {
+			route
+				.strip_prefix(prefix)
+				.and_then(|rest| rest.split_once('/'))
+				.is_some_and(|(_, tail)| tail.starts_with("comments/"))
+		})
 }
 
 /// Classify one Reddit response: the caller's result, and what must happen to the token. Pure, so
@@ -37,7 +56,9 @@ pub(crate) fn interpret_response(status: u16, body: &[u8], ratelimit_reset: Opti
 		Ok(json) => json,
 		Err(e) => {
 			error!("Got an invalid response from reddit {e}. Status code: {status}");
-			return if status == 403 {
+			return if status == 403 && is_thread_route(path) {
+				(Err(THREAD_LOGIN_REQUIRED.to_string()), TokenAction::None)
+			} else if status == 403 {
 				(
 					Err("Reddit refused this request (403 block page). The session is being renewed; if a refresh does not help, Reddit is blocking this kind of page for logged-out clients.".to_string()),
 					TokenAction::RotateBlocked,
@@ -97,6 +118,40 @@ mod tests {
 		let (result, action) = interpret(401, r#"{"message":"Unauthorized","error":401}"#);
 		assert_eq!(result, Err("OAuth token has expired. Please refresh the page!".to_string()));
 		assert_eq!(action, TokenAction::Rotate);
+	}
+
+	#[test]
+	fn a_thread_route_403_is_a_route_block_and_keeps_the_token() {
+		for path in [
+			"/r/nyc/comments/1xadhhx/.json?&sort=confidence&raw_json=1",
+			"/comments/1xadhhx/.json",
+			"/user/spez/comments/abc123/t/.json",
+		] {
+			let (result, action) = interpret_response(403, b"<body class=theme-beta>blocked</body>", None, path);
+			assert_eq!(result, Err(THREAD_LOGIN_REQUIRED.to_string()), "{path}");
+			assert_eq!(action, TokenAction::None, "{path}");
+		}
+	}
+
+	#[test]
+	fn thread_routes_are_told_from_their_neighbours() {
+		for path in [
+			"/r/nyc/comments/1xadhhx/",
+			"/r/comments/comments/1x/.json",
+			"/u/spez/comments/abc/t.json",
+			"/comments/1xadhhx",
+		] {
+			assert!(is_thread_route(path), "{path}");
+		}
+		for path in [
+			"/r/nyc/hot.json",
+			"/user/spez/comments.json?raw_json=1",
+			"/r/nyc/about.json",
+			"/by_id/t3_1xadhhx.json",
+			"/r/nyc/search.json?q=/comments/x",
+		] {
+			assert!(!is_thread_route(path), "{path}");
+		}
 	}
 
 	#[test]
