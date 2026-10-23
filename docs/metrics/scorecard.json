@@ -1,4 +1,20 @@
 {
-  "_comment": "scorecard ratchet: the committed WIRED share of the repo-scoped checks (bin/scorecard.py --mode check|tighten|rebaseline); never edit by hand",
-  "wired": 1.0
+  "_comment": "scorecard ratchet: whether each repo-scoped check is wired (bin/scorecard.py --mode check|tighten|rebaseline); never edit by hand",
+  "checks": {
+    "contract_probe": true,
+    "gate_plan": true,
+    "hooks": true,
+    "merge_workflow": true,
+    "ratchet.complexity": true,
+    "ratchet.coverage": true,
+    "ratchet.cycles": true,
+    "ratchet.dead": true,
+    "ratchet.duplication": true,
+    "ratchet.fan_out": true,
+    "ratchet.file": true,
+    "ratchet.vuln": true,
+    "renovate": true,
+    "secrets": true,
+    "tiers": true
+  }
 }
