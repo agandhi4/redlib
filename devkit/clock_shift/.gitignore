@@ -1,0 +1,3 @@
+# pytest imports the plugin from here (tier_guard.sh puts this directory on PYTHONPATH), and in a
+# consumer that is the vendored devkit/clock_shift/, whose own .gitignore may not cover it.
+__pycache__/

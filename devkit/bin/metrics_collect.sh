@@ -70,8 +70,8 @@
 # job that produces that coverage did not run either.
 #
 # Tier inputs, outside the gate: the files a build or test tier writes that a collector reads
-# (the TIER_INPUTS table: coverage reports, the statement fixture's build/statements.json, a
-# Next app's build manifest for ts.mjs --bundle). Before any collector runs, every such file of every collector that
+# (the TIER_INPUTS table, bin/_metrics_conf_lib.sh: coverage reports, the statement fixture's
+# build/statements.json, a Next app's build manifest for ts.mjs --bundle). Before any collector runs, every such file of every collector that
 # will run is checked; when any is missing the run stops once (exit 2) listing each file, its
 # collector and the make target of the gate job that writes it (the collector's job:<name> area,
 # looked up in scripts/ci/gate_plan.sh: a GATE_JOBS_* entry or a `job <name> <target>` call).
@@ -124,33 +124,18 @@ set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 RATCHET=$HERE/metrics_ratchet.py
+# shellcheck source=bin/_gate_env.sh  # fetch_main: merge_needed reads a current origin/main
+. "$HERE/_gate_env.sh"
+# shellcheck source=bin/_metrics_conf_lib.sh  # the conf's parse and its TIER_INPUTS table
+. "$HERE/_metrics_conf_lib.sh"
 # Where every collector writes, and where local_gate.sh and tier_guard.sh already wrote: the
 # merge reads the whole directory.
 readonly COLLECT_DIR=build/metrics
-readonly AREAS="docs backend frontend native tooling other repo"
 readonly GATE_JSON=build/metrics/gate.json   # local_gate.sh's job seconds: which jobs ran
 readonly SUBCOMMANDS="snapshot check tighten rebaseline"
 # A conf command that runs one of devkit's --list-out collectors (any path prefix: devkit/,
 # ../devkit/). Matched against " <command> " so the name may end the line.
 readonly LIST_OUT_COLLECTOR='[[:space:]/]metrics/(python\.py|ts\.mjs|rust\.py|shell\.py|jscpd\.mjs)[[:space:]]'
-# Tier inputs (header): every devkit collector flag that reads a build or test artefact, one
-# row each; a new artefact-reading collector or flag is a new row, read by tier_inputs.
-#   collector      flag                the input checked for, and its kind
-#   coverage.py    --coverage-json     value: the flag's file (coverage.py `coverage json`)
-#   coverage.py    --istanbul-summary  value: the flag's file (istanbul coverage-summary.json)
-#   coverage.py    --llvm-cov-json     value: the flag's file (cargo llvm-cov --json export)
-#   statements.py  --in                value: the flag's file (the statement fixture's output)
-#   ts.mjs         --bundle            next-build: <--root>/.next/build-manifest.json in a Next
-#                                      app (a .next/ or a next.config.*: ts.mjs's own test);
-#                                      `next build` rewrites it every build, while the .next/
-#                                      dir's own mtime moves only when an entry is added. A vite
-#                                      app is built by ts.mjs itself and has no input
-readonly TIER_INPUTS="coverage.py --coverage-json value
-coverage.py --istanbul-summary value
-coverage.py --llvm-cov-json value
-statements.py --in value
-ts.mjs --bundle next-build"
-readonly TIER_INPUT_COLLECTOR='[[:space:]/]metrics/([a-z_]+\.(py|mjs))[[:space:]]'
 
 usage() {
   echo "usage: $0 <snapshot|check|tighten|rebaseline> [--conf FILE] [--bounds FILE] [--out FILE] [--fresh] [--quick]" >&2
@@ -204,7 +189,7 @@ quick_args() {
 # outside the gate, not already inside one, and with an origin/main HEAD does not contain).
 merge_needed() {
   [ "$SUB" = tighten ] && [ -z "${GATE_AREAS+x}" ] && [ -z "${METRICS_TIGHTEN_MERGED:-}" ] || return 1
-  if git remote get-url origin >/dev/null 2>&1 && ! git fetch -q origin main 2>/dev/null; then
+  if git remote get-url origin >/dev/null 2>&1 && ! fetch_main . 2>/dev/null; then
     echo "metrics tighten: could not fetch origin main; using the local origin/main" >&2
   fi
   MERGE_MAIN=$(git rev-parse -q --verify "origin/main^{commit}" 2>/dev/null) || return 1
@@ -233,15 +218,33 @@ in_checkout() {
   local top path dir
   top=$(pwd -P)
   case "$1" in /*) path=$1 ;; *) path=$PWD/$1 ;; esac
-  # A directory that does not exist yet (--out build/x.json before any build) stays logical.
+  # A directory that does not exist yet (--out build/x.json before any build) stays logical,
+  # with its `..` folded first: `../new/x.json` is outside, not under "$PWD"/ (Codex, orbit #116).
   if dir=$(CDPATH='' cd -P "$(dirname "$path")" 2>/dev/null && pwd); then
     path=$dir/$(basename "$path")
+  else
+    path=$(lexical_path "$path")
   fi
   case "$path" in
     "$top"/*) echo "${path#"$top"/}" ;;
     "$PWD"/*) echo "${path#"$PWD"/}" ;;
     *) echo "$path" ;;
   esac
+}
+# lexical_path <absolute path>: the path with `.`, `..` and repeated slashes folded, touching
+# no filesystem (for a path that does not exist yet, which cd -P cannot resolve).
+lexical_path() {
+  local part parts kept=()
+  IFS=/ read -ra parts <<<"$1"
+  for part in ${parts[@]+"${parts[@]}"}; do
+    case "$part" in
+      '' | .) ;;
+      ..) [ "${#kept[@]}" -eq 0 ] || unset 'kept[${#kept[@]}-1]' ;;
+      *) kept+=("$part") ;;
+    esac
+  done
+  local IFS=/
+  echo "/${kept[*]+"${kept[*]}"}"  # bash 3.2: an empty array is unbound under set -u
 }
 # copy_back <dir>: the files tighten writes, from the merged worktree into this checkout. An
 # absolute path (outside this checkout: in_checkout) was written in place by the merged run.
@@ -280,35 +283,7 @@ tighten_on_merge() {
 ! merge_needed || tighten_on_merge
 
 # ---- parse the conf: every line before anything runs ---------------------------------------
-NAMES=()
-COLLECTOR_AREAS=()
-COMMANDS=()
-line_no=0
-while IFS= read -r line || [ -n "$line" ]; do
-  line_no=$((line_no + 1))
-  line=${line#"${line%%[![:space:]]*}"}
-  case "$line" in ''|'#'*) continue ;; esac
-  read -r name area command <<<"$line"
-  [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]] \
-    || die "$CONF:$line_no: collector name '$name' must match [A-Za-z0-9_-]+ (it names build/metrics/<name>.json)"
-  for seen in ${NAMES[@]+"${NAMES[@]}"}; do
-    [ "$seen" != "$name" ] || die "$CONF:$line_no: collector '$name' declared twice"
-  done
-  case "${area:-}" in
-    job:*)
-      [[ "${area#job:}" =~ ^[A-Za-z0-9_-]+$ ]] \
-        || die "$CONF:$line_no: '${area}' must name a gate job, job:<name> with [A-Za-z0-9_-]+" ;;
-    *)
-      case " $AREAS " in
-        *" ${area:-} "*) ;;
-        *) die "$CONF:$line_no: area '${area:-}' must be one of: $AREAS, or job:<gate job name>" ;;
-      esac ;;
-  esac
-  [ -n "${command:-}" ] || die "$CONF:$line_no: collector '$name' has no command"
-  NAMES+=("$name")
-  COLLECTOR_AREAS+=("$area")
-  COMMANDS+=("$command")
-done <"$CONF"
+metrics_conf_parse "$CONF"
 
 # ---- decide: RUN or SKIP per collector ---------------------------------------------------------
 # gate_job_ran <job>: true when gate.json records the job's seconds (the gate wrote it).
@@ -350,40 +325,6 @@ while [ "$i" -lt "${#NAMES[@]}" ]; do
 done
 
 # ---- tier inputs (header: Tier inputs) -------------------------------------------------------------
-# flag_values <flag> <word>...: each value the words give <flag> (`--f v` or `--f=v`).
-flag_values() {
-  local flag=$1 w prev=""
-  shift
-  for w in "$@"; do
-    if [ "$prev" = "$flag" ]; then echo "$w"; elif [[ "$w" == "$flag="?* ]]; then echo "${w#*=}"; fi
-    prev=$w
-  done
-}
-# next_build_input <root>: the Next build manifest under <root> when <root> is a Next app. The
-# names are ts.mjs's NEXT_CONFIGS: keep the two in step.
-next_build_input() {
-  local root=${1%/} c
-  [ -n "$root" ] || return 0
-  if [ "$root" = . ]; then root=""; else root="$root/"; fi
-  for c in .next next.config.js next.config.mjs next.config.ts next.config.cjs; do
-    if [ -e "$root$c" ]; then echo "${root}.next/build-manifest.json"; return; fi
-  done
-}
-# tier_inputs <command>: the files the command reads that a tier writes (TIER_INPUTS), one per line.
-tier_inputs() {
-  [[ " $1 " =~ $TIER_INPUT_COLLECTOR ]] || return 0
-  local collector=${BASH_REMATCH[1]} words row_collector flag kind w
-  read -ra words <<<"$1"
-  while read -r row_collector flag kind; do
-    [ "$row_collector" = "$collector" ] || continue
-    case "$kind" in
-      value) flag_values "$flag" "${words[@]}" ;;
-      next-build)
-        case " ${words[*]} " in *" $flag "*) ;; *) continue ;; esac
-        while read -r w; do next_build_input "$w"; done < <(flag_values --root "${words[@]}") ;;
-    esac
-  done <<<"$TIER_INPUTS"
-}
 # plan_job_target <job>: the make target of the plan's gate job <job>, or nothing. The plan is
 # run, not parsed: a regex read rollcall's one-line `if …; then job db ci-db; else …` as target
 # `ci-db;` (2026-10-19). A subshell sources _paths_lib.sh and the plan with the skeleton's
@@ -398,6 +339,7 @@ plan_job_target() {
     want=$1 CHANGED=devkit-plan-probe
     # shellcheck source=bin/_paths_lib.sh
     . "$HERE/_paths_lib.sh"
+    GATE_CODE_PATHS=  # the plan's alone, never the environment's (_paths_lib.sh header)
     # shellcheck source=/dev/null  # the repo's plan, as local_gate.sh sources it
     . scripts/ci/gate_plan.sh
     # shellcheck disable=SC2329  # the skeleton's helpers (local_gate.sh), which the plan calls
@@ -531,6 +473,8 @@ fi
 # ---- run ------------------------------------------------------------------------------------------
 # shellcheck source=bin/toolchain_path.sh
 . "$HERE/toolchain_path.sh"
+# Also resolves and exports DEVKIT_PYTHON (devkit_python), which the ratchet and scorecard calls
+# below run on, so a direct run needs no parent to have set it. Nothing before this runs Python.
 toolchain_path . || die "$TOOLCHAIN_ERROR"
 mkdir -p "$COLLECT_DIR" || die "cannot create $COLLECT_DIR"
 for name in ${NAMES[@]+"${NAMES[@]}"}; do
@@ -582,7 +526,7 @@ for f in "$COLLECT_DIR"/*.json; do
 done
 MERGE_ARGS=()
 for name in ${SKIPPED[@]+"${SKIPPED[@]}"}; do MERGE_ARGS+=(--skipped "$name"); done
-python3 -I "$RATCHET" merge --out "$OUT" ${MERGE_ARGS[@]+"${MERGE_ARGS[@]}"} \
+"$DEVKIT_PYTHON" -I "$RATCHET" merge --out "$OUT" ${MERGE_ARGS[@]+"${MERGE_ARGS[@]}"} \
   -- ${INPUTS[@]+"${INPUTS[@]}"} || exit $?
 [ "$SUB" != snapshot ] || exit 0
 
@@ -597,13 +541,13 @@ case "$SUB" in tighten|rebaseline) RATCHET_ARGS+=(--report-only "$(dirname "$BOU
 # quick_ratchet: --quick's ratchet, its lines then the pre-push hint; exits with the ratchet's code.
 quick_ratchet() {
   local out rc=0
-  out=$(python3 -I "$RATCHET" "${RATCHET_ARGS[@]}") || rc=$?
+  out=$("$DEVKIT_PYTHON" -I "$RATCHET" "${RATCHET_ARGS[@]}") || rc=$?
   printf '%s\n' "$out"
   ! grep -q ' BETTER — run make metrics-tighten' <<<"$out" || echo "BETTER: run make metrics-tighten before push"
   exit "$rc"
 }
 [ "$QUICK" = 0 ] || quick_ratchet
-python3 -I "$RATCHET" "${RATCHET_ARGS[@]}"
+"$DEVKIT_PYTHON" -I "$RATCHET" "${RATCHET_ARGS[@]}"
 ratchet_rc=$?
 # A failing tighten (rc 1: a WORSE key) has still written its BETTER bounds; the scorecard's
 # tighten runs too, so one command locks in everything that improved before reporting the rest.
@@ -624,9 +568,9 @@ if [ -f "$SCORECARD_BOUNDS" ] \
   if [ "$SC_MODE" = check ] && { [ "${METRICS_REBASELINE:-0}" = 1 ] || [ "$KEYED" = 1 ]; }; then
     SC_ARGS+=(--rebaseline-ok)
   fi
-  python3 -I "$HERE/scorecard.py" "${SC_ARGS[@]}" | grep -E '^(scorecard-ratchet(-bound)?|scorecard|metrics-rebaseline:) ' || exit "${PIPESTATUS[0]}"
+  "$DEVKIT_PYTHON" -I "$HERE/scorecard.py" "${SC_ARGS[@]}" | grep -E '^(scorecard-ratchet(-bound)?:?|scorecard|metrics-rebaseline:) ' || exit "${PIPESTATUS[0]}"
   if [ "$SUB" = rebaseline ] && [ "$KEYED" = 0 ]; then
-    echo "metrics_collect: WARNING: $SCORECARD_BOUNDS was rewritten too (every track to today's share); to loosen only named bounds, restore both files and run \`make metrics-rebaseline KEYS=<key>[,<key>]\`" >&2
+    echo "metrics_collect: WARNING: $SCORECARD_BOUNDS was rewritten too (every check to today's state); to loosen only named bounds, restore both files and run \`make metrics-rebaseline KEYS=<key>[,<key>]\`" >&2
   fi
 fi
 exit "$ratchet_rc"
