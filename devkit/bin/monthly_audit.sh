@@ -75,12 +75,15 @@ fi
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 DEVKIT_ROOT=${DEVKIT_ROOT:-$(cd "$HERE/.." && pwd)}
+# shellcheck source=bin/_toolchain_lib.sh
+. "$HERE/_toolchain_lib.sh"
+devkit_python || die "$DEVKIT_PYTHON_ERROR"
 DATA=${DEVKIT_GITHUB_DATA:-$DEVKIT_ROOT/github}
 REPOS_FILE=$DATA/repos.json
 MONTH=${AUDIT_MONTH:-$(date +%Y-%m)}
-# 45 days: the scorecard's longest TREND window (30) plus the commit before it. python3 because
+# 45 days: the scorecard's longest TREND window (30) plus the commit before it. Python because
 # BSD and GNU date disagree on relative dates.
-CLONE_SINCE=$(python3 -I -c 'import datetime; print(datetime.date.today() - datetime.timedelta(days=45))') || die "python3 is required"
+CLONE_SINCE=$("$DEVKIT_PYTHON" -I -c 'import datetime; print(datetime.date.today() - datetime.timedelta(days=45))') || die "cannot compute the clone window (python above)"
 case "$MONTH" in [0-9][0-9][0-9][0-9]-[0-1][0-9]) ;; *) log "AUDIT_MONTH must be YYYY-MM: $MONTH"; usage ;; esac
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}/devkit/audit
 RUNS_FILE=$STATE/runs
@@ -92,7 +95,7 @@ RATCHET_SNAPSHOT=${AUDIT_RATCHET_SNAPSHOT:-docs/metrics/snapshot.json}
 # Issues are filed only while fewer than this many fleet-audit issues are open (memo §7a).
 BACKLOG_CAP=3
 
-for tool in jq gh git python3; do
+for tool in jq gh git; do   # python3 is devkit_python's, above: it may be off PATH
   command -v "$tool" >/dev/null || die "$tool not found (brew install $tool)"
 done
 [ "$LLM" -eq 0 ] || command -v claude >/dev/null || die "claude not found (install Claude Code, or pass --llm 0)"
@@ -356,7 +359,7 @@ docs_report() { # <repo> <dir>
 # write_report renders. Its devkit backlog names unmeasured mechanisms.
 scorecard_repo() { # <repo> <dir>
   local repo=$1 dir=$2 out=$RAW/$1.scorecard.txt
-  if (cd "$dir" && python3 -I "$DEVKIT_ROOT/bin/scorecard.py" . --json "$RAW/$repo.scorecard.json" \
+  if (cd "$dir" && "$DEVKIT_PYTHON" -I "$DEVKIT_ROOT/bin/scorecard.py" . --json "$RAW/$repo.scorecard.json" \
       ${AUDIT_HOMELAB_DIR:+--homelab "$AUDIT_HOMELAB_DIR"}) >"$out" 2>&1; then
     record "$repo" scorecard INFO "$(grep '^scorecard ' "$out" | tail -1); $(jq '.backlog | length' "$RAW/$repo.scorecard.json") unmeasured"
   else
@@ -380,7 +383,7 @@ check_ratchet() { # <repo> <dir>
   if [ ! -f "$dir/docs/metrics/ratchet.json" ]; then record "$repo" ratchet SKIP "no docs/metrics/ratchet.json"; return; fi
   if [ -f "$dir/$RATCHET_SNAPSHOT" ]; then
     out=$RAW/$repo.ratchet.txt
-    if python3 -I "$DEVKIT_ROOT/bin/metrics_ratchet.py" check --snapshot "$dir/$RATCHET_SNAPSHOT" \
+    if "$DEVKIT_PYTHON" -I "$DEVKIT_ROOT/bin/metrics_ratchet.py" check --snapshot "$dir/$RATCHET_SNAPSHOT" \
       --bounds "$dir/docs/metrics/ratchet.json" >"$out" 2>&1; then
       record "$repo" ratchet PASS "$(tail -1 "$out")"
     else
@@ -439,7 +442,7 @@ dead_alerts() {
   args=(--rules "$RULES_DIR" --runbook-required)
   [ -z "${AUDIT_VM_URL:-}" ] || args+=(--vm-url "$AUDIT_VM_URL")
   log "fleet: dead-alerts"
-  python3 -I "$DEVKIT_ROOT/bin/dead_alert_audit.py" "${args[@]}" >"$out" 2>"$RAW/fleet.dead-alerts.stderr"
+  "$DEVKIT_PYTHON" -I "$DEVKIT_ROOT/bin/dead_alert_audit.py" "${args[@]}" >"$out" 2>"$RAW/fleet.dead-alerts.stderr"
   rc=$?
   if [ "$rc" -ne 0 ]; then record fleet dead-alerts ERROR "exit $rc: $(first_lines "$RAW/fleet.dead-alerts.stderr")"; return; fi
   grep '^dead-alert ' "$out" | while IFS= read -r line; do record fleet dead-alerts FAIL "${line#dead-alert }"; done
@@ -501,7 +504,7 @@ write_report() {
     if ls "$RAW"/*.scorecard.json >/dev/null 2>&1; then
       echo "## Fleet scorecard"
       echo
-      python3 -I "$DEVKIT_ROOT/bin/scorecard.py" --table "$RAW"/*.scorecard.json 2>&1
+      "$DEVKIT_PYTHON" -I "$DEVKIT_ROOT/bin/scorecard.py" --table "$RAW"/*.scorecard.json 2>&1
     fi
   } >"$REPORT"
 }

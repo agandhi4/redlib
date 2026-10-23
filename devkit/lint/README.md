@@ -278,6 +278,11 @@ import { loadScaled, timeouts } from "../devkit/lint/vitest.base.mjs"
   test: { testTimeout: loadScaled(180_000) },   // finplat's metrics config
 ```
 
+`clockShiftSetupFiles` is the vitest half of the clock shift (README "Clock shift"): the setup
+file tier_guard.sh names under `DEVKIT_CLOCK_SHIFT`, else empty. It goes first in the root
+config's `setupFiles`: `setupFiles: [...clockShiftSetupFiles, "./src/test/setup.ts"]`, or
+`setupFiles: clockShiftSetupFiles` for a repo with none.
+
 ## swift-format
 
 swift-format has no `extends`, so `swift-format.json` cannot be referenced; the repo's

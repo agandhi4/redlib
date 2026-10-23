@@ -19,6 +19,13 @@
 #   backend, frontend   the fleet's app halves
 #   other     everything else: Makefile, scripts/, Dockerfile, .github/, src/, ... (runs all)
 #
+# A repo's GATE_CODE_PATHS, a literal plan line of comma-separated path prefixes
+# (`GATE_CODE_PATHS=plugins/`), makes every path under them other, ahead of the table: for a
+# repo whose Markdown is what it ships (claude-kit's SKILL.md and agents/*.md are the plugins'
+# code; as docs, a skill-only PR would gate as docs-check alone and skip Codex). The gate and
+# metrics_collect.sh source the plan; hook_steps.sh and pr_merge.sh read the literal line
+# (devkit_load_code_paths), so devkit-check holds it to one literal line.
+#
 # A devkit/bin file is tooling only when it is listed in DEVKIT_TOOLING_BIN or DEVKIT_IMAGE_BIN;
 # DEVKIT_JOB_BIN names the files a gate job executes beyond ci-quick (other, so they run
 # everything). An unlisted file is other until someone decides: tests/gate_contract.bats fails
@@ -29,7 +36,7 @@ DEVKIT_AREA_ORDER="docs backend frontend native tooling other"
 
 # Never run from the merged tree by a job: the gate and hook machinery (run from the invoking
 # checkout, main's copy), the guards ci-quick runs (devkit-check, docs/toolchain/workflows/
-# release/ci-targets checks, own-commit, ios-check, hooks_check and their libs), and fleet
+# release/ci-targets checks, own-commit, ios-check, hooks_check, bats_assert_check and their libs), and fleet
 # operations run from a devkit checkout or after merge (sync, new, monthly audit, ship_tag in
 # publish.yml, the nightly dependency merge), machine setup (install_gh_shim.sh, whose --check
 # the scorecard reads; install_dependency_merge.sh), and
@@ -42,7 +49,7 @@ DEVKIT_TOOLING_BIN="local_gate.sh gate.sh remote_gate.sh _paths_lib.sh
   devkit-sync.sh devkit-new.sh monthly_audit.sh dead_alert_audit.py ship_tag.sh scorecard.py agent_cost.py secrets_check.sh migration_check.py
   gate_record.py pr_merge.sh codex_review.py gate_bite.py _repo_identity.py _renovate.py install_gh_shim.sh
   dependency_merge.sh _dependency_pr.py install_dependency_merge.sh
-  ios_check.py ios_device.sh"
+  ios_check.py ios_device.sh bats_assert_check.py"
 # What the image group exercises (ci-smoke/ci-image boot through them): tooling, but a change
 # to one runs the image group even when nothing else would.
 DEVKIT_IMAGE_BIN="boot_image.sh contract_probe.sh"
@@ -53,19 +60,28 @@ DEVKIT_IMAGE_BIN="boot_image.sh contract_probe.sh"
 # and guard_check.py, ci-quick guards that are also the metrics job's `layers` and `guards`
 # collectors, and the modules they load, _source_tree.py, _ts_lex.py, _guard_rules.py and
 # _compose.py (vuln.py --compose reads it too); codegen_drift.sh, which finplat's drift job
-# runs; the
+# runs; devkit's toolchain lookup (_toolchain_lib.sh, which toolchain_path.sh sources, and python.sh); the
 # timeout and load libs, docker_bounded.sh, which a recipe's docker call runs through, and the
-# slot pool and gate.env parser tier_guard.sh sources): other. Only
+# slot pool, gate.env parser and metrics.conf reader (_metrics_conf_lib.sh) tier_guard.sh
+# sources): other. Only
 # a record of the decision; the classification needs no lookup for other.
 # shellcheck disable=SC2034  # read by tests/gate_contract.bats (every bin/ file listed once)
 DEVKIT_JOB_BIN="tier_guard.sh throwaway_pg.sh playwright_browsers.sh node_toolchain.sh
   rust_toolchain.sh toolchain_path.sh toolchain_exec.sh toolchain_shell.sh cargo_tool.sh metrics_ratchet.py metrics_collect.sh layer_check.py
   guard_check.py _source_tree.py _ts_lex.py _guard_rules.py _compose.py _timeout_lib.sh _load_lib.sh
   docker_bounded.sh release_tool.sh shellcheck.sh _awake_lib.sh _slot_lib.sh _gate_env.sh
-  codegen_drift.sh"
+  codegen_drift.sh _toolchain_lib.sh python.sh _metrics_conf_lib.sh"
 
 # <path>: set DEVKIT_AREA (no subshell; devkit_areas calls it once per changed path).
 _devkit_area() {
+  # The repo's own carve-out, ahead of the table (header: GATE_CODE_PATHS).
+  # Split on commas by expansion, not word splitting: a caller's IFS cannot change it.
+  local rest=${GATE_CODE_PATHS:-} prefix
+  while [ -n "$rest" ]; do
+    prefix=${rest%%,*}
+    case "$1" in "$prefix"*) DEVKIT_AREA=other; return ;; esac
+    case "$rest" in *,*) rest=${rest#*,} ;; *) rest= ;; esac
+  done
   case "$1" in
     # Read by docs-check alone (finplat, Orbit, locus, rollcall).
     scripts/ci/docs_oversize.txt) DEVKIT_AREA=docs ;;
@@ -118,6 +134,19 @@ _devkit_area() {
     frontend/*|web/*|e2e/*) DEVKIT_AREA=frontend ;;
     *) DEVKIT_AREA=other ;;
   esac
+}
+
+# <plan>: set GATE_CODE_PATHS from the plan's literal line, without sourcing it ("" when the plan
+# or the line is absent). Used by hook_steps.sh and pr_merge.sh.
+devkit_load_code_paths() {
+  local line re='^GATE_CODE_PATHS=([A-Za-z0-9._,/-]+)[[:space:]]*(#.*)?$'
+  GATE_CODE_PATHS=
+  [ -f "$1" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ $re ]] || continue
+    GATE_CODE_PATHS=${BASH_REMATCH[1]}
+    return 0
+  done <"$1"
 }
 
 devkit_classify_path() { # <path>
@@ -184,12 +213,26 @@ devkit_gate_areas() {
 #                                  they do not run the group. Not for what the root .dockerignore
 #                                  excludes: the gate reads that file itself (_dockerignore.py),
 #                                  and devkit-check warns on an alternative it already covers
+#   GATE_JOBS_CLOCK=<jobs>         optional, same shape: pytest/vitest tiers to rerun with the clock
+#                                  shifted, each once per GATE_CLOCK_SHIFTS offset as the job
+#                                  <name>-<offset> with DEVKIT_CLOCK_SHIFT=<offset> appended
+#                                  (bin/tier_guard.sh "Clock shift"; exceptions in
+#                                  scripts/ci/clock_shift.conf)
+#   GATE_CLOCK_SHIFTS="<n>d ..."   the offsets, whole days ahead; unset or empty: "30d 365d"
 #   gate_plan_extra()              optional; called after the groups above, for the repo's own
 #                                  rules (devkit_group_ran <group> says whether a group ran)
 #
 #   group     default areas                 notes
 #   QUICK     backend frontend tooling other  required; must include docs-check (every ci-quick does)
 #   DOCS      docs tooling other              required; skipped when QUICK ran, which covers it
+#   CLOCK     backend frontend other          optional; after QUICK, before BACKEND. Frontend
+#                                             too: its vitest tiers are frontend paths, and a
+#                                             default that skipped them never shifted a UI-only
+#                                             change (kitchen #10 Codex). Order is
+#                                             not what keeps METRICS on the real-clock run:
+#                                             tier_guard.sh puts back every metrics.conf input
+#                                             a shifted run wrote ("Clock shift"), so a unit
+#                                             tier in QUICK (rollcall #81) is safe too
 #   BACKEND   backend other
 #   FRONTEND  frontend other
 #   IMAGE     backend frontend other          fixed; minus .dockerignore and GATE_IMAGE_EXCLUDE_PATHS, plus
@@ -239,6 +282,7 @@ devkit_default_gate_plan() {
       exit 2
     fi
   done
+  _devkit_clock_jobs
   [ -n "$GATE_AREAS" ] || nothing_to_run "No changed paths"
   [ "$GATE_AREAS" != native ] \
     || nothing_to_run "Only native paths changed (ios/, OrbitAgent/, *.xcodeproj/); build and test them on the Mac"
@@ -249,6 +293,7 @@ devkit_default_gate_plan() {
   else
     _devkit_group DOCS "docs tooling other"
   fi
+  _devkit_group CLOCK "backend frontend other" "$DEVKIT_CLOCK_JOBS"
   _devkit_group BACKEND "backend other"
   _devkit_group FRONTEND "frontend other"
   _devkit_group IMAGE "backend frontend other"
@@ -281,6 +326,33 @@ _devkit_metrics_group() {
     jobs=$(sed -e 's/|/ METRICS_REBASELINE=1|/g' -e 's/$/ METRICS_REBASELINE=1/' <<<"$jobs")
   fi
   _devkit_group METRICS "$areas" "$jobs"
+}
+
+# DEVKIT_CLOCK_JOBS: the CLOCK group's jobs (header table), every GATE_JOBS_CLOCK job once per
+# offset, in declaration order, then offset order ("" when the plan declares none). Built before
+# the first group runs, so a bad offset fails the gate before minutes of jobs; tier_guard checks
+# DEVKIT_CLOCK_SHIFT again for a hand run.
+_devkit_clock_jobs() {
+  local shifts=${GATE_CLOCK_SHIFTS:-30d 365d} shift spec specs words
+  DEVKIT_CLOCK_JOBS=
+  [ -n "${GATE_JOBS_CLOCK:-}" ] || return 0
+  for shift in $shifts; do
+    if [[ ! "$shift" =~ ^[1-9][0-9]*d$ ]]; then
+      echo "devkit_default_gate_plan: GATE_CLOCK_SHIFTS names '$shift' (whole days ahead, like 30d)" >&2
+      exit 2
+    fi
+  done
+  IFS='|' read -r -a specs <<<"$GATE_JOBS_CLOCK"
+  for spec in ${specs[@]+"${specs[@]}"}; do
+    read -r -a words <<<"$spec"
+    if [ "${#words[@]}" -lt 2 ]; then
+      echo "devkit_default_gate_plan: bad GATE_JOBS_CLOCK job '$spec' (want '<name> <make target> [VAR=val...]')" >&2
+      exit 2
+    fi
+    for shift in $shifts; do
+      DEVKIT_CLOCK_JOBS+="${DEVKIT_CLOCK_JOBS:+|}${words[0]}-$shift ${words[*]:1} DEVKIT_CLOCK_SHIFT=$shift"
+    done
+  done
 }
 
 # <GROUP> <default areas>: true when one of the group's areas (GATE_AREAS_<GROUP> overrides
@@ -329,7 +401,7 @@ _devkit_group() {
 # the repo root. A bad ERE is exit 2: grep's status 2 must not read as "all excluded".
 _devkit_image_areas() {
   local DEVKIT_AREAS paths rc=0 tree=${WT:-.}
-  paths=$(python3 -I "$(dirname "${BASH_SOURCE[0]}")/_dockerignore.py" keep "$tree" <<<"$CHANGED") || {
+  paths=$("$(dirname "${BASH_SOURCE[0]}")/python.sh" -I "$(dirname "${BASH_SOURCE[0]}")/_dockerignore.py" keep "$tree" <<<"$CHANGED") || {
     echo "devkit_default_gate_plan: cannot match the changed paths against $tree/.dockerignore" >&2
     exit 2
   }

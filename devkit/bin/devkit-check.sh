@@ -18,8 +18,11 @@
 # that must judge exactly what is about to be committed. CI and the gate see one tree either way.
 #
 # Also: GATE_CODEX_REVIEW, if the plan sets it, is one literal line `GATE_CODEX_REVIEW=0` or `=1`
-# (codex_review_setting). pr_merge.sh reads that line without sourcing the plan, so any other
+# (plan_literal_setting). pr_merge.sh reads that line without sourcing the plan, so any other
 # form (`="1"`, `export`, `=yes`, a second line) would leave the opt-in silently off or ambiguous.
+# Likewise GATE_CODEX_RUNNING_MAX_MIN, one `GATE_CODEX_RUNNING_MAX_MIN=<minutes>` line (pr_merge.sh).
+# Likewise GATE_CODE_PATHS, one unquoted `GATE_CODE_PATHS=<prefix>[,<prefix>...]` line: the gate
+# sources it, the hooks and pr_merge.sh read the literal, and they must classify alike.
 #
 # Also (a WARNING, exit 0): an alternative of the plan's GATE_IMAGE_EXCLUDE_PATHS whose every
 # tracked path the root .dockerignore already excludes. The gate reads .dockerignore itself
@@ -56,6 +59,17 @@
 # nothing beyond the declared digest hole (bin/_renovate.py, which the scorecard's `renovate`
 # check shares). Renovate merges server-side, so this is the only place a self-merge that skips
 # the gate is caught before it is live (homelab #109/#110, 2026-10-19).
+#
+# Also (WARNINGS, exit 0): a bats assertion errexit never sees (bin/bats_assert_check.py, which
+# devkit's ci-lint fails on): `[[ ]]` mid-test passes untested on macOS bash 3.2, where lanes run
+# bats (devkit #212). `bats_assert_check.py --fix` appends the `|| false` that fixes most.
+# It reads the working tree even under --staged: a warning judges the files a lane edits next.
+#
+# Also (WARNINGS, exit 0): a tracked stylesheet whose Tailwind v4 `@import "tailwindcss"` has no
+# source(...) scope that leaves devkit/ out, or a source()/@source path that reaches it
+# (tailwind_unscoped). Unscoped, v4 scans every file
+# git tracks, so a word in devkit's comments ("shadow") became a CSS class and moved rollcall's
+# bundle bound with no src/ change (#81). Working tree, like the bats check.
 set -euo pipefail
 STAGED=0
 case "${1:-}" in
@@ -120,14 +134,16 @@ while IFS= read -r copy; do
   fi
 done <<<"$(swift_format_copies)"
 [ "$copies" -eq 0 ] || exit 1
-# codex_review_setting <plan, comments stripped>: exit 1 unless every GATE_CODEX_REVIEW assignment
-# is the one literal line pr_merge.sh reads (header).
-codex_review_setting() {
+# plan_literal_setting <plan, comments stripped> <NAME> <value ERE> <the form, for the message>:
+# exit 1 unless every NAME assignment is the one literal line a reader that never sources the
+# plan sees: GATE_CODEX_REVIEW and GATE_CODEX_RUNNING_MAX_MIN (gate_plan_literal, pr_merge.sh) and
+# GATE_CODE_PATHS (devkit_load_code_paths, _paths_lib.sh).
+plan_literal_setting() {
   local all literal
-  all=$(grep -cE '(^|[^A-Za-z0-9_])GATE_CODEX_REVIEW=' <<<"$1" || true)
-  literal=$(grep -cE '^GATE_CODEX_REVIEW=[01][[:space:]]*$' <<<"$1" || true)
+  all=$(grep -cE "(^|[^A-Za-z0-9_])$2=" <<<"$1" || true)
+  literal=$(grep -cE "^$2=$3[[:space:]]*\$" <<<"$1" || true)
   [ "$all" != "$literal" ] || [ "$all" -gt 1 ] || return 0
-  echo "devkit-check: scripts/ci/gate_plan.sh: GATE_CODEX_REVIEW must be one literal line, GATE_CODEX_REVIEW=0 or GATE_CODEX_REVIEW=1 (bin/pr_merge.sh reads it without sourcing the plan)" >&2
+  echo "devkit-check: scripts/ci/gate_plan.sh: $2 must be one literal line, $4 (read without sourcing the plan)" >&2
   exit 1
 }
 # Assignments only: a comment naming a retired variable is history, not a setting.
@@ -146,12 +162,16 @@ if [ -n "$plan_src" ]; then
     fi
   done
   [ "$retired_set" -eq 0 ] || exit 1
-  codex_review_setting "$plan"
+  plan_literal_setting "$plan" GATE_CODEX_REVIEW '[01]' 'GATE_CODEX_REVIEW=0 or GATE_CODEX_REVIEW=1'
+  plan_literal_setting "$plan" GATE_CODEX_RUNNING_MAX_MIN '[1-9][0-9]{0,5}' \
+    'GATE_CODEX_RUNNING_MAX_MIN=<whole minutes, 1-999999>, unquoted (45)'
+  plan_literal_setting "$plan" GATE_CODE_PATHS '[A-Za-z0-9._/-]+(,[A-Za-z0-9._/-]+)*' \
+    'GATE_CODE_PATHS=<prefix>[,<prefix>...], unquoted (plugins/,templates/)'
   exclude_re="^[[:space:]]*GATE_IMAGE_EXCLUDE_PATHS=('([^']*)'|([^[:space:]'\"]+))"
   while IFS= read -r line; do
     [[ "$line" =~ $exclude_re ]] || continue
     exclude=${BASH_REMATCH[2]}${BASH_REMATCH[3]}
-    if redundant=$(git ls-files | python3 -I "$(dirname "${BASH_SOURCE[0]}")/_dockerignore.py" redundant . "$exclude"); then
+    if redundant=$(git ls-files | "$(dirname "${BASH_SOURCE[0]}")/python.sh" -I "$(dirname "${BASH_SOURCE[0]}")/_dockerignore.py" redundant . "$exclude"); then
       while IFS= read -r alt; do
         [ -n "$alt" ] && echo "devkit-check: WARNING: GATE_IMAGE_EXCLUDE_PATHS '$alt' is already excluded by .dockerignore, which the gate reads itself; drop it from the ERE" >&2
       done <<<"$redundant"
@@ -162,11 +182,13 @@ if [ -n "$plan_src" ]; then
   done <<<"$plan"
 fi
 if git ls-files --error-unmatch .dockerignore >/dev/null 2>&1; then
-  # One probe per directory holding a tsconfig: where `tsc -b` writes its tsbuildinfo by default.
+  # One probe per tsconfig: where `tsc -b` writes its tsbuildinfo by default, named after the
+  # config (tsconfig.build.json -> tsconfig.build.tsbuildinfo), so an ignore line naming only
+  # tsconfig.tsbuildinfo still warns (Codex, orbit #116).
   probes=$(git ls-files -- 'tsconfig*.json' '**/tsconfig*.json' \
-    | awk '{ d = $0; sub(/[^\/]*$/, "", d); print d "tsconfig.tsbuildinfo" }' | sort -u)
+    | awk '{ sub(/\.json$/, ".tsbuildinfo"); print }' | sort -u)
   if [ -n "$probes" ]; then
-    if seen=$(python3 -I "$(dirname "${BASH_SOURCE[0]}")/_dockerignore.py" keep . <<<"$probes"); then
+    if seen=$("$(dirname "${BASH_SOURCE[0]}")/python.sh" -I "$(dirname "${BASH_SOURCE[0]}")/_dockerignore.py" keep . <<<"$probes"); then
       [ -z "$seen" ] || echo "devkit-check: WARNING: .dockerignore lets the image build see $(head -n 1 <<<"$seen"): a stale tsbuildinfo makes tsc -b skip the image's type-check (locus #145); add: **/*.tsbuildinfo" >&2
     else
       echo "devkit-check: WARNING: could not hold .dockerignore to **/*.tsbuildinfo (above)" >&2
@@ -219,5 +241,43 @@ renovate_args=(audit)
 [ "$STAGED" = 0 ] || renovate_args+=(--staged)
 while IFS= read -r issue; do
   [ -z "$issue" ] || echo "devkit-check: WARNING: $issue (README \"Renovate\": every Renovate PR waits for make merge)" >&2
-done <<<"$(python3 -I "$(dirname "${BASH_SOURCE[0]}")/_renovate.py" "${renovate_args[@]}")"
+done <<<"$("$(dirname "${BASH_SOURCE[0]}")/python.sh" -I "$(dirname "${BASH_SOURCE[0]}")/_renovate.py" "${renovate_args[@]}")"
+while IFS= read -r issue; do
+  [ -z "$issue" ] || echo "devkit-check: WARNING: $issue (devkit/bin/bats_assert_check.py --fix)" >&2
+done <<<"$("$(dirname "${BASH_SOURCE[0]}")/python.sh" -I "$(dirname "${BASH_SOURCE[0]}")/bats_assert_check.py" --root .)"
+# tailwind_unscoped: "<css>:<line>" for each place a tracked stylesheet (outside devkit/) has
+# Tailwind v4 scan devkit/: an `@import "tailwindcss"` with no source(...), or a source() or
+# `@source` path (source(none)'s explicit list) that tw_reaches_devkit. A path that does not
+# resolve is Tailwind's own error, not this check's.
+# tw_reaches_devkit <top> <css> <path>: the directory <path> names from <css>'s (a glob's part
+# before its first wildcard; a file's directory) is <top>, above it or inside <top>/devkit/.
+tw_reaches_devkit() {
+  local d dir
+  d=$(dirname "$2")/${3%%[\*\?\{\[]*}
+  [ -d "$d" ] || d=$(dirname "$d")
+  dir=$(cd "$d" 2>/dev/null && pwd -P) || return 1
+  case "$dir/" in "$1/devkit/"*) return 0 ;; "$1/"?*) return 1 ;; esac
+  return 0
+}
+tailwind_unscoped() {
+  local css hit top
+  top=$(pwd -P)
+  while IFS= read -r css; do
+    [ -f "$css" ] || continue
+    hit=$(grep -nE "^[[:space:]]*@import[[:space:]]+[\"']tailwindcss(/utilities(\\.css)?)?[\"']" "$css" | head -n 1) || hit=""
+    if [ -n "$hit" ] && [[ ! "$hit" =~ source\([[:space:]]*none[[:space:]]*\) ]]; then
+      if [[ ! "$hit" =~ source\([[:space:]]*[\"\']([^\"\']*)[\"\'] ]] || tw_reaches_devkit "$top" "$css" "${BASH_REMATCH[1]}"; then
+        echo "$css:${hit%%:*}"
+      fi
+    fi
+    # `@source not "<path>"` excludes and `@source inline(...)` names classes: neither matches.
+    while IFS= read -r hit; do
+      [[ "$hit" =~ @source[[:space:]]+[\"\']([^\"\']*)[\"\'] ]] || continue
+      ! tw_reaches_devkit "$top" "$css" "${BASH_REMATCH[1]}" || echo "$css:${hit%%:*}"
+    done < <(grep -nE "^[[:space:]]*@source[[:space:]]+[\"']" "$css" || true)
+  done < <(git ls-files -- '*.css' ':!:devkit/')
+}
+while IFS= read -r raw; do
+  [ -z "$raw" ] || echo "devkit-check: WARNING: $raw: Tailwind v4 scans devkit/ from here (an unscoped @import \"tailwindcss\", or a source() or @source path reaching the repo root or devkit/), and a word in its comments becomes a CSS class (rollcall #81: .shadow); scope it to the app's sources: @import \"tailwindcss\" source(\"<dir>\")" >&2
+done <<<"$(tailwind_unscoped)"
 echo "devkit-check: ok (${_commit:0:7})"
