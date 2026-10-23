@@ -20,7 +20,7 @@
     "source": "rust-app"
   },
   "coverage.app.lines": {
-    "bound": 35.1,
+    "bound": 35.99,
     "direction": "higher",
     "source": "cov-app"
   },
@@ -30,7 +30,7 @@
     "source": "rust-app"
   },
   "duplication.app.clones": {
-    "bound": 16,
+    "bound": 15,
     "direction": "lower",
     "source": "dup"
   }
