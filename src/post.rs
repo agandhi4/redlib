@@ -1,5 +1,5 @@
 #![allow(clippy::cmp_owned)]
-use crate::client::{canonical_path, json, thread_needs_login};
+use crate::client::{canonical_path, distrust_listing, json, thread_needs_login};
 use crate::config::get_setting;
 use crate::db;
 use crate::model::{parse_post, Author, Awards, Comment, Flair, FlairPart, Post, Subreddit};
@@ -31,6 +31,8 @@ struct PostTemplate {
 	sub: Subreddit,
 	/// Reddit refused the thread (`client::thread_needs_login`): the post renders alone with a notice.
 	comments_unavailable: bool,
+	/// The thread on reddit.com, including a linked comment, for that notice.
+	reddit_url: String,
 }
 
 #[derive(Template)]
@@ -175,6 +177,12 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 	db::cleanup_history();
 	post.is_saved = db::is_saved(&post.id);
 
+	// The comment the reader followed stays in the link: it is the one they now need reddit.com for.
+	let reddit_url = format!(
+		"https://www.reddit.com{}",
+		canonical_target(&post.permalink, Some(highlighted_comment.as_str()), None).unwrap_or_else(|| post.permalink.clone())
+	);
+
 	// Use the Post and Comment structs to generate a website to show users
 	let html = PostTemplate {
 		comments,
@@ -187,6 +195,7 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 		comment_query: query,
 		sub: sub_data,
 		comments_unavailable: comments_json.is_none(),
+		reddit_url,
 	}
 	.render()
 	.unwrap_or_default();
@@ -197,9 +206,13 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 /// The post alone, from `/by_id/` (still served to app-only tokens), for a thread Reddit refuses
 /// (`client::thread_needs_login`). `item` then renders it with a note that comments need a login.
 async fn post_without_comments(req: &Request<Body>, quarantined: bool) -> Result<Value, String> {
-	let id = req.param("id").unwrap_or_default();
-	let listing = json(format!("/by_id/t3_{id}.json?raw_json=1"), quarantined).await?;
-	listing.pointer("/data/children/0").cloned().ok_or_else(|| "Post not found".to_string())
+	let path = format!("/by_id/t3_{}.json?raw_json=1", req.param("id").unwrap_or_default());
+	let listing = json(path.clone(), quarantined).await?;
+	match listing["data"]["children"].as_array() {
+		// No `children` at all is the degraded-token answer, not a missing post.
+		None => Err(distrust_listing(&path, quarantined, &listing).await),
+		Some(children) => children.first().cloned().ok_or_else(|| "Post not found".to_string()),
+	}
 }
 
 // COMMENTS

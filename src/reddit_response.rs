@@ -41,6 +41,12 @@ pub(crate) fn is_thread_route(path: &str) -> bool {
 /// Classify one Reddit response: the caller's result, and what must happen to the token. Pure, so
 /// the rotation triggers (401, non-JSON 403, empty body) are tested offline.
 pub(crate) fn interpret_response(status: u16, body: &[u8], ratelimit_reset: Option<&str>, path: &str) -> (Result<Value, String>, TokenAction) {
+	// First, whatever the body: an empty 403 on a thread route is the same refusal, and the
+	// empty-body branch below would rotate the token for it with no cooldown at all.
+	if status == 403 && is_thread_route(path) {
+		return (Err(THREAD_LOGIN_REQUIRED.to_string()), TokenAction::None);
+	}
+
 	if body.is_empty() {
 		let msg = match ratelimit_reset {
 			Some(val) => format!(
@@ -56,9 +62,7 @@ pub(crate) fn interpret_response(status: u16, body: &[u8], ratelimit_reset: Opti
 		Ok(json) => json,
 		Err(e) => {
 			error!("Got an invalid response from reddit {e}. Status code: {status}");
-			return if status == 403 && is_thread_route(path) {
-				(Err(THREAD_LOGIN_REQUIRED.to_string()), TokenAction::None)
-			} else if status == 403 {
+			return if status == 403 {
 				(
 					Err("Reddit refused this request (403 block page). The session is being renewed; if a refresh does not help, Reddit is blocking this kind of page for logged-out clients.".to_string()),
 					TokenAction::RotateBlocked,
@@ -127,9 +131,12 @@ mod tests {
 			"/comments/1xadhhx/.json",
 			"/user/spez/comments/abc123/t/.json",
 		] {
-			let (result, action) = interpret_response(403, b"<body class=theme-beta>blocked</body>", None, path);
-			assert_eq!(result, Err(THREAD_LOGIN_REQUIRED.to_string()), "{path}");
-			assert_eq!(action, TokenAction::None, "{path}");
+			// With the HTML block page, and with no body at all (which once read as a spent budget).
+			for body in [&b"<body class=theme-beta>blocked</body>"[..], b""] {
+				let (result, action) = interpret_response(403, body, Some("5"), path);
+				assert_eq!(result, Err(THREAD_LOGIN_REQUIRED.to_string()), "{path}");
+				assert_eq!(action, TokenAction::None, "{path}");
+			}
 		}
 	}
 

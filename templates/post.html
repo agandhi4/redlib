@@ -87,7 +87,7 @@
 
 		<!-- COMMENTS -->
 		{% if comments_unavailable %}
-		<p class="thread_nav" id="comments_unavailable">Reddit now requires a logged-in account to read comments. <a href="https://www.reddit.com{{ post.permalink }}" rel="noreferrer">Open this thread on reddit.com</a></p>
+		<p class="thread_nav" id="comments_unavailable">Reddit now requires a logged-in account to read comments. <a href="{{ reddit_url }}" rel="noreferrer">Open this thread on reddit.com</a></p>
 		{% endif %}
 		{% for c in comments -%}
 		<div class="thread">

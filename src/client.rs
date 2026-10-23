@@ -249,14 +249,16 @@ pub fn thread_needs_login(err: &str) -> bool {
 /// to a long-lived token instead of sending the 403 block page: on 2026-10-23 every listing read
 /// "No posts found" for a 35h-old token while a fresh token from the same IP got 25 posts. So it is
 /// handled like that 403: drop the cached copy (or it is served stale for minutes) and rotate, under
-/// the same cooldown. Logs the shape only, never values. Used by `Post::fetch`.
-pub async fn distrust_listing(path: &str, quarantine: bool, body: &Value) {
+/// the same cooldown. Logs the shape only, never values. Returns the message for the reader. Used by
+/// `Post::fetch` and `post::post_without_comments` (a `/by_id/` listing degrades the same way).
+pub async fn distrust_listing(path: &str, quarantine: bool, body: &Value) -> String {
 	warn!(
 		"[🚫] Reddit answered {path} with JSON holding no posts ({}); treating the token as degraded",
 		json_shape(body)
 	);
 	JSON_CACHE.invalidate(&(path.to_string(), quarantine));
 	refresh_blocked_token().await;
+	"Reddit returned this page without its posts. The session is being renewed; refresh in a minute.".to_string()
 }
 
 /// `kind`, top-level keys and `data` keys of a Reddit response: enough to recognise what came back.

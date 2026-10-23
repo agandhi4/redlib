@@ -187,8 +187,7 @@ impl Post {
 		// No `children` at all (an empty listing still has `[]`): Reddit sent something else to
 		// this token. See client::distrust_listing.
 		let Some(post_list) = res["data"]["children"].as_array() else {
-			crate::client::distrust_listing(path, quarantine, &res).await;
-			return Err("Reddit returned this page without its posts. The session is being renewed; refresh in a minute.".to_string());
+			return Err(crate::client::distrust_listing(path, quarantine, &res).await);
 		};
 
 		let mut posts: Vec<Self> = Vec::new();
