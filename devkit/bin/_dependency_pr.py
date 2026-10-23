@@ -47,7 +47,7 @@ What counts as a pin change, a fixed list (README "pr_merge.sh"):
   _dependency_pr.py paths
 reads the same changed files on stdin and prints every path they touch, one per line: each
 `filename`, and a rename's or copy's `previous_filename` too (a rename from src/x.py to docs/x.md
-removes code). For bin/pr_merge.sh's docs-only exemption, which classifies them with
+removes code). For bin/merge_rules.sh's docs-only exemption, which classifies them with
 _paths_lib.sh. Exit 2 when stdin is not that, or a path is empty or holds a newline (one line per
 path is the contract: "a.py\nb.md" must never read as two paths).
 """

@@ -1014,12 +1014,16 @@ def _stricter_bound(key: str, ours: object, theirs: object) -> object:
     return theirs if is_better(b.bound, a.bound, a.direction) else ours
 
 
-def _higher_share(key: str, ours: object, theirs: object) -> object:
-    """scorecard.json: both sides moved the WIRED share; the higher (stricter) one wins."""
-    if isinstance(ours, bool) or isinstance(theirs, bool) \
-            or not isinstance(ours, (int, float)) or not isinstance(theirs, (int, float)):
-        raise MergeConflict(f"{key}: changed on both sides and not a number on both")
-    return ours if ours >= theirs else theirs
+def _wired_wins(key: str, ours: object, theirs: object) -> object:
+    """scorecard.json: both sides changed one check's entry; wired on either side stays wired
+    (an unwired record beats a deletion). Of two share-only files' shares, the higher wins."""
+    sides = (ours, theirs)
+    if all(v is _ABSENT or isinstance(v, bool) for v in sides):
+        return any(v is True for v in sides)
+    shares = [v for v in sides if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if len(shares) == 2:
+        return max(shares)
+    raise MergeConflict(f"{key}: changed on both sides and not a check entry or share on both")
 
 
 def _ours(key: str, ours: object, theirs: object) -> object:
@@ -1031,7 +1035,7 @@ def _ours(key: str, ours: object, theirs: object) -> object:
 # file's nested objects (report-only's metrics and sources) merge per key or as one value.
 _MERGE_RULES: dict[str, tuple[Callable[[str, object, object], object], bool]] = {
     "ratchet.json": (_stricter_bound, False),
-    "scorecard.json": (_higher_share, False),
+    "scorecard.json": (_wired_wins, True),
     "report-only.json": (_ours, True),
 }
 

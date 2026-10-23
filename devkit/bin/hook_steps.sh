@@ -112,9 +112,10 @@
 #
 # Merge driver: every hook first runs metrics_driver_heal (bin/_gitattributes_lib.sh), so a clone
 # whose merge.devkit-metrics.driver is unset or not the vendored command gets it, with one line,
-# at its next commit; it never blocks. A failed step in a worktree with a tracked lockfile and
-# no node_modules beside it adds a line naming that and `run npm ci (or make install) in this
-# worktree` under the blocked line (_hook_missing_node_modules).
+# at its next commit; it never blocks. A failed step whose output reads as a missing module or
+# command, in a worktree with a tracked lockfile and no node_modules beside it, adds a line
+# naming that and `run npm ci (or make install) in this worktree` under the blocked line
+# (_hook_missing_node_modules).
 #
 # Toolchains: before the first step, toolchain_path (bin/toolchain_path.sh, the gate's own code)
 # puts the checkout's pinned Node (.nvmrc) and Rust (rust-toolchain.toml) first on PATH, so
@@ -142,7 +143,7 @@ run_hook_steps() {
   local hook=$1
   shift
   local root conf step rc env_file push_input='' uses_lfs=0
-  local PRE_COMMIT_STEPS PRE_PUSH_STEPS ENV_REQUIRED_HOOKS COMMIT_MSG_STEPS
+  local PRE_COMMIT_STEPS PRE_PUSH_STEPS ENV_REQUIRED_HOOKS COMMIT_MSG_STEPS GATE_CODE_PATHS=
   PRE_COMMIT_STEPS=()
   PRE_PUSH_STEPS=()
   ENV_REQUIRED_HOOKS=
@@ -166,6 +167,8 @@ run_hook_steps() {
   [ -f "$conf" ] || { echo "$hook: scripts/ci/hooks.conf is missing (format: devkit/bin/hook_steps.sh)"; return 1; }
   # shellcheck source=/dev/null
   . "$conf"
+  # The gate's path carve-out (_paths_lib.sh header), so a hook scopes a path as the gate does.
+  devkit_load_code_paths "$root/scripts/ci/gate_plan.sh"
   if [ "$hook" = commit-msg ]; then
     _hook_commit_msg "$root" "${1:-}"
     return
@@ -235,8 +238,9 @@ run_hook_steps() {
     fi
   fi
 
-  if [ "$hook" = pre-commit ] && [ "$listed" = 1 ] && _hook_vendoring_only "$changed"; then
+  if [ "$listed" = 1 ] && _hook_vendoring_only "$hook" "$push_input" "$changed"; then
     echo "– vendoring only (devkit/ is .devkit-rev's tree ${HOOK_VENDORED_TREE:0:7}, every other path a base copy): the repo's steps skip; the PR gate runs them"
+    _hook_allow_push "$uses_lfs" "$push_input" "$@"
     return 0
   fi
 
@@ -279,8 +283,8 @@ run_hook_steps() {
     if [ "$rc" -ne 0 ]; then
       _hook_record "$root" "$hook" total "$hook_start" "$rc"
       echo "$hook: blocked by '$HOOK_STEP_LABEL'; fix it and try again"
-      if missing=$(_hook_missing_node_modules "$root"); then
-        echo "$hook: $missing has no node_modules: if the failure above is a missing module or command, run npm ci (or make install) in this worktree"
+      if missing=$(_hook_missing_node_modules "$root" "$QUIET_FAILED_LOG"); then
+        echo "$hook: $missing has no node_modules: run npm ci (or make install) in this worktree"
       fi
       return "$rc"
     fi
@@ -294,14 +298,22 @@ run_hook_steps() {
   _hook_allow_push "$uses_lfs" "$push_input" "$@"
 }
 
-# _hook_missing_node_modules <root>: print the first directory with a tracked npm, pnpm or yarn
-# lockfile, a package.json and no node_modules beside it (`.` for the root), or exit 1; a Yarn
-# PnP project (.pnp.cjs) has none by design. Read only after a step failed: a fresh worktree (an
-# agent's lane) has none, and the step's tail then shows a raw "Cannot find module" or "command
-# not found" rather than the fix (closet). A possible cause, not a certain one, so the hook
-# prints it under its usual blocked line.
+# _hook_missing_node_modules <root> <failed step's log>: when the log reads as a missing module
+# or command, print the first directory with a tracked npm, pnpm or yarn lockfile, a package.json
+# and no node_modules beside it (`.` for the root), or exit 1; a Yarn PnP project (.pnp.cjs) has
+# none by design. Why: a fresh worktree (an agent's lane) has none, and the step's tail then
+# shows a raw "Cannot find module" or "command not found" rather than the fix (closet). Without
+# the log check it also printed under a plain lint failure (E501) in any such worktree
+# (devkit-as), so an empty log (QUIET_VERBOSE) gets no hint either.
 _hook_missing_node_modules() {
   local lock dir
+  # node's two spellings, bash's, dash/busybox's ("sh: 1: eslint: not found"), a node_modules/.bin
+  # path run by sh or make, and make's own exec of a bare command. grep reads the raw file:
+  # piping it from a sed would SIGPIPE under the hook's pipefail once grep -q matched.
+  local missing_re='Cannot find (module|package)|ERR_MODULE_NOT_FOUND|command not found'
+  missing_re+='|sh(: (line )?[0-9]+)?: [^ ]+: not found|node_modules/[^ ]*: No such file or directory'
+  missing_re+='|make(\[[0-9]+\])?: [^ ]+: No such file or directory'
+  [ -n "$2" ] && grep -qE "$missing_re" "$2" || return 1
   while IFS= read -r lock; do
     dir=$(dirname "$lock")
     [ -f "$1/$dir/package.json" ] && [ ! -e "$1/$dir/.pnp.cjs" ] || continue
@@ -311,29 +323,30 @@ _hook_missing_node_modules() {
   return 1
 }
 
-# <staged paths>: true when the commit only vendors devkit, as devkit-sync's own commit does:
-# every path is under devkit/, is .devkit-rev, or is a base copy (_vendor_paths.sh base_copies)
-# staged byte-identical to its staged base, and the staged devkit/ tree is the tree .devkit-rev
-# records. Sets HOOK_VENDORED_TREE. Why skip the repo's steps for it (closet, 2026-10-19): the
-# sync commits in a fresh worktree before any install, and a lint or typecheck step then fails
-# on a missing node_modules, not on the change. The tree hash is the check this commit needs and
-# it needs no dependency; the code is upstream's, already gated there, and its effect on this
-# repo is the PR gate's to judge. A hand edit under devkit/ breaks the hash, so it runs every step.
+# <hook> <push input> <changed paths>: true when the change only vendors devkit
+# (_vendor_paths.sh vendoring_only), as devkit-sync's own commit does: pre-commit judges the
+# index, pre-push the one commit it pushes (a push of several tips runs every step). Sets
+# HOOK_VENDORED_TREE. Why skip the repo's steps for it (closet, 2026-10-19): the sync commits and
+# pushes from a fresh worktree before any install (by hand, or the nightly sync in
+# dependency_merge.sh), and a lint, typecheck or test step then fails on a missing node_modules,
+# not on the change. The tree hash is the check it needs and it needs no dependency; the code is
+# upstream's, already gated there, and its effect on this repo is the PR gate's to judge. A hand
+# edit under devkit/ breaks the hash, so it runs every step.
 _hook_vendoring_only() {
-  local changed=$1 rev path base copy bases
+  local rev='' tips rc
   HOOK_VENDORED_TREE=
-  [ -n "$changed" ] || return 1
-  rev=$(git show :.devkit-rev 2>/dev/null) || return 1
-  HOOK_VENDORED_TREE=$(git write-tree --prefix=devkit/ 2>/dev/null) || return 1
-  [ "$HOOK_VENDORED_TREE" = "${rev#* }" ] || return 1
-  bases=$(base_copies)
-  while IFS= read -r path; do
-    case "$path" in ''|devkit/*|.devkit-rev) continue ;; esac
-    base=$(awk -v c="$path" '$2 == c { print $1; exit }' <<<"$bases")
-    [ -n "$base" ] || return 1
-    copy=$(git rev-parse -q --verify ":$path") || return 1
-    [ "$copy" = "$(git rev-parse -q --verify ":devkit/$base")" ] || return 1
-  done <<<"$changed"
+  case $1 in
+    pre-commit) ;;
+    pre-push)
+      tips=$(awk '$2 !~ /^0+$/ { print $2 }' <<<"$2" | sort -u)
+      [[ "$tips" =~ ^[0-9a-f]{40}$ ]] || return 1
+      rev=$tips ;;
+    *) return 1 ;;
+  esac
+  vendoring_only "$rev" "$3"
+  rc=$?
+  HOOK_VENDORED_TREE=$VENDORED_TREE
+  return "$rc"
 }
 
 # <root> <message file>: run COMMIT_MSG_STEPS (header: commit-msg); stops at the first failure.

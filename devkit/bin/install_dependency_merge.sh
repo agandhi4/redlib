@@ -8,8 +8,13 @@
 # with another repo list replaces the old one.
 # Refuses a devkit linked worktree: the plist names this checkout's absolute path, and a lane's
 # worktree is deleted when its lane ends, which would leave launchd running a missing script.
-# Repo roots must hold scripts/ci/gate_plan.sh with a literal GATE_SLUG, and every path must be
-# plain ([A-Za-z0-9._/~+@-]): it goes into XML and a sed replacement unescaped.
+# The toolchain is resolved here, into the plist, not left to launchd's PATH: devkit's python3
+# and uv (bin/_toolchain_lib.sh) go first on its PATH, and no python3 >= 3.11 refuses the install
+# (2026-10-22: the first run found only Xcode's 3.9 and errored every PR). Node needs nothing
+# here: each gate provisions its repo's .nvmrc pin (node_toolchain.sh) on any PATH.
+# Repo roots' origin/main must hold scripts/ci/gate_plan.sh with a literal GATE_SLUG and
+# GATE_STATE_NAME (gate_plan_main, the job's own check), and every path must be plain
+# ([A-Za-z0-9._/~+@-]): it goes into XML and a sed replacement unescaped.
 # Exit 0 done, 1 launchctl or plutil failed, 2 usage or a bad path.
 set -uo pipefail
 
@@ -18,6 +23,8 @@ readonly SAFE_PATH='^/[A-Za-z0-9._/~+@-]+$'
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P) || exit 2
 # shellcheck source=bin/_gate_env.sh
 . "$HERE/_gate_env.sh"
+# shellcheck source=bin/_toolchain_lib.sh
+. "$HERE/_toolchain_lib.sh"
 DEVKIT=$(cd "$HERE/.." && pwd -P) || exit 2
 TEMPLATE=$DEVKIT/templates/launchd/$LABEL.plist
 DEST=$HOME/Library/LaunchAgents/$LABEL.plist
@@ -60,23 +67,32 @@ check_devkit() {
 
 # collect_repos <repo-root>...: set ROOTS to their absolute paths, or die naming the bad one.
 collect_repos() {
-  local repo root plan
+  local repo root
   ROOTS=()
   for repo in "$@"; do
     root=$(cd "$repo" 2>/dev/null && pwd -P) || die "$repo is not a directory"
     [[ "$root" =~ $SAFE_PATH ]] || die "$root is not a plain path"
-    plan=$root/scripts/ci/gate_plan.sh
-    [ -f "$plan" ] && [ -n "$(gate_plan_literal "$plan" GATE_SLUG)" ] || die "$root has no scripts/ci/gate_plan.sh with a literal GATE_SLUG"
+    # The job's own check, on origin/main: a repo it would refuse is an error every night.
+    gate_plan_main "$root" || die "$root: $PLAN_ERROR"
     ROOTS+=("$root")
   done
 }
 
-# fill_plist <out>: the template with this checkout, HOME and one <string> per ROOTS entry.
+# resolve_toolchain: TOOLCHAIN_BIN, the directory the plist's PATH leads with (python3, and uv
+# when this box has one: each gate's preflight requires it where a repo declares it), or die.
+resolve_toolchain() {
+  devkit_toolchain_bin || die "$DEVKIT_PYTHON_ERROR"
+  [[ "$DEVKIT_TOOLCHAIN_BIN" =~ $SAFE_PATH ]] || die "the toolchain directory $DEVKIT_TOOLCHAIN_BIN is not a plain path"
+  TOOLCHAIN_BIN=$DEVKIT_TOOLCHAIN_BIN
+}
+
+# fill_plist <out>: the template with this checkout, HOME, TOOLCHAIN_BIN and one <string> per ROOTS
+# entry.
 fill_plist() {
   local lines
   lines=$(printf '    <string>%s</string>\n' "${ROOTS[@]}")
   REPO_LINES=$lines awk '/<string>__REPOS__<\/string>/ { print ENVIRON["REPO_LINES"]; next } { print }' "$TEMPLATE" \
-    | sed -e "s|__DEVKIT__|$DEVKIT|g" -e "s|__HOME__|$HOME|g" >"$1"
+    | sed -e "s|__DEVKIT__|$DEVKIT|g" -e "s|__HOME__|$HOME|g" -e "s|__TOOLCHAIN_BIN__|$TOOLCHAIN_BIN|g" >"$1"
 }
 
 # PLIST_TMP is script-global, not local: the EXIT trap runs after install returns, where a
@@ -92,7 +108,9 @@ install() {
   boot_out
   mv "$PLIST_TMP" "$DEST" || exit 2
   bootstrap
-  echo "install_dependency_merge: $LABEL runs nightly at 02:30 over ${ROOTS[*]}"
+  echo "install_dependency_merge: $LABEL runs nightly at 02:30 over ${ROOTS[*]} (python $DEVKIT_PYTHON_VERSION, $DEVKIT_PYTHON)"
+  [ -z "$DEVKIT_TOOLCHAIN_MISSING" ] \
+    || echo "install_dependency_merge: WARNING: $DEVKIT_TOOLCHAIN_ERROR; a repo declaring it (a uv.lock) refuses to gate" >&2
   echo "install_dependency_merge: plist $DEST; logs ~/Library/Logs/devkit/dependency-merge.*.log; pause: touch ~/.config/devkit/dependency-merge.off"
 }
 
@@ -101,5 +119,5 @@ case "${1:-}" in
   -h|--help) usage ;;
   --uninstall) [ $# -eq 1 ] || { usage >&2; exit 2; }; uninstall ;;
   -*) usage >&2; exit 2 ;;
-  *) check_devkit; collect_repos "$@"; install ;;
+  *) check_devkit; resolve_toolchain; collect_repos "$@"; install ;;
 esac

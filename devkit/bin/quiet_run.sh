@@ -14,7 +14,9 @@
 #   QUIET_VERBOSE=1 streams the output instead of capturing it; the status line still follows.
 #
 # Every call gets its own log from mktemp, removed on pass and kept on fail, so a hook can call
-# it any number of times with no shared state. Sourcing defines run_step and runs nothing: it
+# it any number of times with no shared state. A sourced call sets QUIET_FAILED_LOG to the kept
+# log on fail and empties it otherwise (QUIET_VERBOSE keeps none), so the caller can read the
+# step's output (hook_steps.sh: the npm ci hint). Sourcing defines run_step and runs nothing: it
 # sets no options and no traps in the caller's shell. Executed, it does not inherit the
 # caller's `set -e`/ERR trap, so it is safe from sh hooks and Makefiles too.
 
@@ -23,6 +25,8 @@ run_step() {
   shift
   local tail_n=${QUIET_TAIL:-40} start dur rc log summary
   start=$(date +%s)
+  # shellcheck disable=SC2034  # read by the sourcing caller (header)
+  QUIET_FAILED_LOG=
   if [ "${QUIET_VERBOSE:-0}" = 1 ]; then
     rc=0
     "$@" || rc=$?
@@ -49,6 +53,8 @@ run_step() {
       echo "✓ $label (${dur}s)"
     fi
   else
+    # shellcheck disable=SC2034  # read by the sourcing caller (header)
+    QUIET_FAILED_LOG=$log
     echo "✗ $label (${dur}s)"
     echo "--- last $tail_n lines (full log: $log) ---"
     _quiet_strip_ansi <"$log" | tail -n "$tail_n"

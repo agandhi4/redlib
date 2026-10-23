@@ -41,7 +41,7 @@ docs/metrics/scorecard.json merge=devkit-metrics'
 # from the worktree's top level; a missing or failing driver (an older devkit in that tree, two
 # sides that changed one key's direction) falls back to git's own text merge.
 metrics_merge_driver() {
-  echo "python3 -I $1/metrics_ratchet.py merge-driver %O %A %B %P || git merge-file -q %A %O %B"
+  echo "$1/python.sh -I $1/metrics_ratchet.py merge-driver %O %A %B %P || git merge-file -q %A %O %B"
 }
 
 # metrics_driver_wanted <worktree top> <bin dir>: the driver command this clone needs for <bin

@@ -252,6 +252,10 @@ GATE_RECORDER=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/gate_record.py || ex
 readonly GATE_RECORDER
 # shellcheck source=/dev/null  # bin/toolchain_path.sh: toolchain_path, shared with the hooks
 . "$(dirname "${BASH_SOURCE[0]}")/toolchain_path.sh"
+# Preflight, before a slot, a status or a worktree: the skeleton's tools, devkit's python3 (the
+# outcome record and every vendored tool) and the tools this checkout declares (uv for a uv.lock).
+# A box missing any is one error naming them all, not a FAIL per job (_toolchain_lib.sh).
+devkit_preflight gh git make flock -- "$ROOT" || { echo "local_gate: $DEVKIT_PREFLIGHT_ERROR" >&2; exit 2; }
 PLAN=${GATE_PLAN:-$ROOT/scripts/ci/gate_plan.sh}
 [ -f "$PLAN" ] || { echo "local_gate: no plan at $PLAN" >&2; exit 2; }
 GATE_WORKTREE_PREFIX=wt-
@@ -262,6 +266,7 @@ GATE_ALLOW_FORKS=0   # set here, not read from the environment: only the plan ma
 . "$(dirname "${BASH_SOURCE[0]}")/_paths_lib.sh"
 # shellcheck source=bin/_timeout_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_timeout_lib.sh"
+GATE_CODE_PATHS=  # the plan's alone, never the environment's (_paths_lib.sh header)
 # shellcheck source=/dev/null  # the repo's plan; its contract is in the header
 . "$PLAN"
 for required in GATE_SLUG GATE_STATE_NAME; do
@@ -420,11 +425,9 @@ job_went_silent() { # <log>
 # record_outcome: the outcome record (header, "Outcome record"), once, from the EXIT trap.
 record_outcome() {
   [ "$RECORD" = 1 ] || return 0
-  command -v python3 >/dev/null \
-    || { echo "local_gate: python3 not found; no outcome record (gate.json, runs.tsv) for this run" >&2; return 0; }
   local name over=() total=${TOTAL_SECS:-}
   for name in $OVER_NAMES; do over+=(--over "$name"); done
-  printf '%s\n' "$JOB_OUTCOMES" | python3 -I "$GATE_RECORDER" --logdir "$LOGDIR" --runs "$STATE/runs.tsv" \
+  printf '%s\n' "$JOB_OUTCOMES" | "$DEVKIT_PYTHON" -I "$GATE_RECORDER" --logdir "$LOGDIR" --runs "$STATE/runs.tsv" \
     --pr "$PR" --head "$HEAD_SHA" --main "$MAIN_SHA" --started "$GATE_STARTED" \
     --verdict "$RUN_VERDICT" --seconds "${total:-$((SECONDS - GATE_T0))}" \
     ${total:+--total-seconds "$total"} ${over[@]+"${over[@]}"} \
@@ -573,7 +576,7 @@ open_run() {
 # ---- fetch, worktree, merge ----------------------------------------------------------------
 
 # `+` because a force-pushed PR head is not a fast-forward of a ref a killed run left behind.
-if ! git -C "$ROOT" fetch -q origin main "+pull/$PR/head:$GATE_REF"; then
+if ! fetch_main "$ROOT" "+pull/$PR/head:$GATE_REF"; then
   # GitHub sometimes never creates refs/pull/<n>/head (finplat #527). A same-repo PR's head is
   # still the branch tip, but only gate it if that tip IS the PR's headRefOid: never gate
   # another commit.
@@ -581,7 +584,7 @@ if ! git -C "$ROOT" fetch -q origin main "+pull/$PR/head:$GATE_REF"; then
     --jq '[.isCrossRepository, .headRefName, .headRefOid] | @tsv' 2>/dev/null)
   IFS=$'\t' read -r PR_CROSS PR_BRANCH PR_OID <<<"$PR_INFO"
   if [ "$PR_CROSS" != false ] || [ -z "$PR_BRANCH" ] || [ -z "$PR_OID" ] \
-      || ! git -C "$ROOT" fetch -q origin main "+refs/heads/$PR_BRANCH:$GATE_REF" \
+      || ! fetch_main "$ROOT" "+refs/heads/$PR_BRANCH:$GATE_REF" \
       || [ "$(git -C "$ROOT" rev-parse "$GATE_REF")" != "$PR_OID" ]; then
     open_run nohead
     fail_unposted fetch
@@ -619,6 +622,12 @@ fi
 if ! toolchain_path "$WT"; then
   fail_step toolchain "$TOOLCHAIN_ERROR"
   verdict FAIL "Gate box cannot provide the declared $TOOLCHAIN_FAILED"
+fi
+# A tool the merged tree declares is required here too (a PR's first uv.lock): the preflight read
+# $ROOT's, and toolchain_path never requires one, since hooks and CI run without uv.
+if ! devkit_preflight -- "$WT"; then
+  fail_step toolchain "$DEVKIT_PREFLIGHT_ERROR"
+  verdict FAIL "Gate box cannot provide a tool the merged tree declares"
 fi
 [ -n "$TOOLCHAIN_NOTES" ] && note "$TOOLCHAIN_NOTES"
 

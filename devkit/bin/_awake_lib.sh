@@ -1,8 +1,11 @@
 # shellcheck shell=bash
-# Keep the machine awake while a timed run is alive. Sourced; defines devkit_stay_awake and runs
-# nothing. Used by local_gate.sh (the whole gate) and tier_guard.sh (a tier run by hand).
+# Keep the machine awake while a timed run or Docker work is alive. Sourced; defines
+# devkit_stay_awake and devkit_wake_user and runs nothing. Used by local_gate.sh (the whole
+# gate), tier_guard.sh (a tier run by hand) and _timeout_lib.sh's devkit_docker_guard (every
+# devkit entry point that talks to Docker: throwaway_pg.sh, boot_image.sh, docker_bounded.sh).
 #
-#   devkit_stay_awake
+#   devkit_stay_awake   hold the machine awake until this process exits
+#   devkit_wake_user    macOS: declare user activity for 2 s (blocks 2 s); 1 elsewhere or when off
 #
 # Why (2026-10-19): budgets and the silence watchdog read wall time, and a Mac that idle-sleeps
 # mid-run counts the nap as test time. lane-ai's quick job read 1083 s across a deep-idle wake,
@@ -26,4 +29,16 @@ devkit_stay_awake() {
   command -v caffeinate >/dev/null 2>&1 || return 0
   caffeinate -i -s -w "$$" </dev/null >/dev/null 2>&1 &
   export DEVKIT_AWAKE=$$
+}
+
+# Why (2026-10-22): after a Maintenance Sleep the Mac runs DarkWake cycles in which our processes
+# run but OrbStack's VM stays asleep (vmgr.log: `msg=sleep`, no `wake`), so `docker version`
+# hangs indefinitely. Declaring user activity (-u) is a full wake: Docker answered within
+# seconds and 7-hour-old containers survived, where `orbctl stop/start` had killed every one.
+# uname, not `command -v`: Linux's caffeine package ships a `caffeinate` with other flags.
+devkit_wake_user() {
+  [ "${DEVKIT_CAFFEINATE:-1}" != 0 ] || return 1
+  [ "$(uname -s)" = Darwin ] || return 1
+  command -v caffeinate >/dev/null 2>&1 || return 1
+  caffeinate -u -t 2 </dev/null >/dev/null 2>&1 || :
 }

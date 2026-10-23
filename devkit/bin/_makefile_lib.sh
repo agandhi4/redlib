@@ -2,8 +2,8 @@
 # Sourced, never run. Reads the root Makefile the way the guards need it, without running make
 # (a Makefile's $(shell …) and includes of generated files must not run inside a check).
 # Used by: docs_check.sh (rule 9, `make <target>` words in docs), ci_targets_check.sh,
-# devkit-check.sh (makefile_raw_docker), hook_steps.sh (the docs-check fallback) and
-# hooks_check.sh (a ci-lint no pre-commit step runs).
+# devkit-check.sh (makefile_raw_docker, makefile_bare_python, makefile_fixed_pg), hook_steps.sh
+# (the docs-check fallback) and hooks_check.sh (a ci-lint no pre-commit step runs).
 
 # makefile_files: ./Makefile, then each file it includes by literal path, one per line.
 makefile_files() {
@@ -36,20 +36,19 @@ makefile_targets() {
     }' "${makefiles[@]}")"
 }
 
-# makefile_raw_docker: `<file>:<line>: <recipe line>` for each recipe line of makefile_files
-# that runs `docker` itself. Such a call bypasses the daemon probe and per-call bound of
-# _timeout_lib.sh (a wedged daemon hung gates for 12+ minutes, 2026-10-17); docker_bounded.sh,
-# throwaway_pg.sh and boot_image.sh carry them. Recipe lines are tab-led, plus the continuation
-# lines of one. Quoted text is dropped first, so `@echo "… docker build …"` is not a call. A
-# variable whose whole value is `docker` (redlib's `DOCKER ?= docker`) counts as the word;
-# a shell function or any other indirection is not seen.
-makefile_raw_docker() {
+# makefile_recipe_calls <command> [<skip ERE>]: `<file>:<line>: <recipe line>` for each recipe
+# line of makefile_files that runs <command> itself as a word. Recipe lines are tab-led, plus the
+# continuation lines of one. Quoted text is dropped first, so `@echo "… docker build …"` is not a
+# call; a line matching <skip ERE> is not one either. A variable whose whole value is <command>
+# (redlib's `DOCKER ?= docker`) counts as the word; a shell function, a `$(shell …)` outside a
+# recipe or any other indirection is not seen.
+makefile_recipe_calls() {
   local files=() file
   while IFS= read -r file; do files+=("$file"); done < <(makefile_files)
   [ "${#files[@]}" -gt 0 ] || return 0
-  awk '
+  awk -v w="$1" -v skip="${2:-}" '
     FNR == 1 { cont = 0 }
-    !/^\t/ && !cont && match($0, /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*[?:]?=[[:space:]]*docker[[:space:]]*$/) {
+    !/^\t/ && !cont && match($0, "^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*[?:]?=[[:space:]]*" w "[[:space:]]*$") {
       name = $0; sub(/[[:space:]]*[?:]?=.*/, "", name); vars[name] = 1
     }
     { lines[FILENAME, FNR] = $0; recipe[FILENAME, FNR] = (cont || /^\t/); cont = recipe[FILENAME, FNR] && /\\$/
@@ -61,11 +60,11 @@ makefile_raw_docker() {
           if (!recipe[file, n]) continue
           line = lines[file, n]
           sub(/^\t[@+-]*/, "", line)
-          if (line ~ /^[[:space:]]*#/ || line ~ /(throwaway_pg|boot_image)\.sh/) continue
+          if (line ~ /^[[:space:]]*#/ || (skip != "" && line ~ skip)) continue
           bare = line
           gsub(/"[^"]*"/, "", bare); gsub(/\047[^\047]*\047/, "", bare)
-          for (v in vars) { gsub("\\$[({]" v "[)}]", "docker", bare) }
-          if (bare ~ /(^|[[:space:];&|(])docker[[:space:]]/) {
+          for (v in vars) { gsub("\\$[({]" v "[)}]", w, bare) }
+          if (bare ~ "(^|[[:space:];&|(])" w "([[:space:]]|$)") {
             sub(/^[[:space:]]+/, "", line)
             printf "%s:%d: %s\n", file, n, line
           }
@@ -73,6 +72,16 @@ makefile_raw_docker() {
       }
     }' "${files[@]}"
 }
+
+# makefile_raw_docker: makefile_recipe_calls for `docker`. Such a call bypasses the daemon probe
+# and per-call bound of _timeout_lib.sh (a wedged daemon hung gates for 12+ minutes, 2026-10-17);
+# docker_bounded.sh, throwaway_pg.sh and boot_image.sh carry them.
+makefile_raw_docker() { makefile_recipe_calls docker '(throwaway_pg|boot_image)[.]sh'; }
+
+# makefile_bare_python: makefile_recipe_calls for a bare `python3` (a `uv run` line is uv's own
+# interpreter). Only toolchain_shell.sh as make's SHELL puts devkit's python3 (>= 3.11) first on a
+# recipe's PATH; without it a hand-run or launchd make gets PATH's, Xcode's 3.9 on this Mac.
+makefile_bare_python() { makefile_recipe_calls python3 '(^|[[:space:];&|(])uv[[:space:]]+run[[:space:]]'; }
 
 # makefile_fixed_pg: `<file>:<line>: <name|port|container> <value>` for each throwaway Postgres container
 # name or host port that makefile_files fix to a literal: the name argument of a

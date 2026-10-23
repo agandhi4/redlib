@@ -3,3 +3,4 @@
 export declare const loadScale: number;
 export declare function loadScaled(ms: number): number;
 export declare const timeouts: { testTimeout: number; hookTimeout: number };
+export declare const clockShiftSetupFiles: string[];

@@ -63,7 +63,6 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_trailer_lib.sh"
 # shellcheck source=bin/_gitattributes_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_gitattributes_lib.sh"
-readonly DEVKIT_URL=${DEVKIT_URL:-https://github.com/agandhi4/devkit.git}
 STAGE=0
 REF=
 for arg in "$@"; do
@@ -97,10 +96,7 @@ else
   git fetch -q "$DEVKIT_URL" "$REF"
   UPSTREAM=$(git rev-parse FETCH_HEAD)
 fi
-UPSTREAM_TREE=$(git rev-parse "$UPSTREAM^{tree}")
-if MANIFEST=$(git show "$UPSTREAM:VENDOR_PATHS" 2>/dev/null); then
-  UPSTREAM_TREE=$(vendor_filter_tree "$UPSTREAM_TREE" "$MANIFEST") || exit 2
-fi
+UPSTREAM_TREE=$(vendor_tree_of "$UPSTREAM") || exit 2
 CURRENT=0
 if [ -f .devkit-rev ] && [ "$(cut -d' ' -f1 .devkit-rev)" = "$UPSTREAM" ] && [ "$(git rev-parse HEAD:devkit 2>/dev/null)" = "$UPSTREAM_TREE" ]; then
   CURRENT=1
@@ -116,18 +112,19 @@ else
   fi
 fi
 # The base comes from upstream's tree, not the index: on the CURRENT path devkit/ may hold
-# uncommitted edits, which a sync never vouches for.
+# uncommitted edits, which a sync never vouches for. A copy is its base's bytes AND mode, as
+# vendoring_only holds it (a chmod -x of a hook copy disables it): a base whose mode changed
+# upstream is refreshed too, or the sync it makes was no vendoring-only PR (rollcall #83 Codex).
 REFRESHED=()
 while IFS=' ' read -r base copy; do
   [ -n "$base" ] || continue
-  blob=$(git rev-parse -q --verify "$UPSTREAM_TREE:$base") || continue # base not in this ref
-  [ "$(git rev-parse -q --verify ":$copy")" != "$blob" ] || continue
+  entry=$(_vendor_entry "$UPSTREAM_TREE" "$base")
+  [ -n "$entry" ] || continue # base not in this ref
+  [ "$(_vendor_entry "" "$copy")" != "$entry" ] || continue
   verb=refreshed
   [ -e "$copy" ] || verb=created
-  git cat-file blob "$blob" >"$copy" # rewrites in place: the file's mode (hooks: +x) is kept
-  if [ "$verb" = created ] && [ "$(git ls-tree "$UPSTREAM_TREE" -- "$base" | cut -d' ' -f1)" = 100755 ]; then
-    chmod +x "$copy"
-  fi
+  git cat-file blob "${entry#* }" >"$copy"
+  if [ "${entry%% *}" = 100755 ]; then chmod +x "$copy"; else chmod -x "$copy"; fi
   git add -- "$copy"
   echo "devkit-sync: $verb $copy from devkit/$base"
   REFRESHED+=("$copy")

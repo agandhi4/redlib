@@ -11,6 +11,7 @@ AGENTS.md
 CLAUDE.md
 README.md
 bin
+clock_shift
 docs/decisions.md
 docs/metrics-keys.md
 lint
