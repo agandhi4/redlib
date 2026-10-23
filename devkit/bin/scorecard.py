@@ -694,6 +694,74 @@ def wired_tiers(repo: Repo) -> None:
     repo.add("tiers", not unbudgeted, f"{evidence}; unbudgeted: {', '.join(unbudgeted) or 'none'}")
 
 
+# A tier_guard command that floors a runner: the runner the tier's suite is.
+TIER_FLOOR = re.compile(r"--floor\s+(pytest|vitest)=")
+
+
+def logical_lines(recipe: list[str]) -> list[str]:
+    """Recipe lines with `\\` continuations joined: Orbit's unit-backend floors pytest on the
+    line after its tier_guard call."""
+    joined: list[str] = []
+    pending = ""
+    for line in recipe:
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+        else:
+            joined.append(pending + line)
+            pending = ""
+    return [*joined, pending] if pending else joined
+
+
+# The plan's GATE_JOBS_CLOCK value on one line, quoted or not.
+CLOCK_JOBS = re.compile(r"""^GATE_JOBS_CLOCK=(["']?)(.*?)\1\s*(?:#.*)?$""", re.M)
+
+
+def clock_targets(root: Path) -> set[str]:
+    """The make targets GATE_JOBS_CLOCK names (each `<name> <target> ...` spec's second word)."""
+    plan = root / identity.PLAN
+    m = CLOCK_JOBS.search(plan.read_text(errors="replace")) if plan.is_file() else None
+    if not m:
+        return set()
+    return {words[1] for spec in m.group(2).split("|") if len(words := spec.split()) >= 2}
+
+
+def wired_clock_shift(repo: Repo) -> None:
+    """Every pytest or vitest tier reruns with the wall clock shifted: GATE_JOBS_CLOCK names its
+    target, or a target whose recipe runs it (finplat's `test-db` starts Postgres, then `ci-db`)
+    (devkit decisions 2026-10-22). Whether a vitest config lists clockShiftSetupFiles is the
+    gate's to say (tier_guard's NOSHIFT); a repo with neither runner (Rust, Swift, bats) is out
+    of scope."""
+    rules = makefile_rules(repo.root)
+    tiers = {
+        target
+        for target, recipe in rules.items()
+        if TIER_TARGET.match(target)
+        for line in logical_lines(recipe)
+        if TIER_GUARD_CALL.search(line) and TIER_FLOOR.search(line)
+    }
+    if not tiers:
+        repo.na("clock_shift", "no pytest or vitest tier; Rust, Swift and bats are out of scope")
+        return
+    declared = clock_targets(repo.root)
+    covered = {
+        tier
+        for tier in tiers
+        for target in declared
+        if tier == target
+        or any(re.search(rf"(?<![\w-]){re.escape(tier)}(?![\w-])", line)
+               for line in rules.get(target, []))
+    }
+    missing = sorted(tiers - covered)
+    evidence = f"pytest/vitest tiers {', '.join(sorted(tiers))}; "
+    if not declared:
+        evidence += f"no GATE_JOBS_CLOCK in {identity.PLAN} (devkit README \"Clock shift\")"
+    elif missing:
+        evidence += f"GATE_JOBS_CLOCK runs none of {', '.join(missing)}"
+    else:
+        evidence += "GATE_JOBS_CLOCK runs every one"
+    repo.add("clock_shift", bool(declared) and not missing, evidence)
+
+
 def wired_process(repo: Repo, state_home: Path, conf: dict[str, float]) -> None:
     hooks_conf = (repo.root / "scripts/ci/hooks.conf").is_file()
     tracked_hooks = any(f.startswith(".githooks/") for f in repo.tracked)
@@ -1059,6 +1127,7 @@ def score_wired(
     wired_ratchet(repo, stack)
     wired_guards(repo, stack)
     wired_tiers(repo)
+    wired_clock_shift(repo)
     wired_process(repo, state_home, conf)
     wired_gh_shim(repo)
     if fleet:

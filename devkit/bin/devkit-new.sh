@@ -248,7 +248,7 @@ git add -A
 # scorecard_file check passes and ci-metrics holds the share from the first gate on. A new
 # project must read wired n/n; the share it commits is what a later PR may not lower.
 echo "devkit-new: devkit/bin/scorecard.py . --mode rebaseline"
-python3 -I devkit/bin/scorecard.py . --mode rebaseline || die "scorecard.py --mode rebaseline failed"
+devkit/bin/python.sh -I devkit/bin/scorecard.py . --mode rebaseline || die "scorecard.py --mode rebaseline failed"
 git add docs/metrics/scorecard.json
 echo "devkit-new: first commit, through the hooks (pre-commit runs make ci-quick)"
 # devkit-sync's trailer (_trailer_lib.sh): a Claude trailer by default, so an agent's scaffold
