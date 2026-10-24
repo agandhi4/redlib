@@ -156,6 +156,12 @@ impl<M: Minter> TokenManager<M> {
 		&self.ratelimit_remaining
 	}
 
+	/// Count one request against the budget, stopping at 0. A plain `fetch_sub` at 0 wraps the
+	/// u16 to 65535, and fetch_json's `< 10` low-budget refresh then never fires (upstream bc8c9ec).
+	pub(crate) fn consume_request(&self) {
+		let _ = self.ratelimit_remaining.try_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1));
+	}
+
 	pub(crate) fn is_rolling_over(&self) -> bool {
 		self.rolling_over.load(Ordering::SeqCst)
 	}
@@ -376,6 +382,15 @@ mod tests {
 		assert_eq!(m.minter.calls.load(Ordering::SeqCst), 1);
 		assert_eq!(m.ratelimit_remaining().load(Ordering::SeqCst), FRESH_TOKEN_BUDGET);
 		assert!(!m.is_rolling_over());
+	}
+
+	#[tokio::test]
+	async fn consume_request_stops_at_zero() {
+		let m = manager(FakeMinter::default()).await;
+		m.ratelimit_remaining().store(1, Ordering::SeqCst);
+		m.consume_request();
+		m.consume_request();
+		assert_eq!(m.ratelimit_remaining().load(Ordering::SeqCst), 0);
 	}
 
 	#[tokio::test]

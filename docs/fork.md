@@ -6,15 +6,25 @@ Personal fork by agandhi4, single instance at `reddit.box`. The README covers co
 
 - **Fork point:** upstream `redlib-org/redlib` `main` at `a4d36e954cf1bd64f209cd8868c5a29edc81b374` (2026-04-24, "Merge pull request #508 from slydetector/rss-feed-images"), the merge base of this repo's `main` and upstream's. Upstream had not moved since as of 2026-10-13.
 - **Why hard:** owner changes are interleaved through upstream's files (layout, templates, client, OAuth bootstrap), so a merge of upstream `main` would conflict everywhere and could silently undo fixes upstream never took (the async OAuth bootstrap, the blocked-token rotation). Nothing is ever merged wholesale; upstream changes come in as reviewed cherry-picks.
-- **Sync cadence: monthly.** Once per clone: `git remote add upstream https://github.com/redlib-org/redlib.git`. Then:
-
-  ```bash
-  git fetch upstream && git log --oneline main..upstream/main
-  ```
-
-  Cherry-pick (`git cherry-pick -x <sha>`) security fixes and Reddit API/OAuth changes (new app versions in `oauth_resources.rs`, endpoint or JSON shape changes); skip UI, themes, layout and deployment recipes, which this fork replaced. Record each pick, or a skipped change that matters, in this file. When a pick moves the effective upstream base, note the new upstream sha here.
+- **Upstream sync:** monthly, as reviewed ports; see "Upstream sync" below.
 - **Removed upstream files (2026-10-13):** `docker-compose.yml` (the homelab repo owns the stack), `redlib.container` (Podman Quadlet), `contrib/` (systemd, launchd), `.replit`, `app.json` (Heroku), `flake.nix`/`flake.lock`/`.envrc` (nix), `.devcontainer/`, `.github/ISSUE_TEMPLATE/`, `.github/FUNDING.yml`, `seccomp-redlib.json` (upstream's Docker seccomp profile; the homelab stack does not use it). `Dockerfile.alpine` became `Dockerfile`. Kept on purpose: `CREDITS` + `scripts/gen-credits.sh` (attribution), `scripts/update_oauth_resources.sh` and `scripts/update_hls_js.sh` (still how those vendored resources refresh), `scripts/load_test.py`.
 - **Fork-only tooling (never upstream's, so never a cherry-pick conflict):** `devkit/` (vendored), `scripts/ci/`, `docs/metrics/`, and since 2026-10-21 `tools/metrics/` (the pinned, dev-only jscpd and its lockfile) with the root `.nvmrc` that pins its Node. Upstream has none of these paths; if a pick ever touches one, keep this fork's side.
+
+## Upstream sync
+
+- **Where review stopped: `.upstream-rev`** (repo root), the last upstream `main` sha whose commits have all been decided. It is the review mark, not a merge base: picks are ported by hand, so git has no record of them.
+- **Cadence: monthly**, and whenever Reddit breaks something upstream also hits. `make upstream-review` adds the `upstream` remote if missing, fetches, and lists every commit after `.upstream-rev`, oldest first, with its diffstat.
+- **Port** security fixes, Reddit API/OAuth changes (new app versions in `oauth_resources.rs`, endpoint or JSON-shape changes) and bugs whose code this fork still has. **Skip** UI, themes, layout, CI and deployment recipes, which this fork replaced. `git cherry-pick -x <sha>` when it applies; otherwise port by hand and cite the upstream sha in the code comment and the commit.
+- **One PR per review**: the ports, `.upstream-rev` moved to the reviewed head (`git rev-parse upstream/main > .upstream-rev`), and an entry below listing what was ported and why the notable skips were skipped.
+- A clean rebase onto upstream is not an option: on 2026-10-24, 20 of 21 upstream commits conflicted when picked onto `main` (the fork had 104 commits over 247 files by then).
+
+### Reviews
+
+- **2026-10-24, `a4d36e9..ba116c1`** (21 commits, up to upstream v0.40.0), in v0.42.7.
+  - Ported: `654e6e3` (#562: `/settings/update` expired every subscription and filter, which the HLS and NSFW-gate links call; fixed in `settings::set_cookies_method`, since this fork's `cookie_chain` refactor had kept the bug) and `bc8c9ec` (the rate-limit `fetch_sub` wrapped a u16 at 0; now `TokenManager::consume_request`).
+  - Deferred to its own PR: `2ec2e2d` (wreq 6.0.0-rc.31 / wreq-util 3.0.0-rc.14 with its API renames): a new TLS fingerprint can change how Reddit treats the instance, so it ships alone and reverts alone.
+  - Skipped: `0a3e9cd`, `57688c9` (the %2F thread-route trick and its redirect fix; Reddit closed it 2026-10-23, and this fork's own copy is removed in v0.42.6); `c5d2bba` (resolve www.reddit.com through Fastly's dual-stack alias; no bearing on the blocks, and the instance has no IPv6 need); `1779e4f`, `23cf5f0` (RSS sort; RSS is off on reddit.box); `6aef54e`, `42c5d6f`, `4fa2a12` (redditstatic link rewrite; a cosmetic regex fix); `eaffec9` (the update-check banner; v0.42.6 deletes it); `3b23d99` (formatting and lint cleanups); the devcontainer, CI, musl-build and release commits.
+  - Not on upstream `main` and not taken: the open thread-comment PRs #599 (shreddit HTML scrape) and #603 (Android GraphQL `PostComments`).
 
 ## Layout: oldreddit only (v0.36–0.37)
 

@@ -16,7 +16,7 @@ CI_IMAGE ?= redlib:ci
 CI_BUILD_VERSION ?= $(shell git rev-parse --short=7 HEAD)
 
 .DEFAULT_GOAL := help
-.PHONY: help ci-quick ci-guards ci-lint ci-typecheck ci-unit test-live ci-image gate merge install hooks-check devkit-sync devkit-check toolchain-check workflows-check docs-check release-check secrets-check secrets-staged lock metrics-deps ci-metrics metrics-snapshot metrics-tighten metrics-rebaseline
+.PHONY: help ci-quick ci-guards ci-lint ci-typecheck ci-unit test-live ci-image gate merge install hooks-check devkit-sync devkit-check toolchain-check workflows-check docs-check release-check secrets-check secrets-staged upstream-review lock metrics-deps ci-metrics metrics-snapshot metrics-tighten metrics-rebaseline
 
 help: ## list targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
@@ -125,6 +125,9 @@ devkit-sync: ## pull the latest devkit and record it in .devkit-rev
 
 devkit-check: ## part of ci-quick: devkit/ is unedited
 	devkit/bin/devkit-check.sh
+
+upstream-review: ## the upstream redlib commits after .upstream-rev, to port or skip (docs/fork.md "Upstream sync")
+	scripts/upstream_review.sh
 
 toolchain-check: ## part of ci-quick: one Rust version string
 	devkit/bin/toolchain_check.sh
