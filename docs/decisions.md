@@ -198,3 +198,8 @@ Consequence: if the add-on ever collects data, the categories go in `required`/`
 Why: the fork point was the only upstream sha recorded, so every sync re-read all of upstream since April and nothing showed which commits had already been decided. A rebase is not possible (20 of 21 commits conflicted on 2026-10-24).
 Decision: `.upstream-rev` holds the last reviewed upstream sha, like `.devkit-rev`; `make upstream-review` lists what follows it. Each review is one PR: the ports, the moved sha, and an entry in `docs/fork.md` "Upstream sync".
 Consequence: ports are by hand, so git cannot find them; the fork.md review list is their record. The first review (to `ba116c1`) ported #562 and the rate-limit underflow and deferred the wreq bump to its own PR.
+
+## 2026-10-24 — rust-version 1.95: the crate's own API floor counts
+Why: porting upstream bc8c9ec, clippy on the pinned 1.99 rejects `AtomicU16::fetch_update` (deprecated) and its replacement `try_update` (stable since 1.95, above the declared 1.88). Upstream kept the old name under `#[allow(deprecated)]`.
+Decision: `rust-version` = 1.95. It is the floor this crate needs, std APIs included, not only the lockfile's; no build runs below the pinned channel.
+Consequence: clippy's MSRV lints track the real floor; AGENTS.md says when to raise it.

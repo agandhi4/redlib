@@ -11,7 +11,7 @@ Rust + hyper + Askama (server-rendered HTML), vanilla CSS/JS. No frontend framew
 ### Rust toolchain
 
 - **One Rust version string: `rust-toolchain.toml`** (exact `channel`). rustup, the gate (`devkit/bin/rust_toolchain.sh`), Actions (`setup-rust-toolchain` with no `toolchain:` input) and the image builder all read it. `make toolchain-check` fails if anything else names a version: a `FROM rust:` tag, a `Cargo.toml` `rust-version` above it, an inline `toolchain:` or `dtolnay/rust-toolchain`. To upgrade Rust, change the channel and fix what clippy then reports, in one PR.
-- `Cargo.toml` `rust-version` is the floor the locked dependencies declare, not a tested MSRV.
+- `Cargo.toml` `rust-version` is the floor the locked dependencies and this crate's own std APIs need (clippy reads it as the MSRV), not a tested MSRV. Raise it when clippy names a newer API; never `#[allow(deprecated)]` around the older one.
 - The Mac has no system Rust. Plain `make ci-quick` works: the Makefile's SHELL is `devkit/bin/toolchain_shell.sh`, which installs the pinned toolchain once into a private rustup under `~/.local/share/devkit/rust` and runs every recipe on it. Run a hand-typed cargo through `devkit/bin/toolchain_exec.sh`.
 
 ## Architecture
