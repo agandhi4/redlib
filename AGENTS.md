@@ -1,6 +1,6 @@
 # redlib (agandhi4 fork)
 
-Personal **hard fork** of [redlib](https://github.com/redlib-org/redlib) (forked at upstream `a4d36e9`; upstream fixes are cherry-picked, never merged wholesale; cadence in `docs/fork.md`), heavily customized. Runs one instance at `reddit.box` (NAS, single user). `docs/fork.md` is the fork's record: what diverged from upstream and why, plus operational notes. Read it before changing anything upstream also owns, and add to it when the fork diverges further. Dated decisions go in `docs/decisions.md`.
+Personal **hard fork** of [redlib](https://github.com/redlib-org/redlib) (forked at upstream `a4d36e9`; upstream fixes are ported as reviewed picks, never merged wholesale; review mark in `.upstream-rev`, policy in `docs/fork.md`), heavily customized. Runs one instance at `reddit.box` (NAS, single user). `docs/fork.md` is the fork's record: what diverged from upstream and why, plus operational notes. Read it before changing anything upstream also owns, and add to it when the fork diverges further. Dated decisions go in `docs/decisions.md`.
 
 ## Stack
 
@@ -45,7 +45,7 @@ Rust + hyper + Askama (server-rendered HTML), vanilla CSS/JS. No frontend framew
 - The merge gate is `make gate PR=<n>` (`devkit/bin/gate.sh`: local on this Mac unless `~/.config/devkit/gate.env` names a gate host). It gates the PR merged into `origin/main`, picks jobs by changed path through devkit's default plan (`scripts/ci/gate_plan.sh` declares them; a devkit-only change is tooling and runs ci-quick alone, and the image builds only for the paths in `GATE_IMAGE_PATHS`), and posts the `local-gate` status.
 - No smoke job: the listener opens only after OAuth bootstrap against Reddit (see Startup order), so no health path answers without live Reddit.
 - **Release identity: one version string, the bare 7-char sha.** `ghcr.yml` passes it as the `APP_VERSION` build arg (Dockerfile final stage: ARG, ENV, OCI version label), tags the image `sha-<7>` + `latest` (the prefix is the tag's only), then creates the git tag `ship-<YYYY-MM-DD>-<sha7>` (`devkit/bin/ship_tag.sh`). CI moves `latest` and is therefore the deployer. The footer, /info and the startup log read `instance_info::app_version()` (`v<semver>` outside an image). No compose file may set `APP_VERSION` (`make release-check`). The Cargo semver remains only the asset cache-buster.
-- Upstream: `git remote add upstream https://github.com/redlib-org/redlib.git` once per clone; monthly `git fetch upstream && git log main..upstream/main`, cherry-pick security/API fixes (`docs/fork.md`).
+- Upstream: monthly `make upstream-review` lists the upstream commits after `.upstream-rev`; port security/API fixes and still-present bugs, then move `.upstream-rev` in the same PR (`docs/fork.md` "Upstream sync").
 - `devkit/` is a vendored subtree. Never edit it here (`devkit-check` fails); change agandhi4/devkit, then `make devkit-sync`.
 
 ## Convention deltas

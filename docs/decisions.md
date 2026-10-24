@@ -193,3 +193,8 @@ Consequence: if the add-on ever collects data, the categories go in `required`/`
 **Why:** devkit #218 made the scorecard ratchet hold each check by name; the share-only `{"wired": 1.0}` file bounds no check and fails `scorecard_file` until rewritten.
 **Decision:** `scorecard.py . --mode tighten` (the scorecard step of `make metrics-tighten`) rewrote `docs/metrics/scorecard.json` as `{"checks": {<id>: wired}}`; every check the share counted stays wired. Unwired, recorded as backlog: none.
 **Consequence:** ci-metrics now fails a recorded wired check that goes unwired, and a backlog check once wired until `make metrics-tighten` records it.
+
+## 2026-10-24 — Upstream review is tracked by .upstream-rev
+Why: the fork point was the only upstream sha recorded, so every sync re-read all of upstream since April and nothing showed which commits had already been decided. A rebase is not possible (20 of 21 commits conflicted on 2026-10-24).
+Decision: `.upstream-rev` holds the last reviewed upstream sha, like `.devkit-rev`; `make upstream-review` lists what follows it. Each review is one PR: the ports, the moved sha, and an entry in `docs/fork.md` "Upstream sync".
+Consequence: ports are by hand, so git cannot find them; the fork.md review list is their record. The first review (to `ba116c1`) ported #562 and the rate-limit underflow and deferred the wreq bump to its own PR.
