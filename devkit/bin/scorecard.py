@@ -822,6 +822,35 @@ def scorecard_file(path: Path) -> tuple[bool, str]:
     return True, "docs/metrics/scorecard.json"
 
 
+# The two lines as merge_rules.sh reads them (_gate_env.sh gate_plan_literal, gate_plan_text):
+# the first match of each, so a form the merge never reads cannot pass here (#224 review).
+CODEX_REVIEW_LINE = re.compile(r"^GATE_CODEX_REVIEW=([A-Za-z0-9._,/-]*)[ \t]*(?:#.*)?$", re.M)
+CODEX_REASON_LINE = re.compile(r'^GATE_CODEX_REVIEW_REASON="([^"$`\\#]*)"[ \t]*(?:#.*)?$', re.M)
+
+
+def wired_codex_review(repo: Repo) -> None:
+    """make merge wants Codex's review of the head unless the plan turns it off with a reason
+    (merge_rules.sh header; devkit decisions 2026-10-23). Off with no reason, or a value
+    merge_rules.sh refuses, is unwired: its merge exits 2."""
+    plan = repo.root / identity.PLAN
+    if not plan.is_file():
+        repo.na("codex_review", f"no {identity.PLAN} (the gate_plan check)")
+        return
+    text = plan.read_text(errors="replace")
+    value = m.group(1) if (m := CODEX_REVIEW_LINE.search(text)) else ""
+    reason = m.group(1) if (m := CODEX_REASON_LINE.search(text)) else ""
+    if value in ("", "1"):
+        repo.add("codex_review", True, "make merge wants Codex's review of the head"
+                 + (" (GATE_CODEX_REVIEW=1)" if value else " (devkit default)"))
+    elif value == "0":
+        repo.add("codex_review", bool(reason),
+                 f"off: {reason}" if reason else
+                 "GATE_CODEX_REVIEW=0 with no literal GATE_CODEX_REVIEW_REASON=\"<why>\": "
+                 "make merge exits 2")
+    else:
+        repo.add("codex_review", False, f"GATE_CODEX_REVIEW={value}: make merge exits 2")
+
+
 def wired_process(repo: Repo, state_home: Path, conf: dict[str, float]) -> None:
     hooks_conf = (repo.root / "scripts/ci/hooks.conf").is_file()
     tracked_hooks = any(f.startswith(".githooks/") for f in repo.tracked)
@@ -866,6 +895,7 @@ def wired_process(repo: Repo, state_home: Path, conf: dict[str, float]) -> None:
             else "no scripts/ci/gate_plan.sh"
         ),
     )
+    wired_codex_review(repo)
     repo.add("scorecard_file", *scorecard_file(repo.root / "docs/metrics/scorecard.json"))
     workflow = "\n".join(section_lines(agents_text(repo), r"workflow"))
     named = "make merge" in workflow

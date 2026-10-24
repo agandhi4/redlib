@@ -19,10 +19,21 @@
 #
 # Also: GATE_CODEX_REVIEW, if the plan sets it, is one literal line `GATE_CODEX_REVIEW=0` or `=1`
 # (plan_literal_setting). pr_merge.sh reads that line without sourcing the plan, so any other
-# form (`="1"`, `export`, `=yes`, a second line) would leave the opt-in silently off or ambiguous.
+# form (`="1"`, `export`, `=yes`, a second line) would leave the setting silently ignored or
+# ambiguous. Unset is 1, Codex review required (the fleet default since 2026-10-23); `=0` needs
+# one literal `GATE_CODEX_REVIEW_REASON="<why>"` line, which make merge prints, and the reason
+# is refused anywhere else (codex_review_setting), so the plan never holds a stale excuse.
 # Likewise GATE_CODEX_RUNNING_MAX_MIN, one `GATE_CODEX_RUNNING_MAX_MIN=<minutes>` line (pr_merge.sh).
 # Likewise GATE_CODE_PATHS, one unquoted `GATE_CODE_PATHS=<prefix>[,<prefix>...]` line: the gate
 # sources it, the hooks and pr_merge.sh read the literal, and they must classify alike.
+#
+# Also: the baseline files `devkit new` writes and a hand-built repo silently lacks (kitchen had
+# no scorecard.json, 2026-10-23), each named with the one command that creates it
+# (baseline_file): docs/metrics/scorecard.json, the WIRED ratchet's record, which ci-metrics
+# skips when absent, and docs/metrics/ratchet.json where scripts/ci/metrics.conf declares
+# collectors. A warning before BASELINE_FAILS_FROM, a failure from it (docs_check's scheme), so
+# the sync that brings the rule breaks no consumer's ci-quick. DEVKIT_CHECK_TODAY overrides
+# today (tests). The docs set, hooks, Renovate and the gate plan have their own checks.
 #
 # Also (a WARNING, exit 0): an alternative of the plan's GATE_IMAGE_EXCLUDE_PATHS whose every
 # tracked path the root .dockerignore already excludes. The gate reads .dockerignore itself
@@ -149,6 +160,20 @@ plan_literal_setting() {
   echo "devkit-check: scripts/ci/gate_plan.sh: $2 must be one literal line, $4 (read without sourcing the plan)" >&2
   exit 1
 }
+# codex_review_setting <plan, comments stripped>: exit 1 unless GATE_CODEX_REVIEW=0 has its
+# reason and the reason has its 0 (header).
+codex_review_setting() {
+  local off=0 reason=0
+  grep -qE '^GATE_CODEX_REVIEW=0[[:space:]]*$' <<<"$1" && off=1
+  grep -qE '^GATE_CODEX_REVIEW_REASON=' <<<"$1" && reason=1
+  [ "$off" != "$reason" ] || return 0
+  if [ "$off" = 1 ]; then
+    echo "devkit-check: scripts/ci/gate_plan.sh: GATE_CODEX_REVIEW=0 needs a GATE_CODEX_REVIEW_REASON=\"<why>\" line (make merge prints it; Codex review is the fleet default)" >&2
+  else
+    echo "devkit-check: scripts/ci/gate_plan.sh: GATE_CODEX_REVIEW_REASON explains GATE_CODEX_REVIEW=0 only; drop it, Codex review is on" >&2
+  fi
+  exit 1
+}
 # Assignments only: a comment naming a retired variable is history, not a setting.
 if [ "$STAGED" = 1 ]; then
   plan_src=$(git show :scripts/ci/gate_plan.sh 2>/dev/null) || plan_src=""
@@ -166,6 +191,11 @@ if [ -n "$plan_src" ]; then
   done
   [ "$retired_set" -eq 0 ] || exit 1
   plan_literal_setting "$plan" GATE_CODEX_REVIEW '[01]' 'GATE_CODEX_REVIEW=0 or GATE_CODEX_REVIEW=1'
+  # pr_merge.sh's gate_plan_text form (bin/_gate_env.sh). The comment strip above cuts a reason
+  # at a `#`, so one holding it fails here, as gate_plan_text would not read it.
+  plan_literal_setting "$plan" GATE_CODEX_REVIEW_REASON '"[^"$`\\]+"' \
+    'GATE_CODEX_REVIEW_REASON="<why>", double-quoted, with no $, `, \, " or #'
+  codex_review_setting "$plan"
   plan_literal_setting "$plan" GATE_CODEX_RUNNING_MAX_MIN '[1-9][0-9]{0,5}' \
     'GATE_CODEX_RUNNING_MAX_MIN=<whole minutes, 1-999999>, unquoted (45)'
   plan_literal_setting "$plan" GATE_CODE_PATHS '[A-Za-z0-9._/-]+(,[A-Za-z0-9._/-]+)*' \
@@ -184,6 +214,27 @@ if [ -n "$plan_src" ]; then
     break
   done <<<"$plan"
 fi
+# baseline_file <path> <the command that creates it> <why>: the header's warn-then-fail rule. The
+# index under --staged, else the working tree, as the plan is read.
+readonly BASELINE_FAILS_FROM=2026-11-01
+baseline_missing=0
+baseline_file() {
+  if [ "$STAGED" = 1 ]; then git cat-file -e ":$1" 2>/dev/null && return 0; else [ -f "$1" ] && return 0; fi
+  if [[ "${DEVKIT_CHECK_TODAY:-$(date +%F)}" < "$BASELINE_FAILS_FROM" ]]; then
+    echo "devkit-check: WARNING: no $1 ($3); create it with \`$2\` and commit it (fails from $BASELINE_FAILS_FROM)" >&2
+  else
+    echo "devkit-check: no $1 ($3); create it with \`$2\` and commit it" >&2
+    baseline_missing=1
+  fi
+}
+baseline_file docs/metrics/scorecard.json 'devkit/bin/python.sh -I devkit/bin/scorecard.py . --mode rebaseline' \
+  "the WIRED ratchet's record, which devkit new writes; ci-metrics holds no check without it"
+if { [ "$STAGED" = 1 ] && git cat-file -e :scripts/ci/metrics.conf 2>/dev/null; } \
+  || { [ "$STAGED" = 0 ] && [ -f scripts/ci/metrics.conf ]; }; then
+  baseline_file docs/metrics/ratchet.json 'make metrics-rebaseline' \
+    "the bounds scripts/ci/metrics.conf's collectors are held to; ci-metrics cannot run without it"
+fi
+[ "$baseline_missing" = 0 ] || exit 1
 if git ls-files --error-unmatch .dockerignore >/dev/null 2>&1; then
   # One probe per tsconfig: where `tsc -b` writes its tsbuildinfo by default, named after the
   # config (tsconfig.build.json -> tsconfig.build.tsbuildinfo), so an ignore line naming only

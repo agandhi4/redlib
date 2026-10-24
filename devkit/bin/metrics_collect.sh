@@ -31,7 +31,8 @@
 #               when WORSE (a named key with no bound is seeded), and leaves scorecard.json alone: the scorecard runs as `check`
 #               under the label instead, so its verdict shows now. Without KEYS every bound
 #               moves; the ratchet and this script then WARN, naming each loosened bound and
-#               the scorecard.json rewrite (devkit decisions 2026-10-17)
+#               the scorecard.json rewrite (devkit decisions 2026-10-17). With no bounds
+#               file (and no KEYS) it seeds every key: first adoption, written only on success
 #   tighten and rebaseline also write the report-only keys (vuln.*, fan_in_max) to
 #   report-only.json beside the bounds: the committed copy the scorecard reads from a fresh
 #   clone (commit it with the bounds)
@@ -181,8 +182,16 @@ quick_args() {
 }
 [ "$QUICK" = 0 ] || quick_args
 [ -f "$CONF" ] || die "no collectors file at $CONF (format: devkit/bin/metrics_collect.sh header)"
-[ "$SUB" = snapshot ] || [ -f "$BOUNDS" ] \
-  || die "no bounds file at $BOUNDS (start from '{}' or devkit/templates/metrics/ratchet.json, then run rebaseline)"
+# A whole rebaseline with no bounds file is first adoption: metrics_ratchet.py starts it from no
+# bounds and writes the file only when it succeeds (a failed run leaves none to commit), so
+# `make metrics-rebaseline` is the one command that creates it (devkit-check names it for a
+# hand-built repo). Every other mode needs the file.
+case "$SUB" in
+  snapshot) ;;
+  rebaseline) [ -n "${KEYS:-}" ] || [ -f "$BOUNDS" ] || first_adoption=1 ;;
+esac
+[ "$SUB" = snapshot ] || [ -n "${first_adoption:-}" ] || [ -f "$BOUNDS" ] \
+  || die "no bounds file at $BOUNDS (make metrics-rebaseline creates it)"
 
 # ---- tighten on the merged tree (header: Merged tree) ---------------------------------------------
 # merge_needed: true when tighten must measure a merge, setting MERGE_MAIN and MERGE_HEAD (only
