@@ -3,13 +3,13 @@ name = "redlib"
 description = " Alternative private front-end to Reddit"
 license = "AGPL-3.0-only"
 repository = "https://github.com/redlib-org/redlib"
-version = "0.42.6"
+version = "0.42.7"
 authors = [
     "Matthew Esposito <matt+cargo@matthew.science>",
     "spikecodes <19519553+spikecodes@users.noreply.github.com>",
 ]
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.95"
 default-run = "redlib"
 
 [dependencies]

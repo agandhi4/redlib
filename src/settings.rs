@@ -113,11 +113,15 @@ fn set_cookies_method(req: Request<Body>, remove_cookies: bool) -> Response<Body
 		.unwrap_or_else(String::new); // Return an empty string if None
 	let has_cookie = |name: &str| cookies_string.contains(&format!("{name}="));
 
-	// Restore the subscriptions/filters the query string carries (an empty value is still one
-	// empty chunk); a list it leaves out is expired with every numbered cookie after it.
+	// Write the subscriptions/filters the query string carries (an empty value is still one empty
+	// chunk). A list it leaves out follows the PREFS rule above: restore expires it with every
+	// numbered cookie after it, update keeps it. Update is what the HLS and NSFW-gate links call
+	// with a single pref, so expiring there wiped every subscription (upstream #562).
 	for chain in ["subscriptions", "filters"] {
 		let list: Option<Vec<String>> = form.get(chain).map(|joined| joined.split('+').map(str::to_string).collect());
-		set_cookie_chain(&mut response, chain, list.as_deref(), has_cookie);
+		if list.is_some() || remove_cookies {
+			set_cookie_chain(&mut response, chain, list.as_deref(), has_cookie);
+		}
 	}
 
 	response
@@ -178,6 +182,42 @@ pub async fn encoded_restore(req: Request<Body>) -> Result<Response<Body>, Strin
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Names of the cookies a response expires (a removal carries an expiry of now, not a year).
+	fn expired_cookies(response: &Response<Body>) -> Vec<String> {
+		let now = time::OffsetDateTime::now_utc();
+		response
+			.headers()
+			.get_all("Set-Cookie")
+			.iter()
+			.filter_map(|header| cookie::Cookie::parse(header.to_str().ok()?.to_string()).ok())
+			.filter(|cookie| cookie.expires_datetime().is_some_and(|at| at <= now))
+			.map(|cookie| cookie.name().to_string())
+			.collect()
+	}
+
+	fn settings_request(query: &str) -> Request<Body> {
+		Request::builder()
+			.uri(format!("/settings/update/?{query}"))
+			.header("cookie", "subscriptions=rust; subscriptions1=linux; filters=pics")
+			.body(Body::empty())
+			.unwrap()
+	}
+
+	#[test]
+	fn update_keeps_the_subscriptions_and_filters_it_does_not_name() {
+		let response = set_cookies_method(settings_request("use_hls=on&redirect=r/rust"), false);
+		assert_eq!(expired_cookies(&response), Vec::<String>::new());
+	}
+
+	#[test]
+	fn restore_expires_the_subscriptions_and_filters_it_does_not_name() {
+		let response = set_cookies_method(settings_request("use_hls=on"), true);
+		let expired = expired_cookies(&response);
+		for name in ["subscriptions", "subscriptions1", "filters"] {
+			assert!(expired.contains(&name.to_string()), "{name} not expired in {expired:?}");
+		}
+	}
 
 	#[test]
 	fn redirect_path_unescapes_and_roots_the_target() {

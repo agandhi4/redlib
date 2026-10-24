@@ -290,7 +290,7 @@ async fn fetch_json(path: String, quarantine: bool) -> Result<Value, String> {
 		warn!("Rate limit {current_rate_limit} is low. Spawning force_refresh_token()");
 		tokio::spawn(force_refresh_token());
 	}
-	session.ratelimit_remaining().fetch_sub(1, Ordering::SeqCst);
+	session.consume_request();
 
 	// Fetch the url...
 	let response = match reddit_get(path.clone(), quarantine).await {
