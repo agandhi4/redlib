@@ -80,6 +80,13 @@ gate_plan_literal() { # <plan> <NAME>
   sed -n "s/^$2=\\([A-Za-z0-9._,\\/-]*\\)[[:space:]]*\\(#.*\\)\\{0,1\\}\$/\\1/p" "$1" | head -1
 }
 
+# gate_plan_text <plan> <NAME>: the text of a literal `NAME="<text>"` line, for a value that is
+# prose (GATE_CODEX_REVIEW_REASON). No `"`, `$`, backtick, backslash or `#` inside: sourcing the
+# plan then means the same text, and devkit-check's comment strip leaves it whole.
+gate_plan_text() { # <plan> <NAME>
+  sed -n "s/^$2=\"\\([^\"\$\`\\\\#]*\\)\"[[:space:]]*\\(#.*\\)\\{0,1\\}\$/\\1/p" "$1" | head -1
+}
+
 fetch_main() { # <dir> [refspec...]
   local dir=$1
   shift
