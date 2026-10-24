@@ -159,7 +159,7 @@ impl<M: Minter> TokenManager<M> {
 	/// Count one request against the budget, stopping at 0. A plain `fetch_sub` at 0 wraps the
 	/// u16 to 65535, and fetch_json's `< 10` low-budget refresh then never fires (upstream bc8c9ec).
 	pub(crate) fn consume_request(&self) {
-		let _ = self.ratelimit_remaining.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1));
+		let _ = self.ratelimit_remaining.try_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1));
 	}
 
 	pub(crate) fn is_rolling_over(&self) -> bool {
