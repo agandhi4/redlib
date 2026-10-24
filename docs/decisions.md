@@ -188,3 +188,8 @@ Consequence: if the add-on ever collects data, the categories go in `required`/`
 **Decision:** `reddit_response::is_thread_route` makes a thread 403 `THREAD_LOGIN_REQUIRED` with no token action; `post::item` renders the post from `/by_id/` (still served) with a note and a reddit.com link. `Post::fetch` hands a listing without `children` to `client::distrust_listing`: evict the cached copy (`SwrCache::invalidate`), log its shape (keys only), rotate under the 60s cooldown. `encode_thread_route` is removed. The error page loses upstream's update banner (`check_update.js` compares against redlib-org commits, so on this fork it always said "not up to date", which read as a block on every error).
 **Consequence:** Comments return only with a logged-in token (owner's call: account risk, and Reddit may require API approval for a script app). A `🚫 … holding no posts` line names the degraded shape the next time it happens.
 
+
+## 2026-10-23 — Scorecard bounds record each check, not a share
+**Why:** devkit #218 made the scorecard ratchet hold each check by name; the share-only `{"wired": 1.0}` file bounds no check and fails `scorecard_file` until rewritten.
+**Decision:** `scorecard.py . --mode tighten` (the scorecard step of `make metrics-tighten`) rewrote `docs/metrics/scorecard.json` as `{"checks": {<id>: wired}}`; every check the share counted stays wired. Unwired, recorded as backlog: none.
+**Consequence:** ci-metrics now fails a recorded wired check that goes unwired, and a backlog check once wired until `make metrics-tighten` records it.
