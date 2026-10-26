@@ -309,6 +309,9 @@ pub struct Comment {
 	pub collapsed: bool,
 	pub is_filtered: bool,
 	pub more_count: i64,
+	/// Where a "more" placeholder links (`comments::build_comment`): its GraphQL cursor when it
+	/// has one, else the parent comment's page.
+	pub more_href: String,
 	pub prefs: Preferences,
 }
 

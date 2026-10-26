@@ -1687,7 +1687,7 @@ dependencies = [
 
 [[package]]
 name = "redlib"
-version = "0.42.7"
+version = "0.43.0"
 dependencies = [
  "arc-swap",
  "askama",
@@ -1705,6 +1705,7 @@ dependencies = [
  "fastrand",
  "futures-lite",
  "htmlescape",
+ "http 1.4.0",
  "hyper",
  "libflate",
  "lipsum",
