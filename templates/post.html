@@ -87,7 +87,7 @@
 
 		<!-- COMMENTS -->
 		{% if comments_unavailable %}
-		<p class="thread_nav" id="comments_unavailable">Reddit now requires a logged-in account to read comments. <a href="{{ reddit_url }}" rel="noreferrer">Open this thread on reddit.com</a></p>
+		<p class="thread_nav" id="comments_unavailable">Reddit didn't return the comments for this thread. <a href="{{ reddit_url }}" rel="noreferrer">Open it on reddit.com</a></p>
 		{% endif %}
 		{% for c in comments -%}
 		<div class="thread">
@@ -101,6 +101,9 @@
 			{{ c.render().unwrap()|safe }}
 		</div>
 		{%- endfor %}
+		{% if next_cursor != "" %}
+		<a class="deeper_replies" href="{{ post.permalink }}?sort={{ sort }}&amp;cursor={{ next_cursor }}">&rarr; More comments</a>
+		{% endif %}
 
 	</div>
 	{% if !sub.name.is_empty() && prefs.hide_sidebar_and_summary != "on" %}

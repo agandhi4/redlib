@@ -12,8 +12,8 @@ use tokio::time::Instant;
 /// Stale-while-revalidate cache. A hit younger than `fresh` is served as-is; one older than that
 /// (up to `stale_max`) is served immediately while a single background refresh replaces it, so a
 /// revisit within the window never waits on the fetch. Only Ok results are cached; values are
-/// cloned on hit. The fetch function is the test seam: `client::json()` passes `fetch_json` (live Reddit),
-/// the offline tests pass a fake. Ages use tokio's clock so tests can pause and advance it.
+/// cloned on hit. The fetch function is the test seam: `client::json()` and `client::gql()` pass
+/// `fetch_json` and `fetch_gql` (live Reddit), the offline tests pass a fake. Ages use tokio's clock so tests can pause and advance it.
 pub(crate) struct SwrCache<K, V> {
 	fresh: Duration,
 	stale_max: Duration,

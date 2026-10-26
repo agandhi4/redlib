@@ -20,7 +20,7 @@ const OAUTH_TIMEOUT: Duration = Duration::from_secs(5);
 // refused too, the block is on the IP, and minting more would only hammer the auth endpoint.
 const BLOCKED_TOKEN_REFRESH_COOLDOWN: Duration = Duration::from_secs(60);
 
-// Requests a freshly minted token may make before `client::fetch_json` rolls it over early.
+// Requests a freshly minted token may make before `client::fetch_reddit` rolls it over early.
 // `startup_check::rate_limit_check` asserts a fresh token reports exactly this after one request.
 pub(crate) const FRESH_TOKEN_BUDGET: u16 = 99;
 
@@ -157,7 +157,7 @@ impl<M: Minter> TokenManager<M> {
 	}
 
 	/// Count one request against the budget, stopping at 0. A plain `fetch_sub` at 0 wraps the
-	/// u16 to 65535, and fetch_json's `< 10` low-budget refresh then never fires (upstream bc8c9ec).
+	/// u16 to 65535, and fetch_reddit's `< 10` low-budget refresh then never fires (upstream bc8c9ec).
 	pub(crate) fn consume_request(&self) {
 		let _ = self.ratelimit_remaining.try_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1));
 	}
@@ -279,7 +279,7 @@ pub async fn force_refresh_token() {
 	exit_on_failed_mint(oauth_session().rotate().await);
 }
 
-/// Used by `client::fetch_json` on a non-JSON 403; see `TokenManager::rotate_blocked`.
+/// Used by `client::fetch_reddit` on a non-JSON 403; see `TokenManager::rotate_blocked`.
 pub async fn refresh_blocked_token() {
 	exit_on_failed_mint(oauth_session().rotate_blocked().await);
 }
@@ -400,7 +400,7 @@ mod tests {
 		assert_eq!(TokenManager::bootstrap(minter).await.err(), Some("mint 1 refused".to_owned()));
 	}
 
-	// The expired-token path: fetch_json's 401 handling and the daemon both land here.
+	// The expired-token path: fetch_reddit's 401 handling and the daemon both land here.
 	#[tokio::test]
 	async fn rotate_swaps_the_token_and_restores_the_budget() {
 		let m = manager(FakeMinter::default()).await;
