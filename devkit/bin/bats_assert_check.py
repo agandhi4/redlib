@@ -10,33 +10,35 @@ the test's last command. Three assertion shapes trip neither when they fail mid-
   - `[ a ] && [ b ]`: a failing command before `&&` never trips errexit, in any bash.
 devkit #205 shipped two assertions that had never held (found by #212), #196 a third.
 
-The form every one of them takes instead: `<test> || false` (or any `|| <handler>` that fails,
-such as `|| { echo "$output"; false; }`). It fails on every bash and in any position, so the rule
-needs no "is this the test's last command" judgement. A handler counts only when it ends in
-`false`, `return`, `exit`, `skip`, `fail` or `flunk`: `|| echo mismatch` or `|| true` succeeds,
-so the failure stays unseen (rollcall #83 Codex). `return 0`, `exit 0` and `skip` end the test or
-helper on purpose, which is a choice, not a silent pass; inside `( )` they end only the subshell,
-so there only a failure counts. A pipe, `&` or short-circuit that keeps the handler's status from
-being the statement's is unhandled too (#219 Codex). `false` rather than `return 1`, bats-core's
-own idiom: shellcheck 0.11 reads a `return` mid-@test as ending the flow, so a later test calling a
-function it sourced got SC2218 (gate_contract.bats). Splitting `[ a ] && [ b ]` into one `[ ]` per
-line also clears it.
+The rule is a canonical form, read line by line, not a bash parser (#216 and #219 tried one; each
+Codex round found the next construct it misread). A statement is a line plus the lines it runs
+on into (a line ending in `&&`, `||`, `|` or a backslash). One that STARTS with `[[`, `((`, `! `,
+or `[ ... ] && <test>` must either
+  1. end with a failing handler: `|| H` or `|| { ...; H; }` (also as `|| {`, lines, `}`), where H
+     is `false` (bats-core's idiom; prefer it), `return [n]`, `exit [n]`, `skip`, `fail` or
+     `flunk`, with nothing before it but the tests: for `[[ ]]`/`(( ))`, tests joined by `&&`,
+     `||` and `!` alone; for the others, no pipe/`||`/`&` that hands the status on; or
+  2. be its function's last statement (the next code line is a `}` at column 0, the convention
+     for a function's close; an indented one may close a `{ }` group) and end with its test
+     (no `||` handler, which could succeed): its status is then the test's, or a predicate
+     helper's return, and fails on every bash.
+A `;` straight after the test (`[[ x ]]; y || false`) leaves the test unhandled: one per line.
+Everything else is not judged: an `if`/`while` condition (it starts with its keyword), a
+one-line function (`f() { [[ x ]]; }`), a heredoc's body. A `<<WORD` with no `WORD` line after
+it (one in a quote or comment, say) is itself a finding, never a silent skip of the file.
+What the form trusts, as only a lexer could judge it: a `|| { }` group's body beyond its last
+command, and that a multi-line script lives in a heredoc, not a multi-line quote or `$( )`,
+whose lines read as statements.
+`--fix` appends ` || false` to a one-line statement when that alone makes it the form (after
+the closer of `[[ ]]`/`(( ))`, before any comment), leaving the rest, which may be
+conditionals, to a person.
 
-What is read: each *.bats file and every file it `load`s, outside heredocs (also those opened
-inside `$( )`) and multi-line quotes. A statement starting with one of the shapes above is
-checked, joined over lines ending in `&&`, `||`, `|` or a backslash; `if`/`while` conditions start
-with their keyword, so they are not flagged. Not read: an assertion after `;` on the same line
-(`f; [[ x ]]`), or inside a one-line function (`f() { [[ x ]]; }`, whose `[[` is its return
-status and safe). It reads bash lexically, not by its grammar: a shape it cannot judge (a `case`
-or a pipe on the assertion's side) is flagged, never passed. `--fix` leaves a statement alone
-when appending could change what it does: an `&&` list, a `;` after the test, or a line running
-on into one not read.
-
-Usage: bats_assert_check.py [--root DIR] [FILE ...]
+Usage: bats_assert_check.py [--root DIR] [--fix] [FILE ...]
   With no FILE: every git-tracked *.bats under --root (default .), skipping devkit/ (a vendored
-  copy is checked upstream). Output: one `path:line: <why>` per assertion, then exit 1; exit 0
-  when clean; exit 2 on a usage error or an unreadable file. Used by: Makefile ci-lint (devkit's
-  own tests, failing) and bin/devkit-check.sh (a consumer's, as warnings).
+  copy is checked upstream), and every file they `load`. Output: one `path:line: <why>` per
+  assertion, then exit 1; exit 0 when clean; exit 2 on a usage error or an unreadable file.
+  Used by: Makefile ci-lint (devkit's own tests, failing) and bin/devkit-check.sh (a consumer's,
+  as warnings).
 """
 
 from __future__ import annotations
@@ -48,346 +50,215 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 LOAD = re.compile(r"^\s*load\s+['\"]?([^'\"\s]+)['\"]?\s*$")
-CONTINUES = ("&&", "||", "|", "\\")
-# A handler group opened at a line's end (`|| {`), whose body and `}` follow on later lines.
-OPENS_GROUP = re.compile(r"\|\|\s*[{(]\s*$")
-# A pipe at any depth (`|&` too, bash 4's): not `||`, nor a `>|` clobber redirection.
-LONE_PIPE = re.compile(r"(?<![|>])\|(?!\|)")
-# A `[[ ]]` or `(( ))` expression, whose `|` is a regex's, a pattern's or a bitwise OR
-# (`=~ ^(x|y)$`, `(( n | 1 ))`), never a pipe.
-TEST_EXPR = re.compile(r"\[\[.*?\s\]\]|\(\(.*?\)\)")
-# A redirection at a command's end (`>&2`, `2>/dev/null`, `&>log`): it never changes a status.
-# A `case ... esac`, whose arms' `)` and `;;` are no group or list syntax: one command.
-CASE_BLOCK = re.compile(r"\bcase\b.*?\bin\b.*?\besac\b")
-# What _split_top leaves of one: a character no blanked line otherwise holds.
-CASE_MARK = "\0"
-TRAILING_REDIRECT = re.compile(r"\s*(?:\d*[<>]{1,2}&?|&>>?)\s*[^\s<>]*$")
-FIX = "add `|| false`"
-PIPED = f"a pipe (or a `case`) after it replaces its status; {FIX} directly after it"
-# A handler's last command that ends the run of the test (failing it, or leaving on purpose).
-ENDS = {"false", "return", "exit", "skip", "fail", "flunk"}
-# Inside `( )` only a failure counts: an exit, return or skip there leaves the subshell, not the
-# test, so `|| (exit 0)` passes (#219 Codex); `exit <n>` counts for a literal n other than 0.
-FAILS = {"false", "fail", "flunk"}
-OPENERS = (("[[", "]]", "`[[ ]]`"), ("((", "))", "`(( ))`"))
+HEREDOC = re.compile(r"(?<!<)<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+# `$((a<<b))` shifts, it opens no heredoc: arithmetic is blanked before HEREDOC looks.
+ARITHMETIC = re.compile(r"\(\(.*?\)\)")
+# A comment after a line's code, read only after the operator or handler that ends the line, so
+# a `#` in a quote earlier on it (`*"#7"*`) is never taken for one.
+TAIL = r"(?:\s+#.*)?$"
+COMMENT = re.compile(TAIL)
+# A line ending in an operator runs on into the next, unless it may hold a comment (`\s#`): one
+# ending `# a ||` would swallow the next line's assertion (#223 Codex), so such a line ends its
+# statement and the next is judged alone, a loud miss at worst.
+CONTINUES = re.compile(r"(&&|\|\|?)$|\\$")
+MAY_COMMENT = re.compile(r"\s#")
+CLOSES = re.compile(rf"\}}{TAIL}")
+OPENS_GROUP = re.compile(r"\|\|\s*\{$")
+# `skip-unless` is another command: a name ends at a blank or the line's end (#223 Codex).
+_H = r"(?:false|return(?:\s+\d+)?|exit(?:\s+\d+)?|(?:skip|fail|flunk)(?:\s[^|&;{}]*)?)"
+HANDLER = re.compile(rf"\|\|\s*(?:{_H}|\{{(?:[^{{}}]*;)?\s*{_H}\s*;\s*\}}){TAIL}")
+# A background `&` (not `&&`, `>&2`, `&>f`) before the handler hands it `wait`'s status, or the
+# next command's.
+BACKGROUND = r"(?<![&>])&(?![&>])"
+SEMICOLON = re.compile(r"(?:\[\[.*?\s\]\]|\(\(.*?\)\))\s*;")
+# A `[[ ]]`/`(( ))` chain: each test (its `]]`/`))` ending a word or meeting `;|&`, so `*"]]"*`
+# inside is the operand's and `]]| cat` swallows no pipe), and what may join them. Whatever
+# else is left (a pipe, `&`, a redirection, an `|| echo` mid-chain) takes the status from the
+# tests (#223 Codex).
+_ENDS_WORD = r"(?=[\s;|&]|$)"
+TESTS = re.compile(rf"\[\[\s.*?\s\]\]{_ENDS_WORD}|\(\(.*?\)\){_ENDS_WORD}")
+ONLY_TESTS = re.compile(r"(?:\s|&&|\|\||!)*$")
+# A last line's own comment, read only when it holds no quote: in `[[ a == " ]] # " ]] || echo`
+# the "comment" is an operand's text, which would hide the `|| echo` (#223 Codex).
+QUOTELESS_COMMENT = re.compile(r"\s+#[^'\"]*$")
+FIX = "end it with `|| false`"
+
+
+class Shape(NamedTuple):
+    starts: re.Pattern[str]
+    why: str
+    # None: a `[[ ]]`/`(( ))` chain, whose statement before the handler must be tests alone
+    # (TESTS, ONLY_TESTS). Otherwise what may not sit before the handler, since the status it
+    # sees would be another command's: `! a | b` is one negated pipeline, but
+    # `[ a ] && [ b ] | cat` is cat's. A possible comment (`\s#`) masks too: in `! a # || false`
+    # the handler is commented out (#223 Codex).
+    masks: str | None
+
+
+SHAPES = (
+    # `[[` alone on its line too: a multi-line test is flagged, never read past (#223 Codex).
+    Shape(re.compile(r"\[\[(?:\s|$)"), "`[[ ]]` mid-test never fails on bash 3.2", None),
+    Shape(re.compile(r"\(\("), "`(( ))` mid-test never fails on bash 3.2", None),
+    # `! a | b` is one negated pipeline; in `! a && [ b ] | cat` the pipe is the later test's.
+    Shape(re.compile(r"!\s"), "`! cmd` never trips errexit",
+          rf"\|\||{BACKGROUND}|&&.*\||{MAY_COMMENT.pattern}"),
+    Shape(re.compile(r"(?:\[|test)\s.*&&\s*(?:\[|test\s|!\s|\(\()"),
+          "a failing `[ ]` before `&&` never trips errexit",
+          rf"\||{BACKGROUND}|{MAY_COMMENT.pattern}"),
+)
 
 
 class Line(NamedTuple):
     number: int
-    raw: str
-    bare: str  # top-level code only (see _lex), same columns as raw, cut at a comment
-
-
-def code_lines(text: str) -> list[Line]:
-    """Each line that starts outside a heredoc, a multi-line quote or a multi-line `$( )`."""
-    out: list[Line] = []
-    stack: list[str] = []
-    bodies: list[str] = []  # delimiters of heredocs still to skip, in order
-    for number, raw in enumerate(text.splitlines(), 1):
-        if bodies:
-            if raw.strip() == bodies[0]:
-                bodies.pop(0)
-            continue
-        starts_clean = not stack
-        bare, stack, opened = _lex(raw, stack)
-        bodies.extend(opened)
-        if starts_clean:
-            out.append(Line(number, raw, bare))
-    return out
-
-
-def _lex(line: str, stack: list[str]) -> tuple[str, list[str], list[str]]:
-    """The line with everything not at top level (quoted, or inside `$( )` or backticks) blanked
-    and a top-level comment cut off; the contexts still open at its end; and the delimiters of
-    the heredocs it opens, at any `$( )` depth (`x=$(cat <<EOF`). Inside `$( )` quoting starts
-    afresh, so `"$(grep "a'b" f)"` closes where bash closes it; `$'..'` honours `\'`."""
-    stack = list(stack)
-    kept: list[str] = []
-    heredocs: list[str] = []
-    i = 0
-    while i < len(line):
-        c, top, width = line[i], (stack[-1] if stack else ""), 1
-        was_top = not stack
-        heredoc = HEREDOC.match(line, i) if c == "<" and top in ("", "(") else None
-        if top == "'":
-            if c == "'":
-                stack.pop()
-        elif c == "\\":
-            width = 2  # the escaped character is never a delimiter
-        elif top == "$'":
-            if c == "'":
-                stack.pop()
-        elif c == top and c in "\"`":
-            stack.pop()
-        elif heredoc and line[i - 1:i] != "<" and line[i + 2:i + 3] != "<":
-            heredocs.append(heredoc.group(2))
-            width = heredoc.end() - i  # the delimiter's own quotes open nothing
-        elif c == "$" and line[i + 1:i + 2] == "(":
-            stack.append("(")
-            width = 2
-        elif c == "$" and line[i + 1:i + 2] == "'" and top != '"':
-            stack.append("$'")
-            width = 2
-        elif c == "(" and top == "(":
-            stack.append("(")
-        elif c == ")" and top == "(":
-            stack.pop()
-        elif c == "`" or (c in "'\"" and top != '"'):
-            stack.append(c)
-        elif was_top and c == "#" and (i == 0 or line[i - 1] in " \t;"):
-            break
-        visible = was_top and not stack
-        kept.append(line[i:i + width] if visible else " " * len(line[i:i + width]))
-        i += width
-    return "".join(kept), stack, heredocs
-
-
-def _after_close(bare: str, opener: str, closer: str) -> str | None:
-    """What follows the `closer` matching the leading `opener`, or None when it is not closed.
-    `((` counts every parenthesis, so `(( a + (b*c)))` closes at its last `))`."""
-    if opener == "((":
-        depth = 0
-        for i, c in enumerate(bare):
-            depth += {"(": 1, ")": -1}.get(c, 0)
-            if depth == 0:
-                return bare[i + 1:]
-        return None
-    depth = 0
-    for match in re.finditer(re.escape(opener) + "|" + re.escape(closer), bare):
-        depth += 1 if match.group() == opener else -1
-        if depth == 0:
-            return bare[match.end():]
-    return None
+    text: str  # stripped
+    top: bool  # starts at column 0: a function's `}` (the convention the last-line rule reads)
 
 
 class Finding(NamedTuple):
     line: int
     why: str
-    fix_at: tuple[int, int] | None  # (line, column) `|| false` goes at; None: needs judgement
+    fix_at: tuple[int, int] | None  # (line, column) ` || false` goes at; None: needs judgement
 
 
-def _split_top(bare: str) -> list[tuple[str, str]]:
-    """`bare` cut at the `;`, `&`, `&&` and `||` outside `{ }` and `( )`: (text, separator after
-    it) pairs, the last one's separator "". `bare` has quotes and `$( )` blanked already. A `&`
-    of a redirection (`>&2`, `&>f`) is no separator, nor an `&&`/`||` inside `[[ ]]`: those
-    are the expression's (`[[ a == x || a == y ]]`)."""
-    bare = CASE_BLOCK.sub(lambda m: CASE_MARK + " " * (len(m.group()) - 1), bare)
-    parts: list[tuple[str, str]] = []
-    depth, tests, start, i = 0, 0, 0, 0
-    while i < len(bare):
-        c = bare[i]
-        if tests:
-            # Inside `[[ ]]` only its close counts: `*{*` or `( a )` there is the expression's.
-            if bare.startswith("]]", i) and bare[i - 1:i] in (" ", "\t"):
-                tests -= 1
-                i += 1
-            i += 1
+def code_lines(text: str) -> tuple[list[Line], list[tuple[int, str]]]:
+    """(number, stripped text) of each line outside a heredoc body, blank and comment-only
+    lines dropped; and (number, delimiter) of each heredoc never closed. A `<<EOF` in a quote or
+    a trailing comment reads as an opener too: unclosed, it is reported, never a silent skip of
+    the rest of the file (#223 Codex)."""
+    out: list[Line] = []
+    bodies: list[tuple[int, str]] = []  # heredocs still to skip, in order: (opened at, delimiter)
+    for number, raw in enumerate(text.splitlines(), 1):
+        if bodies:
+            if raw.strip() == bodies[0][1]:
+                bodies.pop(0)
             continue
-        if bare.startswith("[[", i) and bare[i - 1:i] in ("", " ", "\t", "(", "{", ";", "&", "|"):
-            tests += 1
-            i += 2
-            continue
-        if c in "({":
-            depth += 1
-        elif c in ")}":
-            depth -= 1
-        elif depth == 0 and bare.startswith(("&&", "||"), i):
-            parts.append((bare[start:i], bare[i:i + 2]))
-            start, i = i + 2, i + 2
-            continue
-        elif depth == 0 and (c == ";" or (
-            c == "&" and bare[i - 1:i] not in (">", "<") and bare[i + 1:i + 2] != ">"
-        )):
-            parts.append((bare[start:i], c))
-            start = i + 1
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue  # a comment line's `<<EOF` opens nothing
+        bodies.extend((number, m.group(2)) for m in HEREDOC.finditer(ARITHMETIC.sub("", raw)))
+        out.append(Line(number, line, not raw[:1].isspace()))
+    return out, bodies
+
+
+def _continued(lines: list[Line], first: int) -> tuple[int, str]:
+    """The index of the statement's last physical line, and its continued lines joined."""
+    text, i = "", first
+    while (
+        (more := CONTINUES.search(lines[i].text)) and not MAY_COMMENT.search(lines[i].text)
+        and i + 1 < len(lines)
+    ):
+        text += lines[i].text[:more.start()] + (more.group(1) or "") + " "
         i += 1
-    parts.append((bare[start:], ""))
-    return parts
+    return i, text + lines[i].text
 
 
-def _pipeline_tail(command: str) -> str:
-    """The last command of a pipeline (outside `{ }` and `( )`): the one its status is.
-    `_split_top` has already cut at `||`, so every `|` left is a pipe."""
-    depth, start = 0, 0
-    for i, c in enumerate(command):
-        depth += c in "({"
-        depth -= c in ")}"
-        if c == "|" and depth == 0 and command[i - 1:i] != ">":  # `>|` clobbers, no pipe
-            start = i + 1
-    return command[start:].removeprefix("&")  # `|&`
+def _with_group(lines: list[Line], last: int, text: str) -> tuple[int, str]:
+    """An assertion's `|| {` group over lines, rejoined as `|| { a; b; }`, and the index of its
+    close. Only an assertion's: another statement's group (`echo x || {`) is no handler to read,
+    and collecting it could swallow the assertions after it (#223 Codex)."""
+    # A `|| {` after a possible comment (`echo x # else || {`) opens nothing, as continuations.
+    if not OPENS_GROUP.search(text) or MAY_COMMENT.search(lines[last].text):
+        return last, text
+    # The first line starting `}` closes it; what follows there (`} >&2`) stays in the text, so a
+    # close that is not the canonical lone `}` fails the handler, loud.
+    close = next((j for j in range(last + 1, len(lines)) if lines[j].text.startswith("}")), None)
+    if close is None:
+        return len(lines) - 1, text
+    body_lines = lines[last + 1:close]
+    if any(line.text.endswith("\\") for line in body_lines):
+        # A continued line inside: its next line is an argument, not a command (#223 Codex), and
+        # rejoining that is the lexer this form avoids. Unread, the handler fails, loud.
+        return close, text
+    # Each line's comment dropped (`false  # why`): only the group's last command is read.
+    commands = (COMMENT.sub("", line.text).removesuffix(";") for line in body_lines)
+    body = "".join(f"{command}; " for command in commands)
+    return close, OPENS_GROUP.sub("", text) + " || { " + body + lines[close].text
 
 
-def _unredirected(command: str) -> str:
-    """<command> stripped, without its trailing redirections (`{ ...; false; } >&2`)."""
-    command = command.strip()
-    while (stripped := TRAILING_REDIRECT.sub("", command)) != command and stripped:
-        command = stripped.strip()
-    return command
+def _status_is_the_tests(shape: Shape, test: str) -> bool:
+    """Whether <test> (a statement up to its handler, or all of it) returns its tests' status."""
+    if shape.masks is None:
+        return ONLY_TESTS.match(TESTS.sub(" ", test)) is not None
+    return not re.search(shape.masks, test)
 
 
-def _ends(handler: str) -> bool:
-    """The handler's last command is one of ENDS: itself, or the last inside `{ }` or `( )`, and
-    the last of a pipeline (`|| false | cat` is cat's status, 0), and one that always runs:
-    in `{ true || false; }` the false never does (#219 Codex)."""
-    if handler.strip().startswith("! "):
-        return False  # `! cmd` negates its pipeline: `|| ! true | false` succeeds (#219 Codex)
-    body = _unredirected(_pipeline_tail(handler))
-    subshell = False
-    while body[:1] in ("{", "(") and body[-1:] in ("}", ")"):
-        subshell = subshell or body[0] == "("
-        inner = [part for part in _split_top(body[1:-1]) if part[0].strip()]
-        # `a && false` fails either way; `a || false` is a's success when a succeeds.
-        # `{ false & }` backgrounds it: the group returns 0 at once (#219 Codex).
-        if not inner or inner[-1][1] == "&" or (len(inner) > 1 and inner[-2][1] == "||"):
-            return False
-        if inner[-1][0].strip().startswith("! "):
-            return False
-        body = _unredirected(_pipeline_tail(inner[-1][0]))
-    words = body.split()
-    if not words:
+def _handled(shape: Shape, text: str) -> bool:
+    handler = HANDLER.search(text)
+    if handler is None or not _status_is_the_tests(shape, text[:handler.start()]):
         return False
-    if subshell:
-        return words[0] in FAILS or (
-            # bash takes the status modulo 256: `exit 256` is 0.
-            words[0] == "exit" and len(words) > 1 and words[1].isdigit()
-            and int(words[1]) % 256 != 0
-        )
-    return words[0] in ENDS
+    # A quote left open before it: the "handler" is an argument's text (`! grep "|| false" f`,
+    # `! printf '|| skip x'`, #223 Codex). A chain's tests anchor it; the others do not, so an
+    # odd count of either quote, or an escaped one, fails closed (`"it's"` too, flagged loud).
+    test = text[:handler.start()]
+    unbalanced = test.count("'") % 2 or test.count('"') % 2 or re.search(r"\\['\"]", test)
+    return shape.masks is None or not unbalanced
 
 
-def _assertion_end(parts: list[tuple[str, str]]) -> int:
-    """The index of the assertion's last part: the tests an `&&` chain joins to it."""
-    return next((i for i, (_, sep) in enumerate(parts) if sep != "&&"), len(parts) - 1)
+def _semicolon(shape: Shape, text: str) -> bool:
+    """A `;` that ends the test before any handler (`[[ x ]]; y || false`): y's handler, not the
+    test's. Without a chain's closer to anchor it, any `;` before the handler counts."""
+    if shape.masks is None:
+        return SEMICOLON.match(text) is not None
+    handler = HANDLER.search(text)
+    return ";" in (text[:handler.start()] if handler else text)
 
 
-def _piped(parts: list[tuple[str, str]], first: int) -> bool:
-    """A pipe in the assertion's parts from <first> on, inside a group too: its tail is the
-    status any handler sees (`[[ x ]] | cat || false`, `[ a ] && { [ b ] | cat; } || false`:
-    #219 Codex). A redirection there (`>/dev/null`) changes nothing."""
-    # A `case` there is not judged arm by arm: any arm's pipe could set its status (#219 Codex).
-    return any(
-        LONE_PIPE.search(TEST_EXPR.sub("", text)) or CASE_MARK in text
-        for text, _ in parts[first:_assertion_end(parts) + 1]
-    )
-
-
-def _handled(parts: list[tuple[str, str]]) -> bool | None:
-    """Whether the `||` after the assertion (and any `&& <test>` it joins: `[ a ] && [ b ] ||
-    false`) hands its failure to handlers that all end the run; None when no `||` follows. Every
-    handler of a chain must (`|| echo x || false` passes), and the last must end the list: in
-    `|| false && x` the false is not the list's last command, so errexit ignores it, and
-    `|| false &` backgrounds the list, which then returns 0 (#219 Codex)."""
-    at = _assertion_end(parts)
-    if parts[at][1] != "||":
+def _verdict(shape: Shape, text: str, closes_function: bool) -> str | None:
+    """Why the statement's failure would go unseen; None when it is seen."""
+    if _semicolon(shape, text):
+        return f"{shape.why}: the `;` after it leaves it unhandled; one per line, {FIX}"
+    # A function's last line returns the failure only unhandled: `[[ a ]] || echo x` returns
+    # echo's 0 (#223 Codex).
+    if closes_function and _status_is_the_tests(shape, QUOTELESS_COMMENT.sub("", text)):
         return None
-    for text, sep in parts[at + 1:]:
-        if not _ends(text) or sep in ("&&", "&"):
-            return False
-        if sep != "||":
-            return True
-    return True
+    if _handled(shape, text):
+        return None
+    return f"{shape.why}; {FIX}, or make it the function's last line"
 
 
-def verdict(bare: str) -> tuple[str, bool] | None:
-    """Why this statement's failure would go unseen, and whether appending `|| false` alone
-    fixes it; None when it is seen. Only the first `;`-separated command is the assertion:
-    `[[ x ]]; a || b` handles `a`, not the test."""
-    weak = ("its `||` handler succeeds, or an `&&` follows it, so the failure is still unseen; "
-            "end the statement with a handler ending in `false`")
-    for opener, closer, shape in OPENERS:
-        # `((` needs no blank after it (`((n == 2))`); `[[x` is no keyword (rollcall #83 Codex).
-        if bare.startswith(opener) and (opener == "((" or bare[2:3] in ("", " ", "\t")):
-            why = f"{shape} mid-test never fails on bash 3.2"
-            rest = _after_close(bare, opener, closer)
-            if rest is None:
-                return f"{why}; {FIX}", False
-            parts = _split_top(rest)
-            if _piped(parts, 0):
-                return f"{why}: {PIPED}", False
-            handled = _handled(parts)
-            if handled is None:
-                return f"{why}; {FIX}", len(parts) == 1
-            return None if handled else (f"{why}: {weak}", False)
-    parts = _split_top(bare)
-    if bare.startswith("! "):
-        why = "`! cmd` never trips errexit"
-        # `!` negates its whole pipeline, so only a later test's pipe replaces the status.
-        if _piped(parts, 1):
-            return f"{why}: {PIPED}", False
-        handled = _handled(parts)
-        if handled is None:
-            return f"{why}; {FIX}", len(parts) == 1
-        return None if handled else (f"{why}: {weak}", False)
-    if re.match(r"(\[|test)\s", bare) and parts[0][1] == "&&":
-        # `[ a ] && [ b ] || false` hands both to the handler; `[ c ] && action` may be a
-        # conditional, not an assertion: `if` or split, by hand.
-        handled = None if _piped(parts, 0) else _handled(parts)
-        if handled:
-            return None
-        why = "a failing `[ ]` before `&&` never trips errexit"
-        if handled is None:
-            return f"{why}; one `[ ]` per line, or {FIX}", False
-        return f"{why}: {weak}", False
-    return None
-
-
-def _open_group(statement: list[Line]) -> bool:
-    """A handler group opened at a line's end (`|| {`) that the statement has not closed yet."""
-    opened = next((m for line in statement if (m := OPENS_GROUP.search(line.bare))), None)
-    if not opened:
-        return False
-    # Only the opener's own kind: a `case` arm's `a)` inside a `{ }` handler closes nothing.
-    opener = opened.group().rstrip()[-1]
-    closer = "}" if opener == "{" else ")"
-    text = "".join(line.bare for line in statement)
-    return text.count(opener) > text.count(closer)
-
-
-def _statements(lines: list[Line]) -> list[list[Line]]:
-    """Physical lines grouped into statements: a line ending in `&&`, `||`, `|` or `\\` takes
-    the next one, unless that one was not read (it starts inside a quote or a heredoc); a
-    handler group opened at a line's end (`|| {`) takes every line up to its close."""
-    out: list[list[Line]] = []
-    for line in lines:
-        last = out[-1][-1] if out else None
-        if out and _open_group(out[-1]):
-            out[-1].append(line)
-        elif last and last.bare.rstrip().endswith(CONTINUES) and line.number == last.number + 1:
-            out[-1].append(line)  # even one all quoted, whose `bare` is blank: `  "$f"`
-        elif line.bare.strip():
-            out.append([line])
-    return out
-
-
-def _joined(statement: list[Line]) -> str:
-    """The statement on one line: a continued line joins with a blank, a line of a handler
-    group with `;`, as its newline separates commands."""
-    text, previous = "", None
-    for line in statement:
-        if previous is not None:
-            text += " " if previous.bare.rstrip().endswith(CONTINUES) else "; "
-        text += line.bare.strip().rstrip("\\")
-        previous = line
-    return text
+def _fix_column(shape: Shape, text: str) -> int | None:
+    """Where ` || false` alone makes this one-line statement the canonical form: after its
+    closer, before any comment; at the end of the other shapes, when no comment or `;`/`&` sits
+    on the line for it to land after."""
+    if shape.masks is None:
+        # More than one closer a comment could follow (`== "]] # x" ]]`, `]]  # see [[ y ]]`),
+        # or a "comment" holding a quote (`== " ]] # " ]]`): which one ends the test is not
+        # lexical, so a person decides (#223 Codex).
+        closers = list(re.finditer(rf"(?:\]\]|\)\))(?=(?:{QUOTELESS_COMMENT.pattern})?$)", text))
+        column = closers[0].end() if len(closers) == 1 else None
+    else:
+        column = None if re.search(r"[#;]|(?<!&)&(?!&)", text) else len(text)
+    if column is None or _semicolon(shape, text):
+        return None
+    return column if _handled(shape, text[:column] + " || false" + text[column:]) else None
 
 
 def check_text(text: str) -> list[Finding]:
-    found: list[Finding] = []
-    for statement in _statements(code_lines(text)):
-        joined = _joined(statement)
-        judged = verdict(joined)
-        if not judged:
-            continue
-        why, fixable = judged
-        last = statement[-1]
-        if last.bare.rstrip().endswith(CONTINUES):
-            fixable = False  # it runs on into a line not read: its end is unknown
-        # The raw text, not `bare`: a quoted last word is blanked there.
-        column = len(last.raw[:len(last.bare)].rstrip())
-        found.append(Finding(statement[0].number, why, (last.number, column) if fixable else None))
-    return found
+    lines, unclosed = code_lines(text)
+    found = [
+        Finding(number, f"`<<{delimiter}` never closes, so nothing after it was read: close the "
+                        "heredoc, or reword a `<<` in a quote or comment", None)
+        for number, delimiter in unclosed
+    ]
+    first = 0
+    while first < len(lines):
+        # Classified on the continued statement: `[ a ] &&` + `[ b ]` is one (#223 Codex).
+        last, statement = _continued(lines, first)
+        shape = next((shape for shape in SHAPES if shape.starts.match(statement)), None)
+        if shape:
+            last, statement = _with_group(lines, last, statement)
+        # Only a column-0 `}` ends a function: an indented one may close a `{ }` group mid-test,
+        # whose status trips nothing (#223 Codex).
+        after = lines[last + 1] if last + 1 < len(lines) else None
+        closes_function = after is not None and after.top and CLOSES.match(after.text) is not None
+        why = shape and _verdict(shape, statement, closes_function)
+        if shape and why:
+            number = lines[first].number
+            column = _fix_column(shape, statement) if first == last else None
+            found.append(Finding(number, why, None if column is None else (number, column)))
+        first = last + 1
+    return sorted(found, key=lambda finding: finding.line)
 
 
 def fix_text(text: str, found: list[Finding]) -> str:
@@ -396,6 +267,7 @@ def fix_text(text: str, found: list[Finding]) -> str:
         if finding.fix_at is not None:
             number, column = finding.fix_at
             line = lines[number - 1]
+            column += len(line) - len(line.lstrip())  # the column is of the stripped line
             lines[number - 1] = line[:column] + " || false" + line[column:]
     return "".join(lines)
 

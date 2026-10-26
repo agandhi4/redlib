@@ -383,7 +383,9 @@ def load_base_bounds(bounds_path: Path, ref: str) -> tuple[dict[str, Bound] | No
 
 
 def _atomic_write(path: Path, text: str) -> None:
-    # Atomic replace: a crash mid-write must not leave a truncated committed file.
+    # Atomic replace: a crash mid-write must not leave a truncated committed file. The directory
+    # may not exist yet: a first-adoption rebaseline of a hand-built repo creates docs/metrics/.
+    path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -866,7 +868,12 @@ def cmd_rebaseline(args: argparse.Namespace) -> int:
     value to take); any other absent key is an error."""
     snapshot = load_snapshot(Path(args.snapshot), allow_empty=True)
     bounds_path = Path(args.bounds)
-    bounds = load_bounds(bounds_path)
+    # First adoption (a hand-built repo; metrics_collect.sh header): every key is seeded, and the
+    # file exists only once this run writes it.
+    first = args.keys is None and not bounds_path.exists()
+    bounds = {} if first else load_bounds(bounds_path)
+    if first:
+        print(f"ratchet: no {bounds_path}: first adoption, every key is bounded at today's value")
     if args.keys is not None:
         keyed = rebaseline_keys(_parse_keys(args.keys), snapshot, bounds, bounds_path)
         if keyed is not None:

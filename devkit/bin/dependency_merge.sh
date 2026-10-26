@@ -4,7 +4,8 @@
 # every one through the repo's own gate; Renovate never merges by itself and no paid GitHub
 # feature is involved. Owner 2026-10-22: devkit improves every project without a hand-run
 # `make devkit-sync` PR per repo per devkit change. Scheduled by bin/install_dependency_merge.sh
-# (templates/launchd/com.agandhi4.devkit.dependency-merge.plist).
+# (templates/launchd/com.agandhi4.devkit.dependency-merge.plist), whose launcher runs devkit
+# main's copy of this file from a clone of its own (bin/job_launcher.sh), never a checkout's.
 #
 # Usage: bin/dependency_merge.sh [--max <n>] [--dry-run] <repo-root>...
 #   <repo-root>  a checkout whose scripts/ci/gate_plan.sh has literal GATE_SLUG and
@@ -21,7 +22,7 @@
 #   - else the one open PR labelled devkit-sync is reused when its branch is
 #     devkit-sync/<main sha7>, it vendors that commit and it merges cleanly into main, so a head
 #     whose gate failed stays that head (the marker below skips it) and is never re-gated in a
-#     loop. Otherwise, in a second worktree of main, `make devkit-sync` with
+#     loop (one whose head is not the job's commit, job_sync_commit, is left alone). Otherwise, in a second worktree of main, `make devkit-sync` with
 #     DEVKIT_COMMIT_TRAILER set to the model-agnostic default (a person's devkit.trailer config
 #     never signs a job's commit), checked to vendor only (_vendor_paths.sh vendoring_only and
 #     vendored_from, the very test pr_merge.sh's Codex exemption applies, so a sync that would
@@ -29,6 +30,12 @@
 #     as a draft (no Codex run, no fleet Workflow; pr_merge.sh readies it) with the devkit commit
 #     range and the docs/decisions.md titles it adds. Any other open devkit-sync PR is closed as
 #     superseded. The pre-push hook skips the repo's steps for it (hook_steps.sh vendoring only).
+#     Every step reruns to the same end, so a run stopped at any one resumes the next night: a
+#     devkit-sync/<sha7> already there with no open labelled PR is a run's own unfinished work when
+#     its tip is the job's commit and no PR on it was ever closed or merged (adopt_sync_branch),
+#     and is pushed over and opened; a person's commit there, or a PR closed by hand, is refused.
+#     After the sync, every other devkit-sync/* branch whose tip is the job's commit, vendoring a
+#     devkit commit main has moved past, with no open PR, is deleted (`pruned`, prune_sync_branches).
 #   - then gated and merged as below, counting toward --max. A fail is a devkit regression: one
 #     comment per head, the PR left open, the next devkit change opening its successor. A gate
 #     failing on the metrics job is the same fail: the existing rules apply by hand (a gain wants
@@ -55,9 +62,14 @@
 #     failures (a gate step such as worktree, toolchain or a conflict; the silence watchdog; a
 #     budget overrun under load: `failures --code-only` is empty): logged with no comment and
 #     no marker, so the next run retries the head. A Dependabot head is never parked on the box.
-# Output: one `dependency-merge: <slug>#<n> <outcome> <detail>` line per PR (the sync's
-#   `<slug>` alone until it has a PR), outcome one of merged failed error refused skipped closed
-#   current would-sync would-gate, appended with a UTC stamp to
+# Network: every call to GitHub (git fetch and push, gh) is retried after a transient failure
+#   (net); one still failing is the outcome `network`, never "branch exists" or a regression.
+# Power: a Mac macOS will sleep whatever caffeinate holds (lid closed on battery,
+#   _awake_lib.sh's devkit_sleep_forced) stops the run before its next repo or PR, with one
+#   `skipped run: <reason>` line and exit 0, as the kill switch does.
+# Output: one `dependency-merge: <slug>#<n> <outcome> <detail>` line per PR (the sync's line is
+#   `<slug>` alone until it has a PR), outcome one of merged failed error network refused skipped
+#   closed pruned current would-sync would-prune would-gate, appended with a UTC stamp to
 #   $XDG_STATE_HOME/devkit/dependency-merge.log; the gate and merge output of a PR go to
 #   $XDG_STATE_HOME/devkit/dependency-merge/<repo>-<n>.log. Then one summary line per repo.
 # Kill switch: ${XDG_CONFIG_HOME:-~/.config}/devkit/dependency-merge.off, read before every PR.
@@ -75,6 +87,8 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
 . "$HERE/_vendor_paths.sh"
 # shellcheck source=bin/_trailer_lib.sh  # DEVKIT_DEFAULT_TRAILER, the sync commit's trailer
 . "$HERE/_trailer_lib.sh"
+# shellcheck source=bin/_awake_lib.sh  # devkit_sleep_forced
+. "$HERE/_awake_lib.sh"
 
 readonly MARKER=devkit-dependency-merge
 readonly SYNC_LABEL=devkit-sync
@@ -116,13 +130,23 @@ require_tools() {
 parse_args "$@"
 require_tools
 
-OFF_SAID=0
-switched_off() {
-  [ -e "$OFF" ] || return 1
-  [ "$OFF_SAID" = 1 ] || echo "dependency-merge: $OFF exists; not running"
-  OFF_SAID=1
+# halted: true, saying why once, when the run must stop before its next repo or PR: the kill
+# switch, or a Mac macOS will sleep whatever caffeinate holds (header, Power), where every gate
+# would refuse and each PR log an error.
+HALT_SAID=0
+halted() {
+  local why
+  if [ -e "$OFF" ]; then
+    why="$OFF exists; not running"
+  elif devkit_sleep_forced; then
+    why="skipped run: $DEVKIT_SLEEP_REASON"
+  else
+    return 1
+  fi
+  [ "$HALT_SAID" = 1 ] || echo "dependency-merge: $why"
+  HALT_SAID=1
 }
-switched_off && exit 0
+halted && exit 0
 
 mkdir -p "$STATE/dependency-merge" || exit 2
 # fd 8 is the run lock; every make below closes it (8>&-), so a process a gate leaves behind
@@ -154,10 +178,51 @@ record() {
   [ "$DRY_RUN" = 1 ] || printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line" >>"$LOG"
 }
 
+# GitHub drops calls (2026-10-24): finplat's sync push died on "RPC failed; curl 56 Connection
+# reset" after it had landed, and rollcall's label call on "connection reset by peer", each then
+# read as a repo problem. NET_TRIES and NET_BACKOFF_SECONDS are environment-only test hooks.
+readonly NET_TRIES=${NET_TRIES:-3} NET_TEMPFAIL=75
+readonly NET_TRANSIENT='connection reset|RPC failed|remote end hung up|unexpected disconnect|could not resolve host|timed out|TLS handshake|unexpected EOF|HTTP 5[0-9][0-9]|HTTP/[0-9.]+ 5[0-9][0-9]'
+
+# net <cmd...>: run a call to GitHub, retrying a transient network failure with doubling backoff,
+# NET_TRIES tries in all. A retry is safe for every call here: a push that landed is "up-to-date"
+# the second time, a `gh pr create` that did is refused as existing and the next run adopts its
+# PR, and the rest read or set state. Stdout is the last try's (a dropped one may have printed
+# half), stderr every try's. Exit NET_TEMPFAIL when the last try still failed on the network.
+net() {
+  local try=1 delay=${NET_BACKOFF_SECONDS:-5} out err rc
+  out=$(mktemp "${TMPDIR:-/tmp}/depmerge-net.XXXXXX") || return 2
+  err=$(mktemp "${TMPDIR:-/tmp}/depmerge-net.XXXXXX") || { rm -f "$out"; return 2; }
+  while :; do
+    "$@" >"$out" 2>"$err"
+    rc=$?
+    cat "$err" >&2
+    [ "$rc" != 0 ] || break
+    grep -qiE "$NET_TRANSIENT" "$err" || break
+    if [ "$try" -ge "$NET_TRIES" ]; then
+      rc=$NET_TEMPFAIL
+      break
+    fi
+    echo "dependency-merge: a transient network failure (try $try of $NET_TRIES); retrying in ${delay}s" >&2
+    sleep "$delay"
+    try=$((try + 1)) delay=$((delay * 2))
+  done
+  cat "$out"
+  rm -f "$out" "$err"
+  return "$rc"
+}
+
+# net_outcome <rc> <outcome>: `network` for net's NET_TEMPFAIL (nothing is wrong with the repo
+# and the next run resumes where this one stopped), else <outcome>.
+net_outcome() { if [ "$1" = "$NET_TEMPFAIL" ]; then echo network; else echo "$2"; fi; }
+
+# record_fail <label> <rc> <outcome> <detail>: record a failed step, as net_outcome words it.
+record_fail() { record "$1" "$(net_outcome "$2" "$3")" "$4"; }
+
 # summary <label>: the counts of the outcomes recorded since the last summary, in a fixed order.
 summary() {
   local outcome n counts=""
-  for outcome in merged failed error refused skipped closed current would-sync would-gate; do
+  for outcome in merged failed error network refused skipped closed pruned current would-sync would-prune would-gate; do
     n=$(tr ' ' '\n' <<<"$OUTCOMES" | grep -cx -- "$outcome")
     [ "$n" = 0 ] || counts="${counts:+$counts, }$outcome $n"
   done
@@ -215,7 +280,7 @@ gate_pr() {
     return 0
   fi
   [ "$kind" != devkit-sync ] || regression="devkit regression: "
-  if gh pr comment "$n" --repo "$slug" --body "$(failure_comment "$n" "$head" "$failures" "$kind")" >/dev/null; then
+  if net gh pr comment "$n" --repo "$slug" --body "$(failure_comment "$n" "$head" "$failures" "$kind")" >/dev/null; then
     record "$slug#$n" failed "$regression$(paste -sd ';' - <<<"${failures:-no gate record}"); commented"
   else
     record "$slug#$n" failed "$regression$(paste -sd ';' - <<<"${failures:-no gate record}"); comment not posted (gh above)"
@@ -226,14 +291,14 @@ gate_pr() {
 check_pr() {
   local slug=$1 n=$2 head=$3 bodies
   # refs/worktree/ is private to this worktree and goes with it: the checkout's refs stay as they were.
-  fetch_main "$WT" "+pull/$n/head:refs/worktree/dependency-pr" \
-    || { echo "error cannot fetch main and PR #$n (git above)"; return; }
+  net fetch_main "$WT" "+pull/$n/head:refs/worktree/dependency-pr" \
+    || { echo "$(net_outcome $? error) cannot fetch main and PR #$n (git above)"; return; }
   [ "$(git -C "$WT" rev-parse refs/worktree/dependency-pr)" = "$head" ] \
     || { echo "skipped head moved since the PR list; next run"; return; }
   git -C "$WT" merge-tree --write-tree origin/main "$head" >/dev/null 2>&1 \
     || { echo "skipped conflicts with main, Renovate will rebase"; return; }
-  bodies=$(gh api "repos/$slug/issues/$n/comments" --paginate --jq '.[].body') \
-    || { echo "error cannot read PR #$n's comments (gh above)"; return; }
+  bodies=$(net gh api "repos/$slug/issues/$n/comments" --paginate --jq '.[].body') \
+    || { echo "$(net_outcome $? error) cannot read PR #$n's comments (gh above)"; return; }
   if grep -qF "<!-- $MARKER head=$head -->" <<<"$bodies"; then
     echo "skipped its gate already failed on head ${head:0:12} (see its comment); a new head retries"
   fi
@@ -245,13 +310,13 @@ check_pr() {
 # --limit, so a repo with more than 100 open PRs is listed whole.
 list_prs() {
   local list numbers n
-  list=$(gh pr list --repo "$1" --base main --state open --limit 1000 \
+  list=$(net gh pr list --repo "$1" --base main --state open --limit 1000 \
     --json number,author,title,labels,headRefOid,createdAt,body) || return
   numbers=$("$DEVKIT_PYTHON" -I "$HERE/_dependency_pr.py" needs-commits <<<"$list") || return
   {
     printf '%s\n' "$list"
     for n in $numbers; do
-      gh pr view "$n" --repo "$1" --json number,headRefOid,commits || exit
+      net gh pr view "$n" --repo "$1" --json number,headRefOid,commits || exit
     done
   } | "$DEVKIT_PYTHON" -I "$HERE/_dependency_pr.py"
 }
@@ -264,7 +329,7 @@ repo_error() { echo "dependency-merge: $1: cannot run: $2" >&2; return 1; }
 open_repo() {
   local root
   root=$(cd "$1" 2>/dev/null && pwd -P) || { repo_error "$1" "not a directory"; return; }
-  gate_plan_main "$root" || { repo_error "$root" "$PLAN_ERROR"; return; }
+  net gate_plan_main "$root" || { repo_error "$root" "$PLAN_ERROR"; return; }
   SLUG=$PLAN_SLUG STATE_NAME=$PLAN_STATE_NAME
   PRS=$(list_prs "$SLUG") || { repo_error "$SLUG" "cannot list its open PRs (gh or _dependency_pr.py above)"; return; }
   WT=$STATE/dependency-merge/wt-${SLUG#*/}
@@ -308,18 +373,72 @@ sync_body() {
   printf '\nDecisions added (devkit docs/decisions.md):\n%s\n' "${titles:-- none}"
 }
 
-# reusable_sync <n> <head> <upstream>: true when open sync PR <n> still vendors <upstream> and
-# merges cleanly into main, so pushing a fresh sync over it would only discard its gate record.
+# reusable_sync <head> <upstream>: true when the open sync PR's <head> (fetched to
+# refs/worktree/devkit-sync) still vendors <upstream> and merges cleanly into main, so pushing a
+# fresh sync over it would only discard its gate record.
 reusable_sync() {
   local rev
-  fetch_main "$WT" "+pull/$1/head:refs/worktree/devkit-sync" || return 1
-  [ "$(git -C "$WT" rev-parse refs/worktree/devkit-sync)" = "$2" ] || return 1
-  rev=$(git -C "$WT" show "$2:.devkit-rev" 2>/dev/null) || return 1
-  [ "${rev%% *}" = "$3" ] && git -C "$WT" merge-tree --write-tree origin/main "$2" >/dev/null 2>&1
+  [ "$(git -C "$WT" rev-parse refs/worktree/devkit-sync)" = "$1" ] || return 1
+  rev=$(git -C "$WT" show "$1:.devkit-rev" 2>/dev/null) || return 1
+  [ "${rev%% *}" = "$2" ] && git -C "$WT" merge-tree --write-tree origin/main "$1" >/dev/null 2>&1
+}
+
+# job_sync_commit <dir> <commit>: true when <commit> is a sync commit as push_sync makes it:
+# subject "Update devkit to ...", the model-agnostic trailer, one parent on origin/main and nothing
+# but vendoring on top of it. A person's commit on the branch, or the job's amended with other
+# paths, is not.
+job_sync_commit() {
+  local parent paths
+  git -C "$1" log -1 --format=%s "$2" 2>/dev/null | grep -q '^Update devkit to ' || return 1
+  git -C "$1" log -1 --format=%B "$2" | grep -qxF "$DEVKIT_DEFAULT_TRAILER" || return 1
+  parent=$(git -C "$1" log -1 --format=%P "$2")
+  [[ "$parent" =~ ^[0-9a-f]+$ ]] || return 1
+  git -C "$1" merge-base --is-ancestor "$parent" refs/remotes/origin/main || return 1
+  paths=$(git -C "$1" -c core.quotePath=false diff --name-only --no-renames "$parent" "$2")
+  (cd "$1" && vendoring_only "$2" "$paths")
+}
+
+# adopt_sync_branch <tip> <log>: true when devkit-sync/<sha7>, found at <tip> with no open labelled
+# PR on it, is a run's own unfinished work, which this run then pushes over and opens: the job's
+# commit (job_sync_commit) with no PR on it ever closed or merged. finplat's push landed as the
+# network dropped and rollcall's label call failed after its push (2026-10-24); #219's guard
+# took each for a person's branch, and no later run synced either repo again. An open PR on it
+# (gh pr create opened it, then could not label it) becomes SYNC_REUSE. Else records why and
+# returns 1: a person's commit there, or a PR closed by hand, is never overwritten or re-opened.
+adopt_sync_branch() {
+  local tip=$1 log=$2 branch=$SYNC_LABEL/${SYNC_NEW:0:7} prs n state
+  job_sync_commit "$SYNC_WT" "$tip" || {
+    record "$SLUG" skipped "$branch is at ${tip:0:12}, not a devkit-sync commit (a person's push?); not overwritten"
+    return 1
+  }
+  prs=$(net gh pr list --repo "$SLUG" --head "$branch" --state all --json number,state \
+    --jq '.[] | [.number, .state] | @tsv' 2>>"$log") \
+    || { record_fail "$SLUG" $? error "cannot list the PRs on $branch; see $log"; return 1; }
+  while IFS=$'\t' read -r n state; do
+    case $state in
+      '') ;;
+      OPEN) SYNC_REUSE=$n ;;
+      *)
+        record "$SLUG" skipped "$branch is PR #$n's, $state (by hand: never re-opened); not overwritten"
+        return 1 ;;
+    esac
+  done <<<"$prs"
+}
+
+# fetch_sync_branches <dir> <log>: origin's devkit-sync* branches into their tracking refs, or
+# record why not and return 1. Pruned: a stale refs/remotes/origin/devkit-sync (a branch of that
+# name, long deleted) D/F-conflicts with each devkit-sync/<sha7> one, and push's tracking update
+# failed on it (rollcall, 2026-10-24).
+fetch_sync_branches() {
+  net git -C "$1" fetch -q --prune --no-tags origin \
+    "+refs/heads/$SYNC_LABEL*:refs/remotes/origin/$SYNC_LABEL*" >>"$2" 2>&1 8>&- \
+    || { record_fail "$SLUG" $? error "cannot fetch origin's $SYNC_LABEL branches; see $2"; return 1; }
 }
 
 # push_sync <log> <lease>: make devkit-sync in a fresh worktree of main, check that it only
-# vendors, and force-push it to devkit-sync/<sha7> over <lease> (the open PR's head, or ""). Sets SYNC_NEW and SYNC_HEAD; else records why and returns 1.
+# vendors, and force-push it to devkit-sync/<sha7> over <lease>: the open PR's head, or "" for
+# none, when a branch already there is pushed over only if adopt_sync_branch adopts it. Sets
+# SYNC_NEW and SYNC_HEAD (and SYNC_REUSE as adopt_sync_branch does); else records why, returns 1.
 push_sync() {
   local log=$1 main paths upstream
   main=$(git -C "$WT" rev-parse HEAD)
@@ -336,51 +455,50 @@ push_sync() {
   # The test pr_merge.sh's exemption applies: a sync that would need a review is never pushed.
   # devkit's main is fetched again, not read from the record under test: devkit-sync fetched it
   # just now, so it is at least the commit it vendored.
-  upstream=$(fetch_devkit_main "$SYNC_WT") \
-    || { record "$SLUG" error "cannot fetch devkit's main from $DEVKIT_URL (git above)"; return 1; }
+  upstream=$(net fetch_devkit_main "$SYNC_WT") \
+    || { record_fail "$SLUG" $? error "cannot fetch devkit's main from $DEVKIT_URL (git above)"; return 1; }
   (cd "$SYNC_WT" && vendoring_only HEAD "$paths" && vendored_from HEAD "$upstream" "$main") || {
     record "$SLUG" refused "the sync is not vendoring only (outside devkit/: $(grep -v '^devkit/' <<<"$paths" | paste -sd ' ' -)); not pushed"
     return 1
   }
-  # Leased to the head the PR list named (no branch, when no PR is open on it): a branch someone
-  # pushed to, or left by a PR closed by hand, is never overwritten or re-opened.
-  local lease=$2 ref=refs/heads/$SYNC_LABEL/${SYNC_NEW:0:7} there
-  local taken="cannot push $SYNC_LABEL/${SYNC_NEW:0:7} (it exists with no open PR on it, or moved: a PR closed by hand, or a person's push); not overwritten; see $log"
-  [ "$SYNC_NEW" = "$SYNC_UPSTREAM" ] || lease=""
-  # A push of the very commit the branch holds is "up-to-date" and passes any lease: a sync
-  # rebuilt in the same second (same tree, parent and dates) is that commit, so an unleased
-  # branch is checked for first (#219's gate: the closed-by-hand test flaked on it).
+  local lease=$2 branch=$SYNC_LABEL/${SYNC_NEW:0:7} there
+  # make devkit-sync fetches devkit's main itself: one merged since is another branch, and the
+  # open PR found for the old one is superseded (close_superseded).
+  [ "$SYNC_NEW" = "$SYNC_UPSTREAM" ] || lease="" SYNC_REUSE=""
+  fetch_sync_branches "$SYNC_WT" "$log" || return 1  # also reads the branch's tip
+  # An unleased branch is judged first, never pushed into blind: a push of the very commit it
+  # holds (a sync rebuilt in the same second) is "up-to-date" past any lease (#219).
   if [ -z "$lease" ]; then
-    there=$(git -C "$SYNC_WT" ls-remote origin "$ref" 2>>"$log" 8>&-) \
-      || { record "$SLUG" error "cannot list origin's $ref; see $log"; return 1; }
-    [ -z "$there" ] || {
-      record "$SLUG" skipped "$taken"
-      return 1
-    }
+    there=$(git -C "$SYNC_WT" rev-parse -q --verify "refs/remotes/origin/$branch")
+    if [ -n "$there" ]; then
+      adopt_sync_branch "$there" "$log" || return 1
+      lease=$there
+    fi
   fi
-  git -C "$SYNC_WT" push -q "--force-with-lease=$ref:$lease" origin "HEAD:$ref" >>"$log" 2>&1 8>&- || {
-    record "$SLUG" skipped "$taken"
-    return 1
-  }
+  # Leased: a branch that moved since it was read (a person's push) is never overwritten.
+  net git -C "$SYNC_WT" push -q "--force-with-lease=refs/heads/$branch:$lease" origin "HEAD:refs/heads/$branch" \
+    >>"$log" 2>&1 8>&- \
+    || { record_fail "$SLUG" $? skipped "cannot push $branch (moved since this run read it: a person's push?); not overwritten; see $log"; return 1; }
 }
 
-# open_sync_pr <n or ""> <old> <log>: update PR <n>'s body, or open the draft PR for the branch
-# push_sync pushed. Sets SYNC_PR; else records why and returns 1.
+# open_sync_pr <n or ""> <old> <log>: update PR <n>'s body and label, or open the draft PR for the
+# branch push_sync pushed. Sets SYNC_PR; else records why and returns 1.
 open_sync_pr() {
   local body url
   body=$(sync_body "$2" "$SYNC_NEW")
+  # The label on both paths: the edit labels a PR gh pr create opened but could not label.
+  net gh label create "$SYNC_LABEL" --repo "$SLUG" --force --color 0e8a16 \
+    --description "Nightly devkit sync (devkit bin/dependency_merge.sh)" >>"$3" 2>&1 \
+    || { record_fail "$SLUG" $? error "cannot create the $SYNC_LABEL label; see $3"; return 1; }
   if [ -n "$1" ]; then
     SYNC_PR=$1
-    gh pr edit "$1" --repo "$SLUG" --body "$body" >>"$3" 2>&1 \
-      || { record "$SLUG#$1" error "cannot update its body; see $3"; return 1; }
+    net gh pr edit "$1" --repo "$SLUG" --add-label "$SYNC_LABEL" --body "$body" >>"$3" 2>&1 \
+      || { record_fail "$SLUG#$1" $? error "cannot update its body and label; see $3"; return 1; }
     return 0
   fi
-  gh label create "$SYNC_LABEL" --repo "$SLUG" --force --color 0e8a16 \
-    --description "Nightly devkit sync (devkit bin/dependency_merge.sh)" >>"$3" 2>&1 \
-    || { record "$SLUG" error "cannot create the $SYNC_LABEL label; see $3"; return 1; }
-  url=$(gh pr create --repo "$SLUG" --base main --head "$SYNC_LABEL/${SYNC_NEW:0:7}" --draft \
+  url=$(net gh pr create --repo "$SLUG" --base main --head "$SYNC_LABEL/${SYNC_NEW:0:7}" --draft \
     --label "$SYNC_LABEL" --title "Update devkit to ${SYNC_NEW:0:7}" --body "$body" 2>>"$3") \
-    || { record "$SLUG" error "cannot open the sync PR; see $3"; return 1; }
+    || { record_fail "$SLUG" $? error "cannot open the sync PR; see $3"; return 1; }
   SYNC_PR=${url##*/}
   [[ "$SYNC_PR" =~ ^[0-9]+$ ]] || { record "$SLUG" error "gh pr create printed no PR URL ('$url')"; return 1; }
 }
@@ -390,11 +508,11 @@ close_superseded() {
   local n
   while IFS=$'\t' read -r n _ _; do
     [ -n "$n" ] && [ "$n" != "$SYNC_PR" ] || continue
-    if gh pr close "$n" --repo "$SLUG" --delete-branch \
+    if net gh pr close "$n" --repo "$SLUG" --delete-branch \
       --comment "Superseded by #$SYNC_PR (devkit ${SYNC_NEW:0:7}), opened by the nightly devkit sync." >/dev/null; then
       record "$SLUG#$n" closed "superseded by #$SYNC_PR"
     else
-      record "$SLUG#$n" error "cannot close it as superseded by #$SYNC_PR (gh above)"
+      record_fail "$SLUG#$n" $? error "cannot close it as superseded by #$SYNC_PR (gh above)"
     fi
   done <<<"$1"
 }
@@ -403,10 +521,11 @@ close_superseded() {
 # devkit should move to it (header); else record why not (nothing for a repo vendoring none).
 sync_behind() {
   local rev
+  SYNC_UPSTREAM="" SYNC_NEW=""
   rev=$(git -C "$WT" show HEAD:.devkit-rev 2>/dev/null) || return 1
   SYNC_OLD=${rev%% *}
-  SYNC_UPSTREAM=$(fetch_devkit_main "$WT") \
-    || { record "$SLUG" error "cannot fetch devkit's main from $DEVKIT_URL (git above)"; return 1; }
+  SYNC_UPSTREAM=$(net fetch_devkit_main "$WT") \
+    || { record_fail "$SLUG" $? error "cannot fetch devkit's main from $DEVKIT_URL (git above)"; return 1; }
   [ "$SYNC_OLD" != "$SYNC_UPSTREAM" ] || { record "$SLUG" current "devkit at ${SYNC_OLD:0:7}"; return 1; }
   git -C "$WT" merge-base --is-ancestor "$SYNC_OLD" "$SYNC_UPSTREAM" 2>/dev/null \
     || { record "$SLUG" skipped ".devkit-rev ${SYNC_OLD:0:7} is not on devkit's main; a sync would move it back"; return 1; }
@@ -414,16 +533,20 @@ sync_behind() {
     || { record "$SLUG" current "devkit at ${SYNC_OLD:0:7}; main ${SYNC_UPSTREAM:0:7} vendors the same tree"; return 1; }
 }
 
-# find_sync_pr <open sync PR lines>: set SYNC_REUSE to the open PR on devkit-sync/<upstream sha7>,
-# and SYNC_PR, SYNC_HEAD and SYNC_NEW too when its head can be gated as it is (reusable_sync).
+# find_sync_pr <open sync PR lines>: set SYNC_REUSE to the open PR on devkit-sync/<upstream sha7>
+# and fetch its head, and set SYNC_PR, SYNC_HEAD and SYNC_NEW too when that head can be gated as it
+# is (reusable_sync). Else records why and returns 1.
 find_sync_pr() {
   local n branch head
   SYNC_REUSE="" SYNC_REUSE_HEAD="" SYNC_PR="" SYNC_HEAD="" SYNC_NEW=""
   while IFS=$'\t' read -r n branch head; do
-    [ "$branch" = "$SYNC_LABEL/${SYNC_UPSTREAM:0:7}" ] || continue
-    SYNC_REUSE=$n SYNC_REUSE_HEAD=$head
-    ! reusable_sync "$n" "$head" "$SYNC_UPSTREAM" || SYNC_PR=$n SYNC_HEAD=$head SYNC_NEW=$SYNC_UPSTREAM
+    [ "$branch" != "$SYNC_LABEL/${SYNC_UPSTREAM:0:7}" ] || SYNC_REUSE=$n SYNC_REUSE_HEAD=$head
   done <<<"$1"
+  [ -n "$SYNC_REUSE" ] || return 0
+  net fetch_main "$WT" "+pull/$SYNC_REUSE/head:refs/worktree/devkit-sync" \
+    || { record_fail "$SLUG#$SYNC_REUSE" $? error "cannot fetch main and its head (git above)"; return 1; }
+  ! reusable_sync "$SYNC_REUSE_HEAD" "$SYNC_UPSTREAM" \
+    || SYNC_PR=$SYNC_REUSE SYNC_HEAD=$SYNC_REUSE_HEAD SYNC_NEW=$SYNC_UPSTREAM
 }
 
 # sync_devkit: bring main's vendored devkit to devkit's main (header): record why not, or reuse or
@@ -431,10 +554,10 @@ find_sync_pr() {
 sync_devkit() {
   local open log decision=gate
   sync_behind || return 0
-  open=$(gh pr list --repo "$SLUG" --base main --state open --label "$SYNC_LABEL" \
+  open=$(net gh pr list --repo "$SLUG" --base main --state open --label "$SYNC_LABEL" \
     --json number,headRefName,headRefOid --jq '.[] | [.number, .headRefName, .headRefOid] | @tsv') \
-    || { record "$SLUG" error "cannot list its open $SYNC_LABEL PRs (gh above)"; return; }
-  find_sync_pr "$open"
+    || { record_fail "$SLUG" $? error "cannot list its open $SYNC_LABEL PRs (gh above)"; return; }
+  find_sync_pr "$open" || return 0
   if [ "$DRY_RUN" = 1 ]; then
     record "$SLUG" would-sync "${SYNC_OLD:0:7}..${SYNC_UPSTREAM:0:7} ($(git -C "$WT" rev-list --count "$SYNC_OLD..$SYNC_UPSTREAM") devkit commits${SYNC_REUSE:+; PR #$SYNC_REUSE open})"
     return
@@ -443,31 +566,66 @@ sync_devkit() {
     log=$STATE/dependency-merge/${SLUG#*/}-devkit-sync.log
     : >"$log"
     # Regenerating replaces the PR's head: only one that is the job's own sync commit.
-    if [ -n "$SYNC_REUSE" ] && ! git -C "$WT" log -1 --format=%s "$SYNC_REUSE_HEAD" 2>/dev/null | grep -q '^Update devkit to '; then
+    if [ -n "$SYNC_REUSE" ] && ! job_sync_commit "$WT" "$SYNC_REUSE_HEAD"; then
       record "$SLUG#$SYNC_REUSE" skipped "its head ${SYNC_REUSE_HEAD:0:12} is not a devkit-sync commit (a person's push?) and no longer applies; not overwritten"
       return
     fi
     push_sync "$log" "$SYNC_REUSE_HEAD" || return
-    # make devkit-sync fetches devkit's main itself; one merged since is another branch.
-    [ "$SYNC_NEW" = "$SYNC_UPSTREAM" ] || SYNC_REUSE=""
     open_sync_pr "$SYNC_REUSE" "$SYNC_OLD" "$log" || return
     decision=pushed
   fi
   close_superseded "$open"
   handle_pr "$SYNC_PR" "$SYNC_HEAD" "$decision" "devkit-sync ${SYNC_OLD:0:7}..${SYNC_NEW:0:7}" devkit-sync
   [ "$LAST_OUTCOME" = merged ] || return 0
-  { fetch_main "$WT" && git -C "$WT" checkout -q --detach refs/remotes/origin/main; } \
+  { net fetch_main "$WT" && git -C "$WT" checkout -q --detach refs/remotes/origin/main; } \
     || record "$SLUG" error "cannot move the worktree to the new main (git above); its dependency PRs gate on the old devkit"
+}
+
+# prune_sync_branches: delete each devkit-sync/* branch on origin this job left behind: its tip is
+# the job's own commit (job_sync_commit, adoption's test, so never a person's), it vendors a commit
+# devkit's main has since moved past, and no open PR is on it. Branches of closed or merged PRs
+# included: close_superseded deletes its own, but a hand-closed PR's or an older run's stayed (finplat
+# and rollcall devkit-sync/c94512c, 2026-10-24). The branch of devkit's main now (SYNC_UPSTREAM, or
+# SYNC_NEW when the sync vendored a newer one) stays: a run's unfinished work, which the next adopts.
+# Leased: a branch that moved since it was read is kept.
+prune_sync_branches() {
+  [ -n "$SYNC_UPSTREAM" ] || return 0  # devkit itself, or devkit's main unread
+  local log=$STATE/dependency-merge/${SLUG#*/}-devkit-sync.log branch tip rev stale="" open detail
+  fetch_sync_branches "$WT" "$log" || return 0
+  while read -r branch tip; do
+    case $branch in "$SYNC_LABEL/${SYNC_UPSTREAM:0:7}"|"$SYNC_LABEL/${SYNC_NEW:0:7}") continue ;; esac
+    job_sync_commit "$WT" "$tip" || continue
+    rev=$(git -C "$WT" show "$tip:.devkit-rev" 2>/dev/null) || continue
+    rev=${rev%% *}
+    if [ "$rev" != "$SYNC_UPSTREAM" ] && git -C "$WT" merge-base --is-ancestor "$rev" "$SYNC_UPSTREAM" 2>/dev/null; then
+      stale="$stale$branch $tip $rev"$'\n'
+    fi
+  done < <(git -C "$WT" for-each-ref --format='%(refname:lstrip=3) %(objectname)' "refs/remotes/origin/$SYNC_LABEL/")
+  [ -n "$stale" ] || return 0
+  open=$(net gh pr list --repo "$SLUG" --state open --limit 1000 --json headRefName --jq '.[].headRefName') \
+    || { record_fail "$SLUG" $? error "cannot list its open PRs, so no $SYNC_LABEL branch is pruned (gh above)"; return 0; }
+  while read -r branch tip rev; do
+    if [ -z "$branch" ] || grep -qxF "$branch" <<<"$open"; then continue; fi
+    detail="$branch (the job's commit vendoring ${rev:0:7}, superseded by devkit ${SYNC_UPSTREAM:0:7}; no open PR)"
+    if [ "$DRY_RUN" = 1 ]; then
+      record "$SLUG" would-prune "$detail"
+    elif net git -C "$WT" push -q "--force-with-lease=refs/heads/$branch:$tip" origin --delete "refs/heads/$branch" \
+      >>"$log" 2>&1 8>&-; then
+      record "$SLUG" pruned "$detail"
+    else
+      record_fail "$SLUG" $? error "cannot delete $branch (moved since this run read it?); see $log"
+    fi
+  done <<<"$stale"
 }
 
 run_repo() {
   local n head decision detail
   open_repo "$1" || return
   GATED=0
-  switched_off || sync_devkit
+  halted || { sync_devkit; prune_sync_branches; }
   while IFS=$'\t' read -r n head _ decision detail <&3; do
     [ -n "$n" ] || continue  # the here-string of an empty list is one empty line
-    if switched_off; then break; fi
+    if halted; then break; fi
     handle_pr "$n" "$head" "$decision" "$detail"
   done 3<<<"$PRS"
   cleanup_worktree
@@ -476,7 +634,7 @@ run_repo() {
 
 read_any=0
 for repo in "${REPOS[@]}"; do
-  if switched_off; then break; fi
+  if halted; then break; fi
   run_repo "$repo" && read_any=1
 done
 [ "$read_any" = 1 ] || exit 1

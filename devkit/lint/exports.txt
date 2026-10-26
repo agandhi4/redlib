@@ -1,0 +1,18 @@
+# Every export of the lint/ JS bases a consumer's config imports, one per line:
+#   <module> <name>
+#   <module> <name> deprecated <since YYYY-MM-DD> <the migration, shown by devkit-check>
+# Repo configs import these by name and devkit-sync cannot edit them, so a removal breaks every
+# importing repo's sync PR (#227 dropped clockShiftSetupFiles: orbit, rollcall, closet). The rule:
+# to retire an export, keep it and mark it deprecated here (devkit-check then warns each
+# consumer still using it, naming the migration); drop it and its line only 30 days after <since>.
+# tests/lint_contract.bats holds each module's exports to this list and refuses a line leaving it
+# (against the merge base) before its window.
+eslint.base.mjs default
+eslint.base.mjs sonarjsRules
+eslint.base.mjs sonarjsChangedRules
+eslint.base.mjs sonarjsTestRules
+vitest.base.mjs loadScale
+vitest.base.mjs loadScaled
+vitest.base.mjs timeouts
+vitest.base.mjs clockShift
+vitest.base.mjs clockShiftSetupFiles deprecated 2026-10-24 drop it from setupFiles and add plugins: [clockShift()] (it lists the file first and allows it past fs.strict, so a local server.fs.allow for it goes too)

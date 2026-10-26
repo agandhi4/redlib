@@ -267,8 +267,8 @@ Once every repo is at 0, the rule moves into the base (`select`, or `sonarjsRule
 `vitest.base.mjs` stretches vitest's per-test timeouts by the load factor the gate and
 tier_guard.sh already apply to budgets: both export it as `DEVKIT_LOAD_SCALE` (1 unscaled, at
 most 2; `bin/_load_lib.sh`). finplat #689's frontend-unit hit the 5 s default at load 169 on 10
-cores while its tier budget had stretched ×2. It imports nothing, as the eslint base does, and
-`vitest.base.d.mts` types it for a `vitest.config.ts`. The scaffolds spread `timeouts`
+cores while its tier budget had stretched ×2. It imports nothing but node builtins (the eslint
+base: nothing), and `vitest.base.d.mts` types it for a `vitest.config.ts`. The scaffolds spread `timeouts`
 (vitest's 5 s and 10 s defaults, stretched); a repo's own timeout goes through `loadScaled`:
 
 ```js
@@ -278,10 +278,22 @@ import { loadScaled, timeouts } from "../devkit/lint/vitest.base.mjs"
   test: { testTimeout: loadScaled(180_000) },   // finplat's metrics config
 ```
 
-`clockShiftSetupFiles` is the vitest half of the clock shift (README "Clock shift"): the setup
-file tier_guard.sh names under `DEVKIT_CLOCK_SHIFT`, else empty. It goes first in the root
-config's `setupFiles`: `setupFiles: [...clockShiftSetupFiles, "./src/test/setup.ts"]`, or
-`setupFiles: clockShiftSetupFiles` for a repo with none.
+`clockShift()` is the vitest half of the clock shift (README "Clock shift"): under
+`DEVKIT_CLOCK_SHIFT`, a vite plugin that lists tier_guard.sh's setup file first in `setupFiles`
+and adds it to vite's resolved `server.fs.allow` (never narrowing the default or the repo's own
+list), else no plugin. It goes in the root config's `plugins: [clockShift()]`; one export, so a
+config cannot list the file without allowing it (orbit #124). It reads the setup file's
+realpath (`node:fs`), since vite checks the resolved path. `clockShiftSetupFiles`, the file
+alone (the repo allows it itself), is deprecated since 2026-10-24 and devkit-check names each
+config still importing it.
+
+## Retiring an export
+
+Repo-owned configs import the bases by name and devkit-sync cannot edit them, so `exports.txt`
+lists every export of `eslint.base.mjs` and `vitest.base.mjs`. To retire one, keep it and mark
+its line `deprecated <date> <migration>`: devkit-check warns each consumer file importing it, with
+that migration, and the line and export go 30 days later. `tests/lint_contract.bats` holds each
+module's exports to the list and refuses a line leaving it early (against the merge base).
 
 ## swift-format
 

@@ -5,7 +5,7 @@
 # Left out on purpose: templates/new/ (stack scaffolds whose .ts/.py/.rs sources broke closet's
 # typecheck, #382; `devkit new` reads them from a full checkout), tests/, .github/, github/
 # (fleet ops) and templates/launchd/ (the monthly audit and the nightly dependency merge run from
-# a full checkout).
+# a clone of devkit's main, bin/job_launcher.sh).
 VENDOR_PATHS
 AGENTS.md
 CLAUDE.md

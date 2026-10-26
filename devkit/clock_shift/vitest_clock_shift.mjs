@@ -1,11 +1,11 @@
 // vitest setup file: run each test file with the wall clock DEVKIT_CLOCK_SHIFT days ahead, the
 // vitest half of the clock shift (clock_shift/devkit_clock_shift.py is the pytest half; the why
 // is there). devkit/bin/tier_guard.sh exports its path as DEVKIT_CLOCK_SHIFT_VITEST when the
-// variable is set, and lint/vitest.base.mjs's clockShiftSetupFiles hands it to the repo's
-// config, which lists it first in setupFiles, so the repo's own setup files are shifted too.
+// variable is set, and lint/vitest.base.mjs's clockShift() plugin lists it first in the repo's
+// setupFiles, so the repo's own setup files are shifted too, and allows it past vite's fs.strict.
 //
 // Date is replaced by a proxy whose no-argument constructor, Date() call and Date.now() read the
-// real clock plus the shift; it ticks, and timers, performance.now() and dates built from a value
+// real clock plus the shift (a test's own Date.now stub is left as it set it); it ticks, and timers, performance.now() and dates built from a value
 // are untouched. Not vi.useFakeTimers({ toFake: ["Date"] }): vi.useRealTimers() in a test would
 // drop the shift for the rest of the file, and closet and finplat call it in ~45 files. vitest's
 // fake timers install over this proxy and restore it, and start from its shifted now. Like
@@ -23,16 +23,18 @@
 //
 // Gotchas: imports only node builtins and vitest, which vitest resolves for a setup file outside
 // any node_modules tree (it is vendored at <repo>/devkit/clock_shift/, above web/'s packages).
-// vitest 3 (vite 6) refuses to load a setup file outside its root's workspace ("Failed to load
-// url ... Does the file exist?"), so a vitest-3 package in a subdirectory (instalite, locus web/)
-// needs vitest 4+ or `server: { fs: { strict: false } }`; vitest 4.0-5.0 load it as is.
+// vite's fs.strict refuses it outside the package's workspace (vitest 3: "Failed to load url",
+// every project; vitest 4: "Cannot find module '/@fs/…'", happy-dom/jsdom projects; orbit #124),
+// so clockShift() adds it to server.fs.allow; a config that lists it by hand does not load.
 // The turn-around is afterEach setting task.fails, read by vitest's runner after the hooks; it is
 // set on every attempt, so a covered test that passes on a retry is a pass. vi.setSystemTime()
-// without fake timers, then vi.useRealTimers(), puts back vitest's own saved (real) Date: a
-// beforeEach puts the proxy back over exactly that Date, never over a test's own fake one.
+// without fake timers, then vi.useRealTimers(), puts back vitest 3/4's own saved (real) Date: a
+// beforeEach puts the proxy back over exactly that Date, never over a test's own fake one
+// (vitest 5 puts back the Date it found, this proxy, so the rest of the test stays shifted).
 // Installs once per realm: a worker that keeps its globals across files (isolate: false) is
 // shifted by its first file; the hooks register in every file. Only projects that inherit the
-// root's setupFiles (`extends: true`) are shifted, and the proof cannot tell a project left out.
+// root's setupFiles are shifted (vitest 3/4: `extends: true`), and the proof cannot tell a
+// project left out.
 //
 // Proof (tier_guard's NOSHIFT check, an API): each realm that installs the shift appends
 // `vitest +<n>d <pid>` to DEVKIT_CLOCK_SHIFT_PROOF.
@@ -53,14 +55,31 @@ const REAL = Symbol.for("devkit.clockShift.real");
 
 function install() {
   const RealDate = globalThis.Date;
+  const realNow = RealDate.now;
   const offset = Number(raw.slice(0, -1)) * 86_400_000;
-  const now = () => RealDate.now() + offset;
+  const now = () => realNow.call(RealDate) + offset;
   const shifted = new Proxy(RealDate, {
     construct: (target, args, newTarget) =>
       Reflect.construct(target, args.length > 0 ? args : [now()], newTarget),
     apply: () => new RealDate(now()).toString(),
+    // vi.spyOn reads the descriptor, not the getter: report the shifted now, so a spy that only
+    // observes calls through to the shift. Its restore writes that shifted now back, which lands
+    // as realNow: the real Date never keeps it (vitest 3/4's useRealTimers puts that Date back).
+    getOwnPropertyDescriptor: (target, key) => {
+      const own = Reflect.getOwnPropertyDescriptor(target, key);
+      return key === "now" && own?.value === realNow ? { ...own, value: now } : own;
+    },
+    defineProperty: (target, key, descriptor) =>
+      Reflect.defineProperty(
+        target,
+        key,
+        key === "now" && descriptor.value === now ? { ...descriptor, value: realNow } : descriptor,
+      ),
     get: (target, key, receiver) => {
-      if (key === "now") return now;
+      // A test's own Date.now (vi.spyOn(Date, "now").mockReturnValue(t), or an assignment)
+      // lands on the real Date through the proxy; it wins unshifted, so a pinned time stays
+      // pinned (finplat #712's appLock tests). The shift reads realNow, never the stub.
+      if (key === "now") return target.now === realNow ? now : Reflect.get(target, key, receiver);
       if (key === REAL) return RealDate;
       return Reflect.get(target, key, receiver);
     },
