@@ -1,6 +1,6 @@
 use crate::dbg_msg;
 use crate::oauth::{force_refresh_token, oauth_client, oauth_session, refresh_blocked_token};
-use crate::reddit_response::{interpret_response, TokenAction, THREAD_LOGIN_REQUIRED};
+use crate::reddit_response::{interpret_response, TokenAction};
 use crate::rewrite::format_url;
 use crate::swr_cache::SwrCache;
 use crate::transport::CLIENT;
@@ -10,13 +10,17 @@ use log::{trace, warn};
 use percent_encoding::{percent_encode, CONTROLS};
 use serde_json::Value;
 use std::result::Result;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::LazyLock;
 use std::time::Duration;
-use wreq::{header as wreq_header, Method, Response as WreqResponse};
+use wreq::{header as wreq_header, Method, RequestBuilder, Response as WreqResponse};
 
 const REDDIT_URL_BASE: &str = "https://oauth.reddit.com";
 const REDDIT_URL_BASE_HOST: &str = "oauth.reddit.com";
+
+// Android app's GraphQL endpoint; `thread::fetch` reads comments here (see gql_comments.rs).
+const GQL_URL: &str = "https://gql-fed.reddit.com/";
+const GQL_URL_HOST: &str = "gql-fed.reddit.com";
 
 const REDDIT_SHORT_URL_BASE: &str = "https://redd.it";
 const REDDIT_SHORT_URL_BASE_HOST: &str = "redd.it";
@@ -133,13 +137,10 @@ fn reddit_short_head(path: String, quarantine: bool, base_path: &'static str, ho
 // }
 // Unused - reddit_head is only ever called in the context of a short URL
 
-/// Makes a request to Reddit. If `redirect` is `true`, `request_with_redirect`
-/// will recurse on the URL that Reddit provides in the Location HTTP header
-/// in its response.
-fn request(method: &'static Method, path: String, redirect: bool, quarantine: bool, base_path: &'static str, host: &'static str) -> Boxed<Result<WreqResponse, String>> {
-	// Build Reddit URL from path.
-	let url = format!("{base_path}{path}");
-
+/// The headers of every request to Reddit: Host, the quarantine opt-in cookie (empty when not
+/// opted in), the OAuth client's headers, and `content_type` unless those already carry one.
+/// Used by `request` (GET/HEAD) and `gql_post`.
+fn with_reddit_headers(mut builder: RequestBuilder, host: &str, quarantine: bool, content_type: Option<&str>) -> RequestBuilder {
 	let mut headers: Vec<(String, String)> = vec![
 		("Host".into(), host.into()),
 		(
@@ -151,22 +152,27 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 			},
 		),
 	];
-
-	{
-		let client = oauth_client().load_full();
-		for (key, value) in client.headers_map.clone() {
-			headers.push((key, value));
-		}
+	headers.extend(oauth_client().load_full().headers_map.clone());
+	if let Some(content_type) = content_type.filter(|_| !headers.iter().any(|(key, _)| key.eq_ignore_ascii_case("content-type"))) {
+		headers.push(("Content-Type".into(), content_type.into()));
 	}
 
 	// shuffle headers: https://github.com/redlib-org/redlib/issues/324
 	fastrand::shuffle(&mut headers);
 
-	let mut builder = CLIENT.request(method.clone(), &url);
-
 	for (key, value) in headers {
 		builder = builder.header(key, value);
 	}
+	builder
+}
+
+/// Makes a request to Reddit. If `redirect` is `true`, `request_with_redirect`
+/// will recurse on the URL that Reddit provides in the Location HTTP header
+/// in its response.
+fn request(method: &'static Method, path: String, redirect: bool, quarantine: bool, base_path: &'static str, host: &'static str) -> Boxed<Result<WreqResponse, String>> {
+	// Build Reddit URL from path.
+	let url = format!("{base_path}{path}");
+	let builder = with_reddit_headers(CLIENT.request(method.clone(), &url), host, quarantine, None);
 
 	async move {
 		match builder.send().await {
@@ -226,7 +232,7 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 }
 
 // Reddit JSON cache: fresh 30s, then stale-while-revalidate up to 5 minutes. Worst case ~100
-// thread JSONs (~1MB each) resident for 5 minutes.
+// GraphQL comment pages (~1MB each) resident for 5 minutes.
 const JSON_FRESH: Duration = Duration::from_secs(30);
 const JSON_STALE_MAX: Duration = Duration::from_secs(300);
 type JsonKey = (String, bool);
@@ -238,11 +244,11 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 	JSON_CACHE.get((path, quarantine), |(path, quarantine)| fetch_json(path, quarantine)).await
 }
 
-/// Whether a `json()` error is Reddit refusing a thread to a logged-out token (since 2026-10-23),
-/// which `post::item` answers with the post alone. A predicate rather than the classifier's
-/// constant, so callers depend on `client` only.
-pub fn thread_needs_login(err: &str) -> bool {
-	err == THREAD_LOGIN_REQUIRED
+/// POST a GraphQL operation (built by `gql_comments::request_body`) to gql-fed and return its
+/// response, through the same cache as `json()`, keyed on the body. A response carrying GraphQL
+/// `errors` is an Err, so it is never cached. Used by `thread::fetch`.
+pub async fn gql(body: Value) -> Result<Value, String> {
+	JSON_CACHE.get((format!("gql {body}"), false), move |_| fetch_gql(body)).await
 }
 
 /// A listing answered with 200 JSON that holds no posts (`data.children` missing). Reddit does this
@@ -250,7 +256,7 @@ pub fn thread_needs_login(err: &str) -> bool {
 /// "No posts found" for a 35h-old token while a fresh token from the same IP got 25 posts. So it is
 /// handled like that 403: drop the cached copy (or it is served stale for minutes) and rotate, under
 /// the same cooldown. Logs the shape only, never values. Returns the message for the reader. Used by
-/// `Post::fetch` and `post::post_without_comments` (a `/by_id/` listing degrades the same way).
+/// `Post::fetch` and `thread::fetch` (a `/by_id/` listing degrades the same way).
 pub async fn distrust_listing(path: &str, quarantine: bool, body: &Value) -> String {
 	warn!(
 		"[🚫] Reddit answered {path} with JSON holding no posts ({}); treating the token as degraded",
@@ -281,50 +287,69 @@ fn json_shape(body: &Value) -> String {
 
 /// Fetch and parse one Reddit JSON document. Uncached; every caller goes through `json()`.
 async fn fetch_json(path: String, quarantine: bool) -> Result<Value, String> {
+	let label = path.clone();
+	fetch_reddit(&label, Budget::Rest, move || reddit_get(path, quarantine)).await
+}
+
+/// Send one GraphQL operation. Uncached; every caller goes through `gql()`. gql-fed answers a
+/// failed operation with 200 and an `errors` array (a retired persisted query reads
+/// "PersistedQueryNotFound"), which becomes the Err here.
+async fn fetch_gql(body: Value) -> Result<Value, String> {
+	let operation = body["operationName"].as_str().unwrap_or("unnamed").to_string();
+	// Not a thread route, so a non-JSON 403 here rotates the token as it does for a listing.
+	let label = format!("gql:{operation}");
+	let response = fetch_reddit(&label, Budget::Gql, move || gql_post(&body)).await?;
+	match response["errors"].as_array().and_then(|errors| errors.first()) {
+		None => Ok(response),
+		Some(first) => {
+			let message: String = first["message"].as_str().map_or_else(|| first.to_string(), str::to_string).chars().take(200).collect();
+			warn!("[gql] {operation} failed: {message}");
+			Err(format!("Reddit GraphQL {operation} error: {message}"))
+		}
+	}
+}
+
+/// POST `body` to gql-fed with the same identity as every other Reddit request.
+fn gql_post(body: &Value) -> Boxed<Result<WreqResponse, String>> {
+	let builder = with_reddit_headers(CLIENT.post(GQL_URL), GQL_URL_HOST, false, Some("application/json")).body(body.to_string());
+	async move { builder.send().await.map_err(|e| e.to_string()) }.boxed()
+}
+
+/// Which `x-ratelimit-*` budget a request draws on. gql-fed meters the same token separately (a
+/// fresh token: 599 left there, 99 on oauth.reddit.com, 2026-10-25), so a GraphQL response must
+/// never overwrite the session's REST budget, or `fetch_reddit`'s `< 10` refresh would read it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Budget {
+	/// oauth.reddit.com: counted in `TokenManager::ratelimit_remaining`.
+	Rest,
+	/// gql-fed: not tracked; its exhaustion still surfaces through `interpret_response`.
+	Gql,
+}
+
+/// The one pipeline behind `fetch_json` and `fetch_gql`: rate-limit pre-check, send, ratelimit
+/// header bookkeeping, classification (`interpret_response`) and the token action it calls for.
+/// `label` names the request in errors and logs and decides the 403 classification.
+async fn fetch_reddit(label: &str, budget: Budget, send: impl FnOnce() -> Boxed<Result<WreqResponse, String>>) -> Result<Value, String> {
 	let session = oauth_session();
 
 	// First, handle rolling over the OAuth client if need be.
 	let current_rate_limit = session.ratelimit_remaining().load(Ordering::SeqCst);
 	let is_rolling_over = session.is_rolling_over();
-	if current_rate_limit < 10 && !is_rolling_over {
-		warn!("Rate limit {current_rate_limit} is low. Spawning force_refresh_token()");
-		tokio::spawn(force_refresh_token());
-	}
-	session.consume_request();
-
-	// Fetch the url...
-	let response = match reddit_get(path.clone(), quarantine).await {
-		Ok(response) => response,
-		Err(e) => return Err(format!("Couldn't send request to Reddit: {e} | {path}")),
-	};
-	let status = response.status().as_u16();
-
-	let reset: Option<String> = if let (Some(remaining), Some(reset), Some(used)) = (
-		response.headers().get("x-ratelimit-remaining").and_then(|val| val.to_str().ok().map(|s| s.to_string())),
-		response.headers().get("x-ratelimit-reset").and_then(|val| val.to_str().ok().map(|s| s.to_string())),
-		response.headers().get("x-ratelimit-used").and_then(|val| val.to_str().ok().map(|s| s.to_string())),
-	) {
-		trace!(
-			"Ratelimit remaining: Header says {remaining}, we have {current_rate_limit}. Resets in {reset}. Rollover: {}. Ratelimit used: {used}",
-			if is_rolling_over { "yes" } else { "no" },
-		);
-
-		// If can parse remaining as a float, round to a u16 and save
-		if let Ok(val) = remaining.parse::<f32>() {
-			session.ratelimit_remaining().store(val.round() as u16, Ordering::SeqCst);
+	let session_budget = (budget == Budget::Rest).then(|| session.ratelimit_remaining());
+	if session_budget.is_some() {
+		if current_rate_limit < 10 && !is_rolling_over {
+			warn!("Rate limit {current_rate_limit} is low. Spawning force_refresh_token()");
+			tokio::spawn(force_refresh_token());
 		}
+		session.consume_request();
+	}
 
-		Some(reset)
-	} else {
-		None
-	};
+	let response = send().await.map_err(|e| format!("Couldn't send request to Reddit: {e} | {label}"))?;
+	let status = response.status().as_u16();
+	let reset = record_ratelimit(&response, session_budget, current_rate_limit, is_rolling_over);
+	let body = response.bytes().await.map_err(|e| format!("Failed receiving body from Reddit: {e} | {label}"))?;
 
-	let body = match response.bytes().await {
-		Ok(body) => body,
-		Err(e) => return Err(format!("Failed receiving body from Reddit: {e} | {path}")),
-	};
-
-	let (result, action) = interpret_response(status, &body, reset.as_deref(), &path);
+	let (result, action) = interpret_response(status, &body, reset.as_deref(), label);
 	match action {
 		TokenAction::None => {}
 		TokenAction::RotateInBackground => {
@@ -334,6 +359,26 @@ async fn fetch_json(path: String, quarantine: bool) -> Result<Value, String> {
 		TokenAction::RotateBlocked => refresh_blocked_token().await,
 	}
 	result
+}
+
+/// Store Reddit's `x-ratelimit-remaining` in `ratelimit` (the session's REST budget; None for a
+/// request on another budget); returns `x-ratelimit-reset` for the rate-limit error message.
+/// None unless all three ratelimit headers are present.
+fn record_ratelimit(response: &WreqResponse, ratelimit: Option<&AtomicU16>, current_rate_limit: u16, is_rolling_over: bool) -> Option<String> {
+	let header = |name: &str| response.headers().get(name).and_then(|val| val.to_str().ok().map(|s| s.to_string()));
+	let (Some(remaining), Some(reset), Some(used)) = (header("x-ratelimit-remaining"), header("x-ratelimit-reset"), header("x-ratelimit-used")) else {
+		return None;
+	};
+	trace!(
+		"Ratelimit remaining: Header says {remaining}, we have {current_rate_limit}. Resets in {reset}. Rollover: {}. Ratelimit used: {used}",
+		if is_rolling_over { "yes" } else { "no" },
+	);
+
+	// If can parse remaining as a float, round to a u16 and save
+	if let (Some(ratelimit), Ok(val)) = (ratelimit, remaining.parse::<f32>()) {
+		ratelimit.store(val.round() as u16, Ordering::SeqCst);
+	}
+	Some(reset)
 }
 
 #[cfg(test)]

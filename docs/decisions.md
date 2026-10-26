@@ -203,3 +203,8 @@ Consequence: ports are by hand, so git cannot find them; the fork.md review list
 Why: porting upstream bc8c9ec, clippy on the pinned 1.99 rejects `AtomicU16::fetch_update` (deprecated) and its replacement `try_update` (stable since 1.95, above the declared 1.88). Upstream kept the old name under `#[allow(deprecated)]`.
 Decision: `rust-version` = 1.95. It is the floor this crate needs, std APIs included, not only the lockfile's; no build runs below the pinned channel.
 Consequence: clippy's MSRV lints track the real floor; AGENTS.md says when to raise it.
+
+## 2026-10-25 — Thread comments from the Android GraphQL query
+Why: since 2026-10-23 app-only tokens get 403 on every thread route, and a login is out: Reddit closed self-service API apps (Responsible Builder Policy). The Android app's persisted `PostComments` query on gql-fed still answers our anonymous token; verified live 2026-10-25 from the NAS (134 of 198 comments on a 10-deep thread).
+Decision: port upstream PR #603 (polak14's converter and RTJSON renderer): `thread::fetch` joins `/by_id/` with one `client::gql` POST (through the JSON cache and the shared fetch pipeline); `gql_comments` is pure and converts the forest to the JSON API Listing, so `comments.rs` renders it unchanged. Each "more" click is one more POST, its cursor base64 in the URL.
+Consequence: a comments failure never fails the page: post-only page, `[thread] … comments unavailable` warn. The maintenance point is `gql_comments::POST_COMMENTS_HASH`; when Reddit retires it, every thread goes post-only and the log names PersistedQueryNotFound. The thread-route 403 classification stays, so a stray thread call never rotates a token.

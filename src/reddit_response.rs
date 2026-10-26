@@ -1,10 +1,10 @@
 //! Classification of one Reddit API response into the caller's result and the token action.
-//! Used by `client::fetch_json`, which performs the action.
+//! Used by `client::fetch_reddit` (behind `json()` and `gql()`), which performs the action.
 
 use log::error;
 use serde_json::Value;
 
-/// What `fetch_json` must do to the token after a response, as decided by `interpret_response`.
+/// What `client::fetch_reddit` must do to the token after a response, as decided by `interpret_response`.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TokenAction {
 	None,
@@ -20,8 +20,9 @@ pub(crate) enum TokenAction {
 	RotateBlocked,
 }
 
-/// The error for a thread Reddit no longer serves to logged-out tokens. `post::item` answers it with
-/// the post alone (from `/by_id/`) and a note that comments need a Reddit login.
+/// The error for a thread route Reddit no longer serves to logged-out tokens. Nothing fetches those
+/// routes any more (`thread::fetch` reads the post from `/by_id/` and comments from GraphQL); the
+/// classification stays so that any thread-route call that slips in never rotates a good token.
 pub(crate) const THREAD_LOGIN_REQUIRED: &str = "thread_login_required";
 
 /// `/{r,u,user}/<name>/comments/…` or a bare `/comments/…`. Since 2026-10-23 (when the `%2F`
@@ -106,7 +107,7 @@ mod tests {
 	use super::*;
 	use serde_json::json;
 
-	// Offline: response classification, which decides when fetch_json rotates the token.
+	// Offline: response classification, which decides when fetch_reddit rotates the token.
 
 	fn interpret(status: u16, body: &str) -> (Result<Value, String>, TokenAction) {
 		interpret_response(status, body.as_bytes(), None, "/r/rust.json")
