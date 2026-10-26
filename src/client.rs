@@ -385,6 +385,26 @@ fn record_ratelimit(response: &WreqResponse, ratelimit: Option<&AtomicU16>, curr
 mod tests {
 	use super::*;
 
+	fn ratelimited_response() -> WreqResponse {
+		let response = http::Response::builder()
+			.header("x-ratelimit-remaining", "42.0")
+			.header("x-ratelimit-reset", "300")
+			.header("x-ratelimit-used", "57")
+			.body("")
+			.unwrap();
+		WreqResponse::from(response)
+	}
+
+	// gql-fed's headers carry its own budget; only an oauth.reddit.com response may move the session's.
+	#[test]
+	fn record_ratelimit_stores_only_into_a_tracked_budget() {
+		let budget = AtomicU16::new(99);
+		assert_eq!(record_ratelimit(&ratelimited_response(), None, 99, false).as_deref(), Some("300"));
+		assert_eq!(budget.load(Ordering::SeqCst), 99);
+		assert_eq!(record_ratelimit(&ratelimited_response(), Some(&budget), 99, false).as_deref(), Some("300"));
+		assert_eq!(budget.load(Ordering::SeqCst), 42);
+	}
+
 	#[test]
 	fn json_shape_names_keys_never_values() {
 		let body = serde_json::json!({"kind": "Listing", "data": {"after": "t3_secret", "dist": 0}});

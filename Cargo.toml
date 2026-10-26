@@ -67,6 +67,8 @@ lipsum = "0.9.0"
 sealed_test = "1.0.0"
 # test-util: paused clock for the SWR cache tests (src/client.rs). Same crate, so Cargo.lock is unchanged.
 tokio = { version = "1.44.2", features = ["test-util"] }
+# http 1, already wreq's (no new crate in Cargo.lock): builds the wreq::Response the ratelimit test reads.
+http = "1.4.0"
 
 [profile.release]
 codegen-units = 1

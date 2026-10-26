@@ -1705,6 +1705,7 @@ dependencies = [
  "fastrand",
  "futures-lite",
  "htmlescape",
+ "http 1.4.0",
  "hyper",
  "libflate",
  "lipsum",
