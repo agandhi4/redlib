@@ -12,9 +12,14 @@
 #   - the PR is OPEN;
 #   - its head's latest `local-gate` status is `success` (GitHub's combined status: the newest
 #     status per context), and so is every context the plan's literal
-#     `GATE_MERGE_REQUIRES=<context>[,<context>...]` line names (closet: codex-review, which a
-#     PR exempt from review below is not asked for: nothing posts it on one; closet's GitHub
-#     protection requires it too, so the merge posts it, "Not required (<why>) for <sha7>").
+#     `GATE_MERGE_REQUIRES=<context>[,<context>...]` line names. closet's names codex-review,
+#     which its GitHub protection requires too, and a completed Codex review posts no status: so
+#     where the head has none, this is its one writer, from facts it checks itself, and posts it
+#     just before the merge: "Codex reviewed <sha7>, 0 open threads" when codex_review.py finds
+#     Codex's completed code review of exactly this head and no blocker at all, or "Not required
+#     (<why>) for <sha7>" for a PR exempt from review below. A status something else posted
+#     (pending, failure, a fallback record) is never overwritten. Why (owner-autonomy decision,
+#     2026-10-23): closet's agents hand-posted it after every clean Codex review.
 #   - main has not moved past the main the gate ran on: the gate's own record of this head
 #     ($XDG_STATE_HOME/<GATE_STATE_NAME>/logs/<n>/gate.json, gate_record.py main-of), else the
 #     `on main <sha>` its local-gate status names (a remote gate's record is on its host), against
@@ -31,8 +36,11 @@
 #     `GATE_CODEX_RUNNING_MAX_MIN=<minutes>` (default 30) is hung, not running: it is treated as
 #     failed, below, and the refusal names its age. Why (devkit #204, 2026-10-22): a review sat at
 #     "Running since" for 40+ min and a re-ping hung again, so `running` held the merge forever.
-#   - Only where the plan has a literal `GATE_CODEX_REVIEW=1` (devkit#188; opt-in, so a repo Codex
-#     does not review is unaffected): Codex reviewed THIS head. A code review that failed or
+#   - Unless the plan has a literal `GATE_CODEX_REVIEW=0` with a literal
+#     `GATE_CODEX_REVIEW_REASON="<why>"` (printed on every merge; 0 with no reason is exit 2):
+#     Codex reviewed THIS head. Why the default (devkit-bo, 2026-10-23): it was opt-in
+#     (devkit#188), 8 of 9 consumers opted in, and redlib, which never did and recorded no
+#     reason, merged #46 while Codex was hung 58 min. A code review that failed or
 #     hung, never ran, or is of an older commit refuses, unless the head's
 #     `codex-review` status is success and records a fallback review of this head: "Claude
 #     adversarial review (Codex <why>) of <sha7>", <why> one of `at limit` (claude-kit work loop
@@ -92,7 +100,8 @@
 #
 # The plan is <repo-root>'s scripts/ci/gate_plan.sh (GATE_PLAN overrides it, as for gate.sh;
 # pr_merge.sh points it at main's); only its literal GATE_SLUG, GATE_MERGE_REQUIRES, GATE_CODEX_REVIEW,
-# GATE_CODEX_RUNNING_MAX_MIN, GATE_STATE_NAME and GATE_CODE_PATHS lines are read, never sourced.
+# GATE_CODEX_REVIEW_REASON, GATE_CODEX_RUNNING_MAX_MIN, GATE_STATE_NAME and GATE_CODE_PATHS lines
+# are read, never sourced.
 # Exit: 0 merged, 1 refused (GitHub's moved-head refusals included), 2 usage or environment (no
 # gh, no slug, gh could not answer), otherwise gh pr merge's own code.
 set -uo pipefail
@@ -141,8 +150,8 @@ readonly FALLBACK_RECORD_RES=(
   '^Claude adversarial review \(Codex (at limit|hung [1-9][0-9]* min|failed)\) of ([0-9a-f]{7,40})$'
   '^Codex unavailable \(usage limit\); ([0-9a-f]{7,40}) passed on Claude self-review$'
 )
-# The blockers that say Codex did not review this head (codex_review.py), which only an opted-in
-# plan refuses and a fallback record excuses.
+# The blockers that say Codex did not review this head (codex_review.py), which a plan refuses
+# unless it sets GATE_CODEX_REVIEW=0, and a fallback record excuses.
 readonly REVIEW_GAPS=$'^(failed|hung|unreviewed|stale)\t'
 readonly CODEX_RUNNING_MAX_MIN=30
 
@@ -334,26 +343,43 @@ fallback_review() {
   return 1
 }
 
-# check_codex: refuse (refuse_codex) or fail closed (exit 2) unless Codex's review clears the
-# merge (header). Reads $statuses, the head's combined status, so a fallback is pinned to it.
+# read_codex: set $codex_blockers to codex_review.py's blocker lines for the head, read once per
+# run (the required-status loop and check_codex both ask); fail closed (exit 2) when unreadable.
+# Empty means Codex completed a code review of exactly this head and left no open thread.
 running_max=""
-check_codex() {
-  local codex rc required recorded
+codex_blockers=""
+codex_read=""
+read_codex() {
+  local rc
+  [ -z "$codex_read" ] || return 0
   running_max=$(gate_plan_literal "$PLAN" GATE_CODEX_RUNNING_MAX_MIN)
   # Bounded so timedelta cannot overflow (devkit #206 Codex finding).
   [[ "${running_max:=$CODEX_RUNNING_MAX_MIN}" =~ ^[1-9][0-9]{0,5}$ ]] \
     || { echo "merge: $PLAN: GATE_CODEX_RUNNING_MAX_MIN must be whole minutes, 1 to 999999 (got '$running_max')" >&2; exit 2; }
-  codex=$("$DEVKIT_PYTHON" -I "$HERE/codex_review.py" "$SLUG" "$PR" "$head" "$running_max")
+  codex_blockers=$("$DEVKIT_PYTHON" -I "$HERE/codex_review.py" "$SLUG" "$PR" "$head" "$running_max")
   rc=$?
   # Python's own uncaught-exception exit is 1 too: 1 with no blocker line is a crash, not "none".
-  { [ "$rc" = 0 ] || { [ "$rc" = 1 ] && [ -n "$codex" ]; }; } \
+  { [ "$rc" = 0 ] || { [ "$rc" = 1 ] && [ -n "$codex_blockers" ]; }; } \
     || { echo "merge: cannot read Codex's review of PR #$PR (above)" >&2; exit 2; }
+  codex_read=1
+}
+
+# check_codex: refuse (refuse_codex) or fail closed (exit 2) unless Codex's review clears the
+# merge (header). Reads $statuses, the head's combined status, so a fallback is pinned to it.
+check_codex() {
+  local codex required reason recorded
+  read_codex
+  codex=$codex_blockers
   awk -F'\t' -v max="$running_max" '$1 == "hung" {
     printf "merge: the Codex %s of %s has run %s min, over %s: hung, treated as failed\n", $2, substr($3, 1, 12), $4, max }' <<<"$codex"
   required=$(gate_plan_literal "$PLAN" GATE_CODEX_REVIEW)
-  case "$required" in
+  case "${required:-1}" in
     1) ;;
-    '' | 0) codex=$(grep -vE "$REVIEW_GAPS" <<<"$codex") ;;
+    0)
+      reason=$(gate_plan_text "$PLAN" GATE_CODEX_REVIEW_REASON)
+      [ -n "$reason" ] || { echo "merge: $PLAN: GATE_CODEX_REVIEW=0 needs a literal GATE_CODEX_REVIEW_REASON=\"<why>\" line: Codex review is the fleet default" >&2; exit 2; }
+      echo "merge: codex-review: not required by the plan (GATE_CODEX_REVIEW=0: $reason)"
+      codex=$(grep -vE "$REVIEW_GAPS" <<<"$codex") ;;
     *) echo "merge: $PLAN: GATE_CODEX_REVIEW must be 0 or 1 (got '$required')" >&2; exit 2 ;;
   esac
   if grep -qE "$REVIEW_GAPS" <<<"$codex"; then
@@ -391,18 +417,23 @@ main_unmoved() {
 # Read before the required statuses: a devkit sync's exemption (vendored_from) checks against it.
 read_main
 wrong=""
-exempt_status=""
+codex_status=""
 for context in $REQUIRED; do
   got=$(awk -F'\t' -v c="$context" '$1 == c { print $2; exit }' <<<"$statuses")
   [ "$got" = success ] && continue
-  # A PR that needs no Codex review gets no codex-review status: the nightly sync opens a draft
-  # nothing reviews, so closet's GATE_MERGE_REQUIRES refused every one (homelab #130 Codex).
-  # GitHub's own protection can require the context too (closet's does): the exemption is posted
-  # as that status just before the merge, so its record is the status, not this run's word. Only
-  # over none: a failure or pending something posted stands.
-  if [ "$context" = "$CODEX_CONTEXT" ] && [ -z "$got" ] && review_exempt; then
-    exempt_status="Not required ($exemption) for ${head:0:7}"
-    continue
+  # Only over none: a failure or pending something posted stands (header). The fact is posted as
+  # the status just before the merge, so its record is the status, not this run's word. Codex's
+  # clean review is asked first: it is the stronger record, and reads no files. An exempt PR gets
+  # no review to read: the nightly sync opens a draft nothing reviews (homelab #130 Codex).
+  if [ "$context" = "$CODEX_CONTEXT" ] && [ -z "$got" ]; then
+    read_codex
+    if [ -z "$codex_blockers" ]; then
+      codex_status="Codex reviewed ${head:0:7}, 0 open threads"
+      continue
+    elif review_exempt; then
+      codex_status="Not required ($exemption) for ${head:0:7}"
+      continue
+    fi
   fi
   wrong="${wrong:+$wrong, }$context=${got:-none}"
 done
@@ -455,11 +486,11 @@ esac
 # a draft is readied, which a refusal must not leave done, and once more after it.
 read_main
 main_unmoved
-if [ -n "$exempt_status" ]; then
+if [ -n "$codex_status" ]; then
   gh api "repos/$SLUG/statuses/$head" -f state=success -f context="$CODEX_CONTEXT" \
-    -f description="$exempt_status" >/dev/null \
+    -f description="$codex_status" >/dev/null \
     || { echo "merge: cannot post $CODEX_CONTEXT on ${head:0:12} (gh above)" >&2; exit 2; }
-  echo "merge: posted $CODEX_CONTEXT success on ${head:0:12}: $exempt_status"
+  echo "merge: posted $CODEX_CONTEXT success on ${head:0:12}: $codex_status"
 fi
 if [ "$draft" = true ]; then
   gh pr ready "$PR" --repo "$SLUG" >/dev/null \
@@ -471,15 +502,35 @@ fi
 echo "merge: PR #$PR head ${head:0:12}: $REQUIRED success on main ${main_now:0:12}; squash-merging"
 # merge_pr: the one gh call that carries DEVKIT_MERGE_VERIFIED (header).
 merge_pr() { env DEVKIT_MERGE_VERIFIED="$head" gh pr merge "$PR" --repo "$SLUG" --squash --match-head-commit "$head" --delete-branch ${merge_body[@]+"${merge_body[@]}"} 2>&1; }
+# wait_unblocked: poll the PR's mergeStateStatus until GitHub stops reading it BLOCKED (or
+# UNKNOWN, still computing), for at most MERGE_RETRY_SECONDS (default 30), every
+# MERGE_POLL_SECONDS (default 2). 0 once it has, 1 when the bound passes first.
+wait_unblocked() {
+  local merge_state deadline=$((SECONDS + ${MERGE_RETRY_SECONDS:-30}))
+  while :; do
+    merge_state=$(gh pr view "$PR" --repo "$SLUG" --json mergeStateStatus --jq .mergeStateStatus) \
+      || { echo "merge: cannot read PR #$PR's merge state (gh above)" >&2; exit 2; }
+    case "$merge_state" in BLOCKED|UNKNOWN) ;; *) return 0 ;; esac
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep "${MERGE_POLL_SECONDS:-2}"
+  done
+}
 merged=$(merge_pr)
 rc=$?
 # GitHub recomputes a protected PR's merge state after a status lands, asynchronously: just after
-# the exemption's post it can still read blocked. One retry after a pause, only then.
-if [ "$rc" != 0 ] && [ -n "$exempt_status" ] && [[ "$merged" == *"base branch policy prohibits the merge"* ]]; then
-  echo "merge: GitHub has not counted the posted $CODEX_CONTEXT yet; retrying once in ${MERGE_RETRY_SECONDS:-10} s"
-  sleep "${MERGE_RETRY_SECONDS:-10}"
-  merged=$(merge_pr)
-  rc=$?
+# the post it can still read blocked. One retry, once GitHub says the PR is no longer blocked,
+# and only onto the gated main: the wait is long enough for main to move, and --match-head-commit
+# pins only the head (closet #428 / Orbit #121 Codex).
+if [ "$rc" != 0 ] && [ -n "$codex_status" ] && [[ "$merged" == *"base branch policy prohibits the merge"* ]]; then
+  echo "merge: GitHub has not counted the posted $CODEX_CONTEXT yet; waiting up to ${MERGE_RETRY_SECONDS:-30} s for it"
+  if wait_unblocked; then
+    read_main
+    main_unmoved
+    merged=$(merge_pr)
+    rc=$?
+  else
+    echo "merge: PR #$PR still reads blocked after ${MERGE_RETRY_SECONDS:-30} s; not retrying"
+  fi
 fi
 if [ "$rc" = 0 ]; then
   [ -z "$merged" ] || printf '%s\n' "$merged"
