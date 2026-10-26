@@ -15,7 +15,9 @@ agent more than it catches is overhead, not standardization.
 - `shellcheck -s bash` (0.11) clean; `bats tests/` green before any push. CI runs both. On a
   Mac, bats runs under /bin/bash 3.2, where a false `[[ … ]]` or `(( … ))` mid-test fails
   nothing (and `! cmd` or `[ a ] && [ b ]` never do, on any bash): every such assertion ends
-  `|| false`. ci-lint holds it (`bin/bats_assert_check.py`, `--fix` appends it).
+  `|| false` straight after the test, unless it is its function's last line. ci-lint holds it
+  (`bin/bats_assert_check.py`, a line-level form, not a parser: grow its grammar, never a
+  lexer; `--fix` appends the handler).
 
 ## Architecture
 Scripts in `bin/` and the shared metrics collectors in `metrics/`, vendored by consumers (the
@@ -27,6 +29,8 @@ is README.md "Architecture". Invariants of the design:
   and exits with the command's code, 1 for its own verdict, 2 for a bad call. The gate's outcome
   record (`logs/<pr>/gate.json`, `runs.tsv`; README "Gate record") is an API too. `.devkit-rev` is `<upstream commit> <tree sha>`,
   the tree filtered to `VENDOR_PATHS`. A new file consumers run must sit under a listed path.
+  The lint bases' exports are APIs too (`lint/exports.txt`): one leaves only after 30 days marked
+  deprecated there, since repo-owned configs import them and devkit-sync cannot edit those.
 - The skeleton owns mechanics; the repo's `scripts/ci/gate_plan.sh` declares its jobs. Which
   paths run which group is devkit's (`bin/_paths_lib.sh`: one table for hooks and gate,
   `devkit_default_gate_plan`); a repo adds only its own rules in `gate_plan_extra`. A new
@@ -47,6 +51,9 @@ is README.md "Architecture". Invariants of the design:
   every missing tool in one error.
 - `make merge` runs origin/main's `merge_rules.sh` and plan (`bin/pr_merge.sh` extracts them), never
   the checkout's: a rule a branch changes governs merges only once it is on main.
+- A launchd job runs devkit main's copy of itself: its plist starts the job dir's `launcher.sh`
+  (`bin/job_launcher.sh`, installed by `bin/_launchd_job_lib.sh`), never a path in a checkout, so
+  a devkit merge reaches the next run with no fast-forward. A new job goes through the same lib.
 - Every repo's `gate` target is `devkit/bin/gate.sh "$(PR)" $(GATE_ARGS)`. Where gates run is
   per machine (`GATE_REMOTE_HOST` in `~/.config/devkit/gate.env`), never per repo, except a plan's
   literal `GATE_REMOTE=0` for a gate only a Mac can run.

@@ -43,6 +43,12 @@
       "groupName": "github actions"
     },
     {
+      "description": "Except devkit's own reusable workflow: consumers call it at @main (templates/workflows/quick-check-caller.yml) so it moves with devkit, and a digest pin of it reopened in every consumer on every devkit merge for a workflow that does not run (Actions billing off, local-gate is the merge gate; homelab #125, closed 2026-10-26). Third-party actions stay pinned.",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["agandhi4/devkit"],
+      "pinDigests": false
+    },
+    {
       "description": "Majors need a paired code change, so they are flagged for explicit human review.",
       "matchUpdateTypes": ["major"],
       "addLabels": ["major-bump"]

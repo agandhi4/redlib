@@ -134,7 +134,9 @@
 #   is worse than none. Both settings are environment-only test hooks.
 #
 # Sleep: on macOS the gate holds a caffeinate assertion for its own lifetime (bin/_awake_lib.sh),
-#   since its budgets and watchdog read wall time; DEVKIT_CAFFEINATE=0 turns it off.
+#   since its budgets and watchdog read wall time; DEVKIT_CAFFEINATE=0 turns it off. With the lid
+#   closed on battery, which no assertion survives, it refuses at once with exit 2 (one line;
+#   DEVKIT_ALLOW_BATTERY=1 overrides).
 #
 # Per-machine defaults: ${XDG_CONFIG_HOME:-$HOME/.config}/devkit/gate.env, if present, holds
 #   GATE_SLOTS, GATE_SILENCE_SECONDS, GATE_CLEANUP_SECONDS, GATE_JOB_BUDGET_MINUTES, GATE_BUDGET_MINUTES,
@@ -187,9 +189,11 @@ done
 GATE_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 readonly GATE_STARTED
 # Awake from here to exit, the slot wait included: a sleeping box stalls every queued gate too
-# (bin/_awake_lib.sh; Linux: run the gate under systemd-inhibit, as that file says).
+# (bin/_awake_lib.sh; Linux: run the gate under systemd-inhibit, as that file says). A Mac that
+# no assertion keeps awake (lid closed on battery) is refused first, before a slot or a status.
 # shellcheck source=bin/_awake_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_awake_lib.sh"
+! devkit_sleep_forced || { echo "local_gate: $DEVKIT_SLEEP_REASON (DEVKIT_ALLOW_BATTERY=1 overrides)" >&2; exit 2; }
 devkit_stay_awake
 
 # Per-machine defaults (header). An allowlist, not GATE_*: GATE_LOCK or GATE_PLAN in a file would

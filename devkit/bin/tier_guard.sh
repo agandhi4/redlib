@@ -60,7 +60,7 @@
 # the guard puts devkit/clock_shift/ on PYTHONPATH and its plugin in PYTEST_PLUGINS (contract in
 # clock_shift/devkit_clock_shift.py) with DEVKIT_CLOCK_SHIFT_CONF=<root>/scripts/ci/clock_shift.conf,
 # the repo's exceptions (pytest only), and names vitest's setup file as DEVKIT_CLOCK_SHIFT_VITEST,
-# which the repo's vitest config lists through lint/vitest.base.mjs's clockShiftSetupFiles
+# which the repo's vitest config loads through lint/vitest.base.mjs's clockShift() plugin
 # (contract in clock_shift/vitest_clock_shift.mjs). Every floor must be one of those two (exit 2
 # otherwise: another runner would run on the real clock and read as shifted). Shifted, the tier
 # writes no metrics file (the unshifted run of the same tier owns tier.<tier>.*), puts back every
@@ -78,7 +78,7 @@
 #   TIER <tier> NOSHIFT <runner> (no shifted <runner> process: it ran on the real clock)  exit 1
 # when the command passed but no process of a floored runner recorded its shift in the guard's
 # DEVKIT_CLOCK_SHIFT_PROOF file (a recipe that drops the environment, a pytest in a container, a
-# vitest config without clockShiftSetupFiles). A file, not an output line: vitest prints a setup
+# vitest config without clockShift()). A file, not an output line: vitest prints a setup
 # file's output per test file, or not at all under `silent`.
 #
 # Budgets are set from GATE timings with headroom and only ever go down; floors are the current
@@ -347,7 +347,7 @@ for f in ${FLOORS[@]+"${FLOORS[@]}"}; do
     echo "TIER $TIER NOSHIFT $runner (no shifted $runner process: it ran on the real clock)"
     case $runner in
       pytest) echo "tier_guard: pytest did not load devkit_clock_shift: the recipe must run pytest in this environment (PYTEST_PLUGINS, PYTHONPATH)" >&2 ;;
-      vitest) echo "tier_guard: vitest never ran devkit's clock-shift setup file: list clockShiftSetupFiles (devkit/lint/vitest.base.mjs) first in the root config's setupFiles, and keep the environment (DEVKIT_CLOCK_SHIFT_VITEST)" >&2 ;;
+      vitest) echo "tier_guard: vitest never ran devkit's clock-shift setup file: add clockShift() (devkit/lint/vitest.base.mjs) to the root config's plugins, and keep the environment (DEVKIT_CLOCK_SHIFT_VITEST)" >&2 ;;
     esac
     failed=1
   fi
