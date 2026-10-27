@@ -8,23 +8,28 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const EXIT_USAGE = 2;
+// A tool the collector runs is not installed: bin/metrics_collect.sh's --quick skips the
+// collector on it (a fresh worktree before its install); everywhere else it fails as exit 2 does.
+export const EXIT_MISSING_TOOL = 3;
 export const SCOPE = /^[A-Za-z0-9_-]+$/;
 
 export class CollectorError extends Error {}
+export class MissingToolError extends CollectorError {}
 
-// fail: the one exit-2 path, so every "cannot measure" reason prints the same way.
-export function fail(script, message) {
-  process.stderr.write(`metrics/${script}: ${message}\n`);
-  process.exit(EXIT_USAGE);
+// fail: the one "cannot measure" exit, so every reason prints the same way: 3 for a MissingToolError,
+// else 2.
+export function fail(script, err) {
+  process.stderr.write(`metrics/${script}: ${err.message}\n`);
+  process.exit(err instanceof MissingToolError ? EXIT_MISSING_TOOL : EXIT_USAGE);
 }
 
 // requireBin: the tool from the project's own node_modules/.bin (absolute, since the tool
-// then runs with --root as its cwd), or exit 2 naming the dev dependency to add. Tools are
+// then runs with --root as its cwd), or exit 3 naming the dev dependency to add. Tools are
 // never taken from PATH: the lockfile's version measures.
 export function requireBin(root, name, dependency) {
   const bin = resolve(root, "node_modules", ".bin", name);
   if (!existsSync(bin)) {
-    throw new CollectorError(
+    throw new MissingToolError(
       `${name} is not installed in ${root}/node_modules/.bin; add ${dependency} to the dev dependencies and run the install`,
     );
   }

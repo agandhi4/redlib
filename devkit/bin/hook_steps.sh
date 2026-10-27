@@ -72,7 +72,11 @@
 # of its history: a new branch with no main to compare against). A rename counts as its old
 # and its new path, so a move out of an area still runs that area's steps. A merge commit
 # counts only the paths it changed against every parent (git's dense combined diff: conflict
-# resolutions), so merging main into a docs branch stays docs-only. With no changed paths (an
+# resolutions), so merging main into a docs branch stays docs-only. A commit <remote>/main
+# already holds is not this push's change (it passed its own push and gate; push_ranges.sh's
+# new-branch range starts at the same ref): make merge's carry push, main merged into the PR
+# with only docs/decisions.md resolved, is docs-only, not every path main moved (devkit #239's
+# carry ran the 67 s python-tests; 2026-10-26). With no changed paths (an
 # empty commit) docs and `only` steps skip and every other step runs. If git cannot list the
 # paths, every step runs, with a note. A skipped step prints "– <label> skipped (<why>)".
 # Every step is parsed before any runs, so a bad override blocks the hook up front;
@@ -106,7 +110,9 @@
 # runs `metrics_collect.sh check --quick` (the collectors whose tier inputs are already built;
 # no tier runs). It never blocks the push: a clean ratchet is one line, a failing one prints the
 # lines the gate's metrics job would fail on (with `BETTER: run make metrics-tighten before push`
-# for a gain left unlocked), a preview that cannot run says why in one line. Why (2026-10-20):
+# for a gain left unlocked), a preview that cannot run says why in one line. A collector whose
+# tool is not installed (a fresh worktree) is skipped, its line naming the fix printed above the
+# verdict. Why (2026-10-20):
 # all eight instalite PRs #37-#46 failed their first gate on unlocked coverage gains and bundle
 # growth that a 20 s local run shows. The ledger row is `metrics-quick`, always ok.
 #
@@ -211,7 +217,7 @@ run_hook_steps() {
   local plan=() changed='' listed=1 runs=0 reason docs_steps=0
   HOOK_AREAS=''
   if [ "${#steps[@]}" -gt 0 ]; then
-    if changed=$(_hook_changed_paths "$hook"); then
+    if changed=$(_hook_changed_paths "$hook" "${1:-origin}"); then
       _hook_classify "$changed"
     else
       echo "$hook: cannot list the changed paths; running every step"
@@ -258,7 +264,7 @@ run_hook_steps() {
 
   _hook_drop_git_dir "$root"
   # shellcheck disable=SC2034  # LOAD_* are devkit_load_scale's outputs, local so they do not leak
-  local i=0 hook_start step_start bare_before missing HOOK_LOAD_NOTE LOAD_SCALE LOAD_BUDGET LOAD_NOTE LOAD_LEDGER LOAD_BASE LOAD_START LOAD_NCPU
+  local i=0 hook_start step_start bare_before missing HOOK_LOAD_NOTE LOAD_SCALE LOAD_BUDGET LOAD_NOTE LOAD_LEDGER LOAD_BASE LOAD_START LOAD_NCPU LOAD_HELD LOAD_HELD_START
   bare_before=$(_hook_bare_state "$root")
   hook_start=$(date +%s)
   # Any positive budget: only the factor is recorded, as the ledger note (header: Timings).
@@ -419,14 +425,21 @@ _hook_record() {
 
 # <root>: the pre-push metrics preview (header: Metrics preview). Prints, never fails.
 _hook_metrics_quick() {
-  local root=$1 out rc=0 start
+  local root=$1 out rc=0 start missing
   [ -f "$root/scripts/ci/metrics.conf" ] && [ -f "$root/docs/metrics/ratchet.json" ] || return 0
   start=$(date +%s)
   # A hook is never inside a gate, even when a gate job's tests run one: drop the gate's areas.
   out=$(cd "$root" && env -u GATE_AREAS "$(dirname "${BASH_SOURCE[0]}")/metrics_collect.sh" check --quick 2>&1 </dev/null) || rc=$?
   _hook_record "$root" pre-push metrics-quick "$start" 0
+  missing=$(grep -E '^metrics [^ ]+ SKIP \(--quick, tool missing: ' <<<"$out" || true)
+  [ -z "$missing" ] || printf '%s\n' "$missing"
   case "$rc" in
-    0) echo "✓ metrics (quick): every bound holds" ;;
+    0)
+      if [ -n "$missing" ]; then
+        echo "✓ metrics (quick): every measured bound holds; the collectors above did not run"
+      else
+        echo "✓ metrics (quick): every bound holds"
+      fi ;;
     1)
       grep -E '^ratchet ' <<<"$out" | grep -vE ' SAME$| SKIPPED \(|REPORT-ONLY|within tolerance|^ratchet (summary|untracked|base|merged) '
       grep '^BETTER: ' <<<"$out"
@@ -628,17 +641,20 @@ _hook_path_matches() {
   return 1
 }
 
-# <hook>: the changed paths, one per line (duplicates and blank lines possible). A subshell so
-# pipefail reaches git's status: a git failure must not read as "no changed paths". -z keeps
-# git from C-quoting non-ASCII names, which would then match no glob.
+# <hook> [remote]: the changed paths, one per line (duplicates and blank lines possible); for
+# pre-push, without the commits <remote>/main holds (header). A subshell so pipefail reaches
+# git's status: a git failure must not read as "no changed paths". -z keeps git from C-quoting
+# non-ASCII names, which would then match no glob.
 _hook_changed_paths() (
   set -o pipefail
   if [ "$1" = pre-commit ]; then
     git diff --cached --name-only --no-renames -z | tr '\0' '\n'
     exit
   fi
+  shipped=()
+  ! git rev-parse --verify -q "refs/remotes/$2/main^{commit}" >/dev/null || shipped=(--not "refs/remotes/$2/main")
   while IFS= read -r range; do
     [ -n "$range" ] || continue
-    git log --name-only --format= --no-renames --diff-merges=dense-combined -z "$range" | tr '\0' '\n' || exit 1
+    git log --name-only --format= --no-renames --diff-merges=dense-combined -z "$range" ${shipped[@]+"${shipped[@]}"} | tr '\0' '\n' || exit 1
   done <<<"$PUSH_RANGES"
 )

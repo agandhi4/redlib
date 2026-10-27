@@ -9,7 +9,7 @@ Why cargo from PATH: the gate and the hooks put the toolchain rust-toolchain.tom
 PATH (devkit/bin/toolchain_path.sh), so the compiler that measures is the one the repo builds
 with. With no cargo on PATH (a hand run outside the gate: redlib, 2026-10-18), every cargo call
 goes through devkit/bin/toolchain_exec.sh, which provisions the same pin. A cargo it cannot
-provide, or a missing clippy, is exit 2 with the provisioning hint; nothing is silently skipped.
+provide, or a missing clippy, is exit 3 with the provisioning hint; nothing is silently skipped.
 
 Keys (docs/metrics-keys.md), each behind its flag; `<scope>` is `--scope`:
   --cognitive  complexity.<scope>.cognitive_max      clippy's cognitive_complexity lint run
@@ -81,7 +81,7 @@ path; a finding inside a macro expansion names the macro's call site.
 
 Deterministic: the same tree and toolchain give the same numbers (duplicates from a module
 compiled into two targets are counted once). Output: a flat JSON object to --out (default
-stdout). Exit: 0 ok, 2 a missing tool, a failed build, an unparseable report or a bad call.
+stdout). Exit: 0 ok, 3 a missing tool, 2 a failed build, an unparseable report or a bad call.
 """
 
 from __future__ import annotations
@@ -102,6 +102,7 @@ from pathlib import Path
 from types import ModuleType
 
 EXIT_USAGE = 2
+EXIT_MISSING_TOOL = 3
 COGNITIVE_THRESHOLD = 15
 COGNITIVE_LINT = "clippy::cognitive_complexity"
 COGNITIVE_SCORE = re.compile(r"cognitive complexity of \((?P<score>\d+)/\d+\)")
@@ -125,7 +126,12 @@ PROVISION_HINT = (
 
 
 class CollectorError(Exception):
-    """A missing tool, a failed build, a report that cannot be read or a bad call (exit 2)."""
+    """A failed build, a report that cannot be read or a bad call (exit 2)."""
+
+
+class MissingToolError(CollectorError):
+    """A tool the collector runs is not installed (exit 3): bin/metrics_collect.sh's --quick
+    skips the collector on it, a fresh worktree before its install; elsewhere it fails as 2."""
 
 
 @dataclass
@@ -165,7 +171,7 @@ def cargo_command() -> tuple[str, ...]:
         if probe.returncode == 0:
             return command
         reason = probe.stderr.strip()[-500:] or f"exit {probe.returncode}"
-    raise CollectorError(
+    raise MissingToolError(
         f"cargo is not on PATH and devkit/bin/toolchain_exec.sh could not provide it "
         f"({reason}); {PROVISION_HINT}"
     )
@@ -181,7 +187,7 @@ def _cargo(
 
 def require_clippy(root: Path) -> None:
     if _cargo(["clippy", "--version"], root=root).returncode != 0:
-        raise CollectorError(
+        raise MissingToolError(
             'cargo clippy is not installed for this toolchain; add "clippy" to the components '
             f"in rust-toolchain.toml ({PROVISION_HINT})"
         )
@@ -455,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
             _write(Path(args.list_out), findings_text(collected.findings))
     except CollectorError as exc:
         print(f"metrics/rust.py: {exc}", file=sys.stderr)
-        return EXIT_USAGE
+        return EXIT_MISSING_TOOL if isinstance(exc, MissingToolError) else EXIT_USAGE
     return 0
 
 

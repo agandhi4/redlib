@@ -36,7 +36,11 @@ the section's root, and a glob also names a directory the file is under.
   outbound-timeout [except GLOB...]             python: every outbound HTTP call has a timeout
   utc-today   [except GLOB...]                  python: no date.today(), datetime.utcnow(), or
                                                 datetime.now() without a tz
-  single-writer ATTR GLOB...                    python: only files under the globs write .ATTR
+  single-writer ATTR GLOB...                    python: only files under the globs write .ATTR,
+                                                by assignment, setattr or the Django ORM
+                                                (`ATTR=` to update/create/get_or_create/
+                                                update_or_create, their defaults= keys,
+                                                bulk_update fields, bulk_create's Model(ATTR=))
   single-writer TABLE[.FIELD] GLOB[:FUNCTION,FUNCTION]...
                                                 ts: only files under the globs (only those
                                                 top-level functions of them) write the drizzle

@@ -10,16 +10,27 @@
 # Scale = min(1-minute load / cores, 2), one decimal, applied only above 1.0: a solo run keeps
 # its exact budget, and the cap means a real doubling still fails on the busiest box. A budget
 # checked after its command uses the larger of the start and end samples.
+# Slots (devkit decisions 2026-10-26): a caller in the gate slot pool passes how many slots are
+# held (bin/_slot_lib.sh slot_held_count, its own included), and the scale is at least that,
+# under the same cap, at the smaller of the start and end counts. Why: the 1-minute load lags
+# bursty parallel gates. Of 154 tier runs beside another gate (2026-10-19..26) 8 overran, 7 of
+# them at ×1.0 (load at or under the 10 cores both samples); devkit #226's unit ran 293 s against 240 beside kitchen #15 and 174 s alone. Each run
+# then gets the budget of its slot share; a run alone (1 slot held) keeps its exact budget, so a
+# real slowdown still fails there, and beside a neighbour past 2x.
 #
 #   devkit_loadavg                 "<1m> <5m>", or nothing when the load cannot be read
 #   devkit_ncpu                    the online core count, or nothing
-#   devkit_load_scale <budget-s>   sets LOAD_SCALE ("1" when unscaled or unreadable),
+#   devkit_load_scale <budget-s> [<slots held>]
+#                                  sets LOAD_SCALE ("1" when unscaled or unreadable),
 #                                  LOAD_BUDGET (whole seconds) and LOAD_NOTE ("" when unscaled,
 #                                  else `budget 110 s ×1.6 (load 13.1 on 8 cpus) → 176 s`, the
-#                                  text printed on the status line so the number is explainable)
-#                                  and LOAD_LEDGER ("" or `load=13.1/8 scale=1.6`)
-#   devkit_load_rescale            after the command: samples again and keeps the larger stretch,
-#                                  its LOAD_NOTE naming both samples (tier_guard.sh, local_gate.sh
+#                                  text printed on the status line so the number is explainable;
+#                                  `; 2 gate slots held` inside the parentheses when more than one is)
+#                                  and LOAD_LEDGER ("" or `load=13.1/8 scale=1.6`, ` slots=2` after)
+#   devkit_load_rescale [<slots held>]
+#                                  after the command: samples again and keeps the larger stretch,
+#                                  the slots counting at the smaller of the two counts, its
+#                                  LOAD_NOTE naming both samples (tier_guard.sh, local_gate.sh
 #                                  jobs; a hook's ledger note keeps the start sample)
 # Test hooks, environment only: DEVKIT_LOADAVG_CMD (a command printing "<1m> <5m> ...") and
 # DEVKIT_NCPU (a core count).
@@ -41,13 +52,16 @@ devkit_ncpu() {
   [[ "$n" =~ ^[1-9][0-9]*$ ]] && echo "$n"
 }
 
-# _devkit_stretch <budget> <1m load> <ncpu>: "<scale> <stretched budget>", or nothing when
-# unscaled. The scale is rounded to one decimal before it multiplies, so the printed factor and
-# the printed budget agree (×1.6 of 110 is 176, not the 180 an unrounded 1.6375 gives).
+# _devkit_stretch <budget> <1m load> <ncpu> [<slots held>]: "<scale> <stretched budget>", or
+# nothing when unscaled. The scale is rounded to one decimal before it multiplies, so the printed
+# factor and the printed budget agree (×1.6 of 110 is 176, not the 180 an unrounded 1.6375
+# gives). An unreadable load leaves the slots alone to stretch it.
 _devkit_stretch() {
-  [ -n "$2" ] && [ -n "$3" ] && [ "$1" -gt 0 ] || return 0
-  awk -v b="$1" -v l="$2" -v n="$3" 'BEGIN {
-    s = l / n; if (s > 2) s = 2
+  [ "$1" -gt 0 ] || return 0
+  awk -v b="$1" -v l="$2" -v n="$3" -v h="${4:-1}" 'BEGIN {
+    s = (l != "" && n != "") ? l / n : 0
+    if (h > s) s = h
+    if (s > 2) s = 2
     s = sprintf("%.1f", s)
     if (s + 0 <= 1) exit
     print s, int(b * s + 0.5)
@@ -58,13 +72,27 @@ _devkit_stretch() {
 devkit_load_scale() {
   local budget=$1 out
   LOAD_SCALE=1 LOAD_BUDGET=$budget LOAD_NOTE="" LOAD_LEDGER="" LOAD_BASE=$budget
+  LOAD_HELD_START=${2:-1} LOAD_HELD=${2:-1}
   read -r LOAD_START _ <<<"$(devkit_loadavg)"
   LOAD_NCPU=$(devkit_ncpu)
-  out=$(_devkit_stretch "$budget" "$LOAD_START" "$LOAD_NCPU")
+  out=$(_devkit_stretch "$budget" "$LOAD_START" "$LOAD_NCPU" "$LOAD_HELD")
   [ -n "$out" ] || return 0
   read -r LOAD_SCALE LOAD_BUDGET <<<"$out"
-  LOAD_NOTE="budget $budget s ×$LOAD_SCALE (load $LOAD_START on $LOAD_NCPU cpus) → $LOAD_BUDGET s"
-  LOAD_LEDGER="load=$LOAD_START/$LOAD_NCPU scale=$LOAD_SCALE"
+  LOAD_NOTE="budget $budget s ×$LOAD_SCALE (load ${LOAD_START:-?} on ${LOAD_NCPU:-?} cpus$(_devkit_held_note)) → $LOAD_BUDGET s"
+  LOAD_LEDGER="load=${LOAD_START:-?}/${LOAD_NCPU:-?} scale=$LOAD_SCALE$(_devkit_held_note ledger)"
+}
+
+# _devkit_held_note [ledger]: `; <n> gate slots held` (`; <a> at start, <b> at end` once
+# rescaled to a different count), or ` slots=<n>` for the ledger; nothing while one is held.
+_devkit_held_note() {
+  [ "$LOAD_HELD" -gt 1 ] || [ "$LOAD_HELD_START" -gt 1 ] || return 0
+  if [ "${1:-}" = ledger ]; then
+    echo " slots=$LOAD_HELD"
+  elif [ "$LOAD_HELD" = "$LOAD_HELD_START" ]; then
+    echo "; $LOAD_HELD gate slots held"
+  else
+    echo "; gate slots held $LOAD_HELD_START at start, $LOAD_HELD at end"
+  fi
 }
 
 # devkit_load_rescale: after the measured command, after devkit_load_scale. Samples the load
@@ -74,16 +102,22 @@ devkit_load_scale() {
 # load up mid-run, and the tier failed 124 s against an unstretched 110 s.
 # shellcheck disable=SC2034  # LOAD_* are this function's output, read by the caller
 devkit_load_rescale() {
-  local end out scale budget
+  local end held out scale budget sample
+  LOAD_HELD=${1:-1}
   read -r end _ <<<"$(devkit_loadavg)"
-  out=$(_devkit_stretch "$LOAD_BASE" "$end" "$LOAD_NCPU")
-  if [ -n "$out" ]; then
+  # Slots count only when held at both samples: a held slot is a snapshot, not an average, and a
+  # neighbour's slot spans its near-idle setup and cleanup too (adversarial review of #234).
+  held=$LOAD_HELD
+  [ "$LOAD_HELD_START" -ge "$held" ] || held=$LOAD_HELD_START
+  LOAD_SCALE=1 LOAD_BUDGET=$LOAD_BASE
+  for sample in "${LOAD_START:-}" "${end:-}"; do
+    out=$(_devkit_stretch "$LOAD_BASE" "$sample" "$LOAD_NCPU" "$held")
+    [ -n "$out" ] || continue
     read -r scale budget <<<"$out"
-    if [ "$budget" -gt "$LOAD_BUDGET" ]; then
-      LOAD_SCALE=$scale LOAD_BUDGET=$budget
-      LOAD_LEDGER="load=$end/$LOAD_NCPU scale=$LOAD_SCALE"
-    fi
-  fi
-  [ -n "$out" ] || [ -n "$LOAD_NOTE" ] || return 0
-  LOAD_NOTE="budget $LOAD_BASE s ×$LOAD_SCALE (load ${LOAD_START:-?} at start, ${end:-?} at end on $LOAD_NCPU cpus) → $LOAD_BUDGET s"
+    [ "$budget" -gt "$LOAD_BUDGET" ] || continue
+    LOAD_SCALE=$scale LOAD_BUDGET=$budget
+    LOAD_LEDGER="load=${sample:-?}/${LOAD_NCPU:-?} scale=$LOAD_SCALE$(_devkit_held_note ledger)"
+  done
+  [ "$LOAD_SCALE" != 1 ] || [ -n "$LOAD_NOTE" ] || return 0
+  LOAD_NOTE="budget $LOAD_BASE s ×$LOAD_SCALE (load ${LOAD_START:-?} at start, ${end:-?} at end on ${LOAD_NCPU:-?} cpus$(_devkit_held_note)) → $LOAD_BUDGET s"
 }

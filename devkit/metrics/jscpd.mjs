@@ -9,9 +9,13 @@
 //   paths        repo-relative directories or files jscpd scans (at least one)
 //   --min-tokens, --min-lines   jscpd's clone size knobs (its defaults are 50 and 5). The one
 //                knob that moves the percentage: a repo that changes it rebaselines
-//   --bin        the jscpd to run; default node_modules/.bin/jscpd under the current directory
-//                (a repo whose frontend holds the dev dependencies passes
-//                --bin frontend/node_modules/.bin/jscpd). Never PATH's: the lockfile's measures
+//   --bin        the jscpd to run, from a repo's own lockfile (a repo whose frontend holds the
+//                dev dependencies passes --bin frontend/node_modules/.bin/jscpd). Default:
+//                devkit's pin (metrics/tools/package-lock.json, installed once per machine by
+//                bin/npm_tool.sh), so a shell, Python, Swift or Rust repo needs no node project
+//                of its own. Until 2026-11-25 a missing --bin with ./node_modules/.bin/jscpd
+//                present still runs that one, with a DEPRECATED line (closet, rollcall: pass
+//                --bin node_modules/.bin/jscpd, or drop jscpd from package.json). Never PATH's
 // A `.jscpd.json` in the current directory is honoured by jscpd itself (ignore patterns,
 // formats); the flags above override its matching keys, as jscpd's own CLI does.
 //   --format     only these jscpd formats (its --format; `jscpd --list` names them). A shell
@@ -32,14 +36,17 @@
 // one line per pair, largest first: `<fileA>:<start>-<end> ↔ <fileB>:<start>-<end> lines=<n>`,
 // paths relative to the working directory, the pair's two ends in path order. Never read by the
 // ratchet; the JSON is the same with or without it.
-// Exit: 0 ok, 2 a missing jscpd, a report that cannot be read or a bad call.
+// Exit: 0 ok, 3 a missing jscpd, 2 a report that cannot be read or a bad call.
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import {
   CollectorError,
+  MissingToolError,
   SCOPE,
   fail,
   ownConfig,
@@ -51,6 +58,8 @@ import {
 } from "./_lib.mjs";
 
 const SCRIPT = "jscpd.mjs";
+const NPM_TOOL = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "npm_tool.sh");
+const LEGACY_BIN = join("node_modules", ".bin", "jscpd");
 
 function parse(argv) {
   const { values, positionals } = parseArgs({
@@ -60,7 +69,7 @@ function parse(argv) {
       scope: { type: "string" },
       "min-tokens": { type: "string", default: "50" },
       "min-lines": { type: "string", default: "5" },
-      bin: { type: "string", default: join("node_modules", ".bin", "jscpd") },
+      bin: { type: "string" },
       base: { type: "boolean", default: false },
       format: { type: "string" },
       out: { type: "string" },
@@ -83,16 +92,32 @@ function parse(argv) {
   return { ...values, paths: positionals };
 }
 
-function collect(opts) {
-  if (!existsSync(opts.bin)) {
-    throw new CollectorError(
-      `jscpd is not installed at ${opts.bin}; add jscpd to the dev dependencies, or pass --bin <path>`,
-    );
+// jscpdBin: --bin's, else (the deprecation window, header) the repo's own default install, else
+// devkit's pin through bin/npm_tool.sh, which installs it on a cold machine.
+function jscpdBin(bin) {
+  if (bin !== undefined) {
+    if (!existsSync(bin)) {
+      throw new MissingToolError(`jscpd is not installed at ${bin}; install the repo's dev dependencies, or drop --bin for devkit's pin`);
+    }
+    return bin;
   }
+  if (existsSync(LEGACY_BIN)) {
+    process.stderr.write(
+      `metrics/${SCRIPT}: DEPRECATED (until 2026-11-25): no --bin ran ./${LEGACY_BIN}; pass --bin ${LEGACY_BIN} to keep the repo's pin, or drop jscpd from package.json for devkit's\n`,
+    );
+    return LEGACY_BIN;
+  }
+  const run = spawnSync("bash", [NPM_TOOL, "jscpd", "--path"], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
+  if (run.status !== 0) throw new MissingToolError(`devkit's pinned jscpd could not be provided (bin/npm_tool.sh exit ${run.status})`);
+  return run.stdout.trim();
+}
+
+function collect(opts) {
+  const bin = resolve(jscpdBin(opts.bin));
   const outDir = mkdtempSync(join(tmpdir(), "devkit-jscpd-"));
   try {
     // jscpd exits 1 only with --threshold; still accepted so a repo's .jscpd.json may set one.
-    const run = (extra) => runTool(resolve(opts.bin), [
+    const run = (extra) => runTool(bin, [
       ...opts.paths,
       "--min-tokens", opts["min-tokens"],
       "--min-lines", opts["min-lines"],
@@ -167,7 +192,7 @@ try {
   if (opts["list-out"] !== undefined) writeFindings(findings, opts["list-out"]);
 } catch (err) {
   if (err instanceof CollectorError || err.code === "ERR_PARSE_ARGS_UNKNOWN_OPTION" || err.code === "ERR_PARSE_ARGS_INVALID_OPTION_VALUE") {
-    fail(SCRIPT, err.message);
+    fail(SCRIPT, err);
   }
   throw err;
 }

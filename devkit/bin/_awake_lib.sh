@@ -1,15 +1,17 @@
 # shellcheck shell=bash
 # Keep the machine awake while a timed run or Docker work is alive. Sourced; defines
-# devkit_stay_awake, devkit_wake_user and devkit_sleep_forced and runs nothing. Used by
-# local_gate.sh (the whole gate), tier_guard.sh (a tier run by hand), _timeout_lib.sh's
+# devkit_stay_awake, devkit_wake_user, devkit_sleep_forced and devkit_on_battery and runs nothing.
+# Used by local_gate.sh (the whole gate), tier_guard.sh (a tier run by hand), _timeout_lib.sh's
 # devkit_docker_guard (every devkit entry point that talks to Docker: throwaway_pg.sh,
-# boot_image.sh, docker_bounded.sh) and dependency_merge.sh (devkit_sleep_forced).
+# boot_image.sh, docker_bounded.sh), dependency_merge.sh (devkit_sleep_forced) and
+# tests/shards.sh --measure (devkit_on_battery).
 #
 #   devkit_stay_awake    macOS: hold the machine awake until this process exits
 #   devkit_wake_user     macOS: declare user activity for 2 s (blocks 2 s); 1 elsewhere or when off
 #   devkit_sleep_forced  macOS: true, setting DEVKIT_SLEEP_REASON, when macOS will sleep the
 #                        machine whatever any assertion says; false elsewhere or with
 #                        DEVKIT_ALLOW_BATTERY=1
+#   devkit_on_battery    macOS: true when the Mac draws from its battery; false elsewhere
 #
 # Every macOS test is uname, not `command -v caffeinate`: Linux's caffeine package ships a
 # `caffeinate` with other flags.
@@ -65,6 +67,13 @@ devkit_sleep_forced() {
   [ "${DEVKIT_ALLOW_BATTERY:-0}" != 1 ] || return 1
   _devkit_on_macos || return 1
   ioreg -r -k AppleClamshellState -d 1 2>/dev/null | grep -q '"AppleClamshellState" = Yes' || return 1
-  pmset -g batt 2>/dev/null | grep -qF "'Battery Power'" || return 1
+  devkit_on_battery || return 1
   DEVKIT_SLEEP_REASON="lid closed on battery: macOS forces sleep; plug in or open the lid"
+}
+
+# devkit_on_battery: macOS: true when pmset says the Mac draws from its battery; false elsewhere
+# (the fleet's Linux gate host is a server). Also tests/shards.sh --measure: a Mac on battery
+# runs slower, so costs measured there are skewed.
+devkit_on_battery() {
+  _devkit_on_macos && pmset -g batt 2>/dev/null | grep -qF "'Battery Power'"
 }

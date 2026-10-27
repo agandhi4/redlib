@@ -2,7 +2,7 @@
 """ci-lint's changed-file rules: the lint-base rules a repo holds only in the files a change
 touches, until its whole-tree count is 0.
 
-  uv run --frozen python devkit/bin/changed_lint.py ruff --root . --src server
+  uv run --locked python devkit/bin/changed_lint.py ruff --root . --src server
   devkit/bin/changed_lint.py ruff --ruff-from release --root . --src bin [--hold E501]
   devkit/bin/changed_lint.py eslint --root frontend --src src [--ext .vue]
       [--base-ref origin/main]

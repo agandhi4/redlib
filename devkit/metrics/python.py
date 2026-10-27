@@ -2,7 +2,7 @@
 """Shared Python metrics collector: McCabe and cognitive complexity, dead code, import cycles.
 
 One line in scripts/ci/metrics.conf, run by devkit/bin/metrics_collect.sh, for example:
-  py-backend backend uv run --frozen --project backend python devkit/metrics/python.py \\
+  py-backend backend uv run --locked --project backend python devkit/metrics/python.py \\
       --root backend --src server --scope backend --mccabe --cognitive --vulture --cycles \\
       --out build/metrics/py-backend.json
 
@@ -11,7 +11,7 @@ installed in its virtualenv. `python devkit/metrics/python.py` under `uv run` ma
 interpreter `sys.executable`, and every tool is reached through it (`<python> -m ruff`,
 `<python> -m vulture`, the `complexipy` entry point beside it), so the versions the lockfile
 pins are the versions that measure. `--python` names another interpreter when the collector
-itself must run elsewhere. A requested tool that is not installed is exit 2 naming the dev
+itself must run elsewhere. A requested tool that is not installed is exit 3 naming the dev
 dependency to add; nothing is silently skipped.
 
 Keys (docs/metrics-keys.md), each behind its flag; `<scope>` is `--scope`:
@@ -22,6 +22,12 @@ Keys (docs/metrics-keys.md), each behind its flag; `<scope>` is `--scope`:
   --vulture    dead.<scope>.vulture                 findings, honouring [tool.vulture] in
                                                     <root>/pyproject.toml (paths, min_confidence,
                                                     ignore_names); without it, the --src paths.
+               --vulture-config FILE                read the repo's [tool.vulture] from FILE
+                                                    (repo-relative) instead: for a --root whose
+                                                    pyproject is not the repo's own (kitchen's
+                                                    is Tandoor's). Its `paths` and whitelist
+                                                    files still resolve against --root, as
+                                                    vulture resolves them against its cwd
                                                     Unused `variable`/`attribute` findings in a
                                                     declarative class body (pydantic BaseModel/
                                                     BaseSettings, SQLAlchemy DeclarativeBase/
@@ -34,14 +40,25 @@ Keys (docs/metrics-keys.md), each behind its flag; `<scope>` is `--scope`:
                                                     path and kind (finplat: ~250 such names;
                                                     locus: 80 of 96 findings). Dead classes,
                                                     functions and methods in the same files are
-                                                    still reported. Opt-in:
-                                                    --vulture-ignore-declarative.
+                                                    still reported, but not an unused
+                                                    `attribute` named as such a field anywhere
+                                                    (`self.updated_at = now` before save()).
+                                                    Opt-in: --vulture-ignore-declarative.
                --vulture-base SET[,SET...]          the repo's [tool.vulture] merged over
                                                     devkit/lint/vulture.toml's [tool.vulture]
-                                                    and the named decorator sets (fastapi,
-                                                    flask, pydantic, sqlalchemy), passed as
+                                                    and the named sets (fastapi, flask,
+                                                    pydantic, sqlalchemy, django), passed as
                                                     vulture's --config (lists union, the
-                                                    repo's scalars win; lint/README.md)
+                                                    repo's scalars win; lint/README.md). A
+                                                    set's `declarative` table is devkit's, not
+                                                    vulture's: the framework's own declarative
+                                                    bases (its fields are read by the framework),
+                                                    `inner` class names declarative inside one
+                                                    (Django's Meta), and `entry` bases whose
+                                                    subclasses the framework finds by itself (an
+                                                    AppConfig, a Migration: never an unused
+                                                    class). Naming the set applies them, with or
+                                                    without --vulture-ignore-declarative
   --cycles     coupling.<scope>.cycles              import cycles among the --src modules:
                                                     strongly connected components of the runtime
                                                     import graph (`if TYPE_CHECKING:` excluded,
@@ -79,8 +96,8 @@ by the ratchet or the scorecard; the JSON is the same with or without it.
   fan_in_max, fan_out_max             <path> fan_in=<n> | fan_out=<n>, the top 10 (FAN_TOP)
 
 Deterministic: the same tree gives the same numbers (sorted inputs, no timings, no paths in
-the output). Output: a flat JSON object to --out (default stdout). Exit: 0 ok, 2 a missing
-tool, an unparseable tool report or a bad call.
+the output). Output: a flat JSON object to --out (default stdout). Exit: 0 ok, 3 a missing
+tool, 2 an unparseable tool report or a bad call.
 """
 
 from __future__ import annotations
@@ -96,12 +113,13 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 EXIT_USAGE = 2
+EXIT_MISSING_TOOL = 3
 MCCABE_THRESHOLD = 10
 COGNITIVE_THRESHOLD = 15
 FAN_TOP = 10  # --list-out modules per fan key; the same in metrics/ts.mjs
@@ -114,13 +132,6 @@ VULTURE_LINE = re.compile(
     r"^(?P<file>.+?):(?P<line>\d+): "
     r"(?P<message>unused (?P<kind>[a-z]+) '(?P<name>[^']*)'|.+?) \(\d+% confidence"
 )
-# Classes whose body is a declaration (fields), by the last segment of a base's name, plus a
-# decorator or a `__tablename__` in the body. Same-file subclasses inherit the verdict.
-DECLARATIVE_BASES = frozenset({
-    "BaseModel", "BaseSettings", "DeclarativeBase", "Base", "TypedDict", "NamedTuple",
-    "Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "Protocol",
-})  # fmt: skip
-DECLARATIVE_DECORATORS = frozenset({"dataclass", "define", "frozen", "s", "attrs"})
 DECLARATIVE_KINDS = frozenset({"variable", "attribute"})
 VULTURE_FINDINGS_EXIT = 3  # vulture's "I reported something", not a failure
 # devkit/lint beside devkit/metrics (VENDOR_PATHS vendors both): the vulture base lives there.
@@ -128,7 +139,56 @@ VULTURE_BASE = Path(__file__).resolve().parent.parent / "lint" / "vulture.toml"
 
 
 class CollectorError(Exception):
-    """A missing tool, a report that cannot be read or a bad invocation (exit 2)."""
+    """A report that cannot be read or a bad invocation (exit 2)."""
+
+
+class MissingToolError(CollectorError):
+    """A tool the collector runs is not installed (exit 3): bin/metrics_collect.sh's --quick
+    skips the collector on it, a fresh worktree before its install; elsewhere it fails as 2."""
+
+
+@dataclass(frozen=True)
+class Declarative:
+    """Which classes' bodies are declarations a framework reads (DeclarativeIndex). `bases`
+    and `entry` are fnmatch globs on the last segment of a base defined outside --src; a base
+    inside --src carries its own verdict to its subclasses, across files."""
+
+    bases: frozenset[str] = frozenset()
+    decorators: frozenset[str] = frozenset()
+    tablename: bool = False  # a `__tablename__` in the body (SQLAlchemy)
+    inner: frozenset[str] = frozenset()  # nested class names declarative inside one (Meta)
+    entry: frozenset[str] = frozenset()  # also never an unused class: the framework finds it
+    # (base glob, method-name patterns): methods the framework calls on a subclass of that
+    # base outside --src (a serializer's `validate`, a view's `get_queryset`). The glob matches the
+    # base's full dotted name as imported; a pattern's `{field}` is a field the class declares
+    # (DeclarativeIndex.hook_lines). Scoped to the class: `create` or `validate_foo` elsewhere
+    # can really be dead.
+    hooks: tuple[tuple[str, frozenset[str]], ...] = ()
+
+    def __or__(self, other: Declarative) -> Declarative:
+        return Declarative(
+            self.bases | other.bases,
+            self.decorators | other.decorators,
+            self.tablename or other.tablename,
+            self.inner | other.inner,
+            self.entry | other.entry,
+            self.hooks + other.hooks,
+        )
+
+    def __bool__(self) -> bool:
+        return bool(self.bases or self.decorators or self.tablename or self.entry or self.hooks)
+
+
+# --vulture-ignore-declarative: models, settings, enums, records, protocols, dataclasses.
+GENERIC_DECLARATIVE = Declarative(
+    bases=frozenset({
+        "BaseModel", "BaseSettings", "DeclarativeBase", "Base", "TypedDict", "NamedTuple",
+        "Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "Protocol",
+    }),
+    decorators=frozenset({"dataclass", "define", "frozen", "s", "attrs"}),
+    tablename=True,
+)  # fmt: skip
+NO_DECLARATIVE = Declarative()
 
 
 @dataclass
@@ -236,6 +296,8 @@ def run_tool(cmd: list[str], *, cwd: Path, ok: Iterable[int] = (0, 1)) -> str:
     point here, so 0 and 1 (or the tool's own `ok` codes) are results; anything else fails."""
     try:
         proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
+    except FileNotFoundError as exc:
+        raise MissingToolError(f"cannot run {cmd[0]}: {exc.strerror}") from exc
     except OSError as exc:
         raise CollectorError(f"cannot run {cmd[0]}: {exc.strerror}") from exc
     if proc.returncode not in ok:
@@ -246,12 +308,12 @@ def run_tool(cmd: list[str], *, cwd: Path, ok: Iterable[int] = (0, 1)) -> str:
 
 
 def require_module(python: str, module: str, dependency: str, cwd: Path) -> None:
-    """Exit 2 naming the dev dependency when `<python> -m <module>` cannot start."""
+    """Exit 3 naming the dev dependency when `<python> -m <module>` cannot start."""
     probe = subprocess.run(
         [python, "-c", f"import {module}"], cwd=cwd, capture_output=True, text=True, check=False
     )
     if probe.returncode != 0:
-        raise CollectorError(
+        raise MissingToolError(
             f"{dependency} is not importable under {python}; add it to the dev dependencies "
             f"(the collector runs under the repo's own interpreter: `uv run ... python "
             f"devkit/metrics/python.py`)"
@@ -315,7 +377,7 @@ def collect_cognitive(
     exe = Path(shutil.which(python) or python)
     complexipy = exe.parent / "complexipy"
     if not complexipy.exists():
-        raise CollectorError(
+        raise MissingToolError(
             f"complexipy is not installed beside {python} (expected {complexipy}); add "
             "complexipy to the dev dependencies"
         )
@@ -403,8 +465,16 @@ def _read_toml(path: Path) -> dict[str, Any]:
         raise CollectorError(f"{path} is not valid TOML: {exc}") from exc
 
 
-def _own_vulture(root: Path) -> dict[str, Any]:
-    """The repo's [tool.vulture] ({} without one)."""
+def _own_vulture(root: Path, config: Path | None) -> dict[str, Any]:
+    """The repo's [tool.vulture]: from --vulture-config, which must hold the table, else from
+    <root>/pyproject.toml ({} without one)."""
+    if config is not None:
+        if not config.is_file():
+            raise CollectorError(f"--vulture-config {config} does not exist")
+        table = _read_toml(config).get("tool", {}).get("vulture")
+        if not isinstance(table, dict):
+            raise CollectorError(f"--vulture-config {config} has no [tool.vulture] table")
+        return table
     pyproject = root / "pyproject.toml"
     if not pyproject.exists():
         return {}
@@ -424,8 +494,9 @@ def merge_config(base: Any, own: Any) -> Any:
     return own
 
 
-def vulture_base_config(root: Path, sets: list[str]) -> dict[str, Any]:
-    """lint/vulture.toml's [tool.vulture] plus the named [sets.*], under the repo's own."""
+def vulture_base(sets: list[str]) -> tuple[dict[str, Any], Declarative]:
+    """lint/vulture.toml's [tool.vulture] plus the named [sets.*] (the repo's own config goes
+    over it), and the sets' `declarative` tables, which are devkit's and never reach vulture."""
     doc = _read_toml(VULTURE_BASE)
     available = doc.get("sets", {})
     unknown = [name for name in sets if name not in available]
@@ -435,9 +506,20 @@ def vulture_base_config(root: Path, sets: list[str]) -> dict[str, Any]:
             f"devkit/lint/vulture.toml has {', '.join(sorted(available))}"
         )
     base = dict(doc["tool"]["vulture"])
+    rules = NO_DECLARATIVE
     for name in sets:
-        base = merge_config(base, available[name])
-    return merge_config(base, _own_vulture(root))
+        overlay = dict(available[name])
+        table = overlay.pop("declarative", {})
+        rules |= Declarative(
+            bases=frozenset(table.get("bases", [])),
+            inner=frozenset(table.get("inner", [])),
+            entry=frozenset(table.get("entry", [])),
+            hooks=tuple(
+                (glob, frozenset(names)) for glob, names in table.get("hooks", {}).items()
+            ),
+        )
+        base = merge_config(base, overlay)
+    return base, rules
 
 
 def _toml_value(value: object) -> str:
@@ -480,14 +562,35 @@ def dotted_name(node: ast.expr) -> str | None:
     return ".".join(reversed(parts))
 
 
-def _declares_tablename(node: ast.ClassDef) -> bool:
-    for stmt in node.body:
-        targets = stmt.targets if isinstance(stmt, ast.Assign) else []
-        if isinstance(stmt, ast.AnnAssign):
-            targets = [stmt.target]
-        if any(isinstance(t, ast.Name) and t.id == "__tablename__" for t in targets):
-            return True
-    return False
+def _assigned(body: list[ast.stmt]) -> Iterator[tuple[str, ast.expr | None]]:
+    """(name, value) of each plain or annotated assignment to a bare name in <body>."""
+    for stmt in body:
+        if isinstance(stmt, ast.Assign):
+            yield from ((t.id, stmt.value) for t in stmt.targets if isinstance(t, ast.Name))
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            yield stmt.target.id, stmt.value
+
+
+def _body_names(node: ast.ClassDef) -> frozenset[str]:
+    """The names a class body assigns (`seq = models.BigAutoField()`, `name: str`)."""
+    return frozenset(name for name, _ in _assigned(node.body))
+
+
+def _meta_fields(node: ast.ClassDef) -> frozenset[str] | None:
+    """The field names an inner `class Meta` lists in `fields = [...]` (a ModelSerializer's or
+    ModelForm's); None when Meta takes every model field (`"__all__"`, or `exclude`), which a
+    hook's `{field}` then cannot narrow."""
+    listed: set[str] = set()
+    for meta in (s for s in node.body if isinstance(s, ast.ClassDef) and s.name == "Meta"):
+        for name, value in _assigned(meta.body):
+            if name == "exclude" or (
+                name == "fields" and isinstance(value, ast.Constant) and value.value == "__all__"
+            ):
+                return None
+            if name == "fields" and isinstance(value, (ast.List, ast.Tuple)):
+                strings = (e for e in value.elts if isinstance(e, ast.Constant))
+                listed.update(e.value for e in strings if isinstance(e.value, str))
+    return frozenset(listed)
 
 
 @dataclass
@@ -496,6 +599,11 @@ class _ClassDecl:
     bases: list[str]  # qualified where an import or a local class says so, else as written
     decorators: set[str]
     tablename: bool
+    name: str
+    outer: str | None  # the enclosing class's qname, for Declarative.inner
+    fields: frozenset[str]  # the names its body assigns
+    methods: dict[str, int]  # its own methods' names -> their `def` line, vulture's line
+    meta_fields: frozenset[str] | None  # its Meta.fields list; None: every model field
 
 
 class _FileScan(ast.NodeVisitor):
@@ -539,11 +647,21 @@ class _FileScan(ast.NodeVisitor):
         qname = ".".join([self.module, *self._stack, node.name])
         bases = [self._resolve(d) for d in (_dotted(b) for b in node.bases) if d]
         decorators = {d.rsplit(".", 1)[-1] for d in (_dotted(d) for d in node.decorator_list) if d}
+        fields = _body_names(node)
         self.classes[qname] = _ClassDecl(
             (node.lineno, node.end_lineno or node.lineno),
             bases,
             decorators,
-            _declares_tablename(node),
+            "__tablename__" in fields,
+            node.name,
+            ".".join([self.module, *self._stack]) if self._stack else None,
+            fields,
+            {
+                stmt.name: stmt.lineno
+                for stmt in node.body
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+            },
+            _meta_fields(node),
         )
         self.spans.append((node.lineno, node.end_lineno or node.lineno, qname))
         self._stack.append(node.name)
@@ -562,13 +680,18 @@ class DeclarativeIndex:
     """Which lines of which file are a field of a declarative class: every class in the --src
     files is scanned once, then verdicts propagate along bases until nothing changes, so a
     `class Account(UserModel)` is declarative because `UserModel(Model)` and `Model(Base)` and
-    `Base(DeclarativeBase)` are, across files. A file vulture names outside --src ([tool.vulture]
-    paths) is scanned on demand against the same index."""
+    `Base(DeclarativeBase)` are, across files. collect_vulture passes --src and [tool.vulture]
+    paths, so field_names() is whole before the first finding; a file vulture names outside
+    both is scanned on demand against the same index. `entry` is a second verdict on the same
+    walk: a class the framework finds by itself, whose own `unused class` finding is dropped."""
 
-    def __init__(self, root: Path, src: list[str]) -> None:
+    def __init__(self, root: Path, src: list[str], rules: Declarative) -> None:
         self.root = root
+        self.rules = rules
         self.scans: dict[str, _FileScan] = {}  # repo-relative posix path -> scan
         self.verdict: dict[str, bool] = {}  # class qname -> declarative
+        self.entry: dict[str, bool] = {}  # class qname -> found by the framework
+        self._hooked: dict[str, set[int]] = {}  # file -> its hook lines (hook_lines)
         for rel in source_files(root, src):
             self._scan(rel)
         self._settle()
@@ -588,22 +711,77 @@ class DeclarativeIndex:
 
     def _settle(self) -> None:
         classes = {q: d for scan in self.scans.values() for q, d in scan.classes.items()}
+        rules = self.rules
         for qname, decl in classes.items():
             self.verdict.setdefault(
-                qname, bool(decl.decorators & DECLARATIVE_DECORATORS or decl.tablename)
+                qname,
+                bool(decl.decorators & rules.decorators or (rules.tablename and decl.tablename)),
             )
+            self.entry.setdefault(qname, False)
+        declarative = rules.bases | rules.entry  # a class the framework finds, it also reads
+
+        def inherits(decl: _ClassDecl, verdict: dict[str, bool], globs: frozenset[str]) -> bool:
+            return any(
+                verdict.get(base)
+                or (base not in classes and _matches(base.rsplit(".", 1)[-1], globs))
+                for base in decl.bases
+            )
+
         changed = True
         while changed:
             changed = False
             for qname, decl in classes.items():
+                if not self.entry[qname] and inherits(decl, self.entry, rules.entry):
+                    self.entry[qname] = changed = True
                 if self.verdict[qname]:
                     continue
-                for base in decl.bases:
-                    if self.verdict.get(base) or (
-                        base not in classes and base.rsplit(".", 1)[-1] in DECLARATIVE_BASES
-                    ):
-                        self.verdict[qname] = changed = True
-                        break
+                inner = decl.name in rules.inner and self.verdict.get(decl.outer or "", False)
+                if inner or inherits(decl, self.verdict, declarative):
+                    self.verdict[qname] = changed = True
+
+    def entry_lines(self, file: str) -> set[int]:
+        """The `class` lines of the framework-found classes in <file>: vulture's line for an
+        unused class."""
+        scan = self.scans.get(file) or self._scan(Path(file))
+        if scan is None:
+            return set()
+        if any(q not in self.entry for q in scan.classes):
+            self._settle()
+        return {decl.span[0] for q, decl in scan.classes.items() if self.entry.get(q)}
+
+    def field_names(self) -> frozenset[str]:
+        """The fields of every declarative class scanned so far, inner classes (Meta) left out:
+        `self.updated_at = now` before `save(update_fields=[...])` writes a field the framework
+        persists, which vulture reads as an unused attribute. Matched by name, as vulture
+        itself matches a use to a definition."""
+        return frozenset(
+            name
+            for scan in self.scans.values()
+            for qname, decl in scan.classes.items()
+            if self.verdict.get(qname) and not (decl.outer and decl.name in self.rules.inner)
+            for name in decl.fields
+        )
+
+    def hook_lines(self, file: str) -> set[int]:
+        """The `def` lines in <file> of the methods a Declarative.hooks entry names on a class
+        that inherits its base, through classes in the index, across files. Once per file: the
+        index is whole before the first finding (collect_vulture scans every vulture path)."""
+        if file in self._hooked:
+            return self._hooked[file]
+        scan = self.scans.get(file) or self._scan(Path(file))
+        lines: set[int] = set()
+        if scan is not None and self.rules.hooks:
+            classes = {q: d for s in self.scans.values() for q, d in s.classes.items()}
+            for qname, decl in scan.classes.items():
+                outside, declared = _lineage(qname, classes)
+                for glob, patterns in self.rules.hooks:
+                    if any(fnmatch.fnmatchcase(base, glob) for base in outside):
+                        lines.update(
+                            at for name, at in decl.methods.items()
+                            if any(_hook_names(name, p, declared) for p in patterns)
+                        )  # fmt: skip
+        self._hooked[file] = lines
+        return lines
 
     def lines(self, file: str) -> set[int]:
         """Lines whose innermost class or function scope is a declarative class body: a field
@@ -626,6 +804,65 @@ class DeclarativeIndex:
         return lines
 
 
+def _lineage(
+    qname: str, classes: dict[str, _ClassDecl]
+) -> tuple[set[str], frozenset[str] | None]:
+    """(the full dotted names of the bases outside the index that <qname> inherits, through the
+    classes inside it; the fields it and those classes declare, None for every field). A base
+    from a module outside the index keeps its own dotted name (`cookbook.models.Base`), so it
+    is no framework base unless a hook's glob names that module."""
+    outside: set[str] = set()
+    declared: set[str] = set()
+    every = False
+    todo, seen = [qname], set()
+    while todo:
+        current = todo.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        decl = classes[current]
+        declared |= decl.fields
+        if decl.meta_fields is None:
+            every = True
+        else:
+            declared |= decl.meta_fields
+        for base in decl.bases:
+            if base in classes:
+                todo.append(base)
+            else:
+                outside.add(base)
+    return outside, None if every else frozenset(declared)
+
+
+def _hook_names(name: str, pattern: str, declared: frozenset[str] | None) -> bool:
+    """Whether method <name> is the hook <pattern> names: an fnmatch glob, or one holding
+    `{field}`, which matches only a field the class declares (any, when <declared> is None)."""
+    head, placeholder, tail = pattern.partition("{field}")
+    if not placeholder:
+        return fnmatch.fnmatchcase(name, pattern)
+    if len(name) <= len(head) + len(tail) or not (name.startswith(head) and name.endswith(tail)):
+        return False
+    return declared is None or name[len(head) : len(name) - len(tail)] in declared
+
+
+def _matches(name: str, globs: frozenset[str]) -> bool:
+    return any(fnmatch.fnmatchcase(name, glob) for glob in globs)
+
+
+def _framework_reads(
+    index: DeclarativeIndex | None, file: str, line: int, kind: str | None, name: str | None
+) -> bool:
+    """A finding the framework uses: a declarative class's field, a write to one anywhere, a
+    hook method it calls on a subclass of its base, or a class it finds itself."""
+    if index is None:
+        return False
+    if kind in DECLARATIVE_KINDS:
+        return line in index.lines(file) or (kind == "attribute" and name in index.field_names())
+    if kind == "method":
+        return line in index.hook_lines(file)
+    return kind == "class" and line in index.entry_lines(file)
+
+
 def collect_vulture(
     python: str,
     root: Path,
@@ -634,10 +871,16 @@ def collect_vulture(
     *,
     keep_declarative: bool,
     base_sets: list[str] | None,
+    config_file: Path | None = None,
     excluded: Exclusions = NO_EXCLUSIONS,
 ) -> Collected:
     require_module(python, "vulture", "vulture", root)
-    config = _own_vulture(root) if base_sets is None else vulture_base_config(root, base_sets)
+    config = _own_vulture(root, config_file)
+    rules = NO_DECLARATIVE if keep_declarative else GENERIC_DECLARATIVE
+    if base_sets is not None:
+        base, set_rules = vulture_base(base_sets)
+        config = merge_config(base, config)
+        rules |= set_rules
     # With [tool.vulture] paths, vulture reads its own configuration (paths, whitelist,
     # min_confidence); passing paths would override that. Without them, the --src dirs.
     paths = [] if "paths" in config else src
@@ -646,8 +889,8 @@ def collect_vulture(
         cmd = [python, "-m", "vulture", *extra, *paths]
         return run_tool(cmd, cwd=root, ok=(0, VULTURE_FINDINGS_EXIT))
 
-    if base_sets is None:
-        out = vulture()
+    if base_sets is None and config_file is None:
+        out = vulture()  # vulture reads <root>/pyproject.toml itself
     else:
         # vulture resolves the config's paths against its working directory (--root), not the
         # config file's, so the merged file lives outside the repo.
@@ -655,7 +898,11 @@ def collect_vulture(
             merged = Path(tmp) / "pyproject.toml"
             merged.write_text(vulture_toml(config), encoding="utf-8")
             out = vulture("--config", str(merged))
-    index = None if keep_declarative else DeclarativeIndex(root, src)
+    # Every path vulture reads, not only --src: a model under [tool.vulture] paths must be in
+    # the index before the first finding is judged, or field_names() would depend on the
+    # order of vulture's output (a write judged before its model's file was scanned).
+    scanned = [*src, *config.get("paths", [])]
+    index = DeclarativeIndex(root, scanned, rules) if rules else None
     found: list[tuple[str, int, str]] = []
     for line in out.splitlines():
         if not line.strip():
@@ -663,9 +910,10 @@ def collect_vulture(
         match = VULTURE_LINE.match(line)
         if match is None:
             raise CollectorError(f"unparseable vulture line: {line!r}")
-        if index is not None and match["kind"] in DECLARATIVE_KINDS:
-            if int(match["line"]) in index.lines(match["file"]):
-                continue
+        if _framework_reads(
+            index, match["file"], int(match["line"]), match["kind"], match["name"]
+        ):
+            continue
         path = shown(root, match["file"])
         if not excluded.keeps(path):
             continue
@@ -1009,7 +1257,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vulture-base",
         metavar="SET[,SET...]",
-        help="merge devkit/lint/vulture.toml and these decorator sets under [tool.vulture]",
+        help="merge devkit/lint/vulture.toml and these framework sets under [tool.vulture]",
+    )
+    parser.add_argument(
+        "--vulture-config",
+        metavar="FILE",
+        help="the repo's [tool.vulture], when --root's pyproject.toml is not the repo's own",
     )
     parser.add_argument(
         "--exclude",
@@ -1019,7 +1272,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="root-relative fnmatch glob of production files to leave out of every key; repeatable",
     )
     parser.add_argument("--cycles", action="store_true", help="AST import cycles")
-    parser.add_argument("--fan", action="store_true", help="fan-in and fan-out maxima over the runtime import graph")
+    parser.add_argument(
+        "--fan", action="store_true", help="fan-in and fan-out maxima over the runtime import graph"
+    )
     parser.add_argument(
         "--list-out",
         metavar="FILE",
@@ -1038,8 +1293,12 @@ def collect(args: argparse.Namespace) -> Collected:
             raise CollectorError(f"--src {entry} is not a directory or .py module under {root}")
     if SCOPE.fullmatch(args.scope) is None:
         raise CollectorError(f"--scope {args.scope!r} must match [A-Za-z0-9_-]+")
-    if args.vulture_base is not None and not args.vulture:
-        raise CollectorError("--vulture-base needs --vulture")
+    for flag, value in (
+        ("--vulture-base", args.vulture_base),
+        ("--vulture-config", args.vulture_config),
+    ):
+        if value is not None and not args.vulture:
+            raise CollectorError(f"{flag} needs --vulture")
     if not (args.mccabe or args.cognitive or args.vulture or args.cycles or args.fan):
         raise CollectorError(
             "nothing to collect: pass --mccabe, --cognitive, --vulture, --cycles or --fan"
@@ -1058,6 +1317,7 @@ def collect(args: argparse.Namespace) -> Collected:
                 args.python, root, args.src, args.scope,
                 keep_declarative=not args.vulture_ignore_declarative,
                 base_sets=None if args.vulture_base is None else _set_names(args.vulture_base),
+                config_file=None if args.vulture_config is None else Path(args.vulture_config),
                 excluded=excluded,
             )
         )  # fmt: skip
@@ -1084,10 +1344,7 @@ def findings_text(findings: dict[str, list[str]]) -> str:
     """--list-out's bytes: `# <key>` then its lines, keys sorted, keys without findings left
     out, so nothing over any threshold is an empty file. Same format as metrics/_lib.mjs."""
     lines = [
-        line
-        for key in sorted(findings)
-        if findings[key]
-        for line in (f"# {key}", *findings[key])
+        line for key in sorted(findings) if findings[key] for line in (f"# {key}", *findings[key])
     ]
     return "".join(f"{line}\n" for line in lines)
 
@@ -1106,7 +1363,7 @@ def main(argv: list[str] | None = None) -> int:
             _write(Path(args.list_out), findings_text(collected.findings))
     except CollectorError as exc:
         print(f"metrics/python.py: {exc}", file=sys.stderr)
-        return EXIT_USAGE
+        return EXIT_MISSING_TOOL if isinstance(exc, MissingToolError) else EXIT_USAGE
     return 0
 
 

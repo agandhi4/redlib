@@ -1,0 +1,8 @@
+{
+  "name": "devkit-metrics-tools",
+  "private": true,
+  "description": "The npm tools devkit's collectors run for every repo (jscpd for metrics/jscpd.mjs); bin/npm_tool.sh installs this lockfile once per machine. Renovate updates it here, in devkit; a consumer's vendored copy is devkit-sync's (renovate/default.json disables devkit/**).",
+  "devDependencies": {
+    "jscpd": "5.4.2"
+  }
+}

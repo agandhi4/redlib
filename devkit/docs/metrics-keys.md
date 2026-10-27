@@ -67,7 +67,10 @@ floored runner, written after a command that passed (an over-budget or under-flo
 writes them). Two domains because the directions differ: a tier only gets faster, and the count
 of tests that ran only goes down in the PR that removes tests, which is what a `higher` bound
 plus the rebaseline label already enforce. The seconds are as noisy as `gate.*`, so a tracked
-bound gets headroom by hand; the counts are deterministic and can use `tighten`.
+bound gets headroom by hand. The counts are the tiers' floors (`metrics_ratchet.py`, Floors):
+`tighten` seeds each one without `SEED=1` (`check` prints an unseeded one `UNSEEDED` and passes)
+and raises it once the count beats it by more than 5% (`check` fails until then), tier_guard
+reads it less 5% as the runner's floor (the gate's `check` holds it exactly), and a floor whose tier did not run in this gate is SKIPPED.
 
 ## Shared collectors (`devkit/metrics/`)
 
@@ -184,7 +187,7 @@ SEED=1 make metrics-tighten     # runs scripts/ci/metrics.conf, merges, fills th
 
 `tighten --seed` (and `rebaseline`, whose whole-file form is for a label-approved loosening
 only) fills every unset bound and seeds every snapshot key the bounds do not track
-yet (except `gate.*`, `tier.*` and `tests.*`, never seeded, and the report-only keys) with the
+yet (except `gate.*` and `tier.*`, never seeded, and the report-only keys) with the
 direction its domain fixes in the table above; a key of a domain not in that table is an error naming it, so a
 repo-specific domain is added by hand with its direction. So `{}` is a complete start: one
 `SEED=1 make metrics-tighten` tracks everything the collectors emit, and later bounds a new key

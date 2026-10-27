@@ -18,6 +18,10 @@ agent more than it catches is overhead, not standardization.
   `|| false` straight after the test, unless it is its function's last line. ci-lint holds it
   (`bin/bats_assert_check.py`, a line-level form, not a parser: grow its grammar, never a
   lexer; `--fix` appends the handler).
+- A bats file's git fixture (bare origin, clones, commits, fakes) is built once in `setup_file`
+  and copied per test (`tests/fixture_template.bash`): built per test it was a fifth of the unit
+  tier's CPU. Every `tests/*.bats` is in `tests/shard_costs.tsv`, at its share: `tests/shards.sh`
+  fails the run otherwise (`make shard-costs`, on a quiet box).
 
 ## Architecture
 Scripts in `bin/` and the shared metrics collectors in `metrics/`, vendored by consumers (the
@@ -58,11 +62,15 @@ is README.md "Architecture". Invariants of the design:
   per machine (`GATE_REMOTE_HOST` in `~/.config/devkit/gate.env`), never per repo, except a plan's
   literal `GATE_REMOTE=0` for a gate only a Mac can run.
 - Fail loudly on a missing tool (`flock`, `gh`) with the install hint; never degrade silently.
+- Test work on the box queues in one place: `bin/_slot_lib.sh`'s pool at its fixed path, every gate
+  job and hand-run tier admitted for its cost. A new entry point that runs suites goes through it
+  (`slot_acquire`), never its own lock; a job the cost table misprices gets a plan `GATE_JOB_COSTS` entry.
 - A pytest or vitest tier must not rot with real time: the plan reruns it shifted (`GATE_JOBS_CLOCK`, README
   "Clock shift"), and what a shift cannot reach is a `scripts/ci/clock_shift.conf` line with its reason.
 - `ci-metrics` is `bin/metrics_collect.sh` over the repo's `scripts/ci/metrics.conf`, run as
-  the gate's last job and nowhere else (not a hook, not Actions). Bounds never track `gate.*`,
-  `tier.*` or `tests.*`; a collector that cannot run is exit 2, never a silent skip.
+  the gate's last job and nowhere else (not a hook, not Actions). Bounds never track `gate.*` or
+  `tier.*`; `tests.<tier>.<runner>` is the tier's floor, which tier_guard reads and tighten raises
+  (never a Makefile number); a collector that cannot run is exit 2, never a silent skip.
 
 ## Commands
 ```sh

@@ -94,7 +94,7 @@
 //   fan_in_max, fan_out_max   <path> fan_in=<n> | fan_out=<n>, the top 10 (FAN_TOP)
 //
 // Deterministic: same tree, same numbers (sorted inputs, no timings, no paths). Exit: 0 ok,
-// 2 a missing tool, a report that cannot be read or a bad call.
+// 3 a missing tool, 2 a report that cannot be read or a bad call.
 import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix, relative, resolve } from "node:path";
@@ -102,6 +102,7 @@ import { parseArgs } from "node:util";
 
 import {
   CollectorError,
+  MissingToolError,
   SCOPE,
   fail,
   globToRegExp,
@@ -310,7 +311,7 @@ function identifierAt(opts, rel, line, column, cache) {
 
 function collectCognitive(opts, files) {
   if (!existsSync(join(opts.root, "node_modules", "eslint-plugin-sonarjs", "package.json"))) {
-    throw new CollectorError(
+    throw new MissingToolError(
       `eslint-plugin-sonarjs is not installed in ${opts.root}/node_modules; add it to the dev dependencies`,
     );
   }
@@ -625,7 +626,7 @@ try {
   if (opts["list-out"] !== undefined) writeFindings(findings, opts["list-out"]);
 } catch (err) {
   if (err instanceof CollectorError || (typeof err.code === "string" && err.code.startsWith("ERR_PARSE_ARGS"))) {
-    fail(SCRIPT, err.message);
+    fail(SCRIPT, err);
   }
   throw err;
 }

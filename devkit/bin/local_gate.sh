@@ -20,6 +20,8 @@
 #     GATE_STATE_NAME=<name>                 required; state in $XDG_STATE_HOME/<name>
 #     GATE_WORKTREE_PREFIX=wt-               optional; worktree dir is <prefix><pr>
 #     GATE_ALLOW_FORKS=0|1                   optional; default 0: a fork PR is refused before fetch
+#     GATE_JOB_COSTS="<job>=<units> ..."     optional; a job's admission cost where the default
+#                                            table guesses wrong ("Concurrency")
 #     gate_plan()                            required; called with the merged worktree ready
 #     gate_cleanup()                         optional; runs in the EXIT trap (containers, images)
 #   Available to the plan: $PR $WT $ROOT $CHANGED $HEAD_SHA $MAIN_SHA $LOGDIR, the areas the
@@ -56,18 +58,27 @@
 #
 # Budgets (owner directive 2026-10-13: whole gate <= 10 min, no job > 5 min): GATE_JOB_BUDGET_MINUTES
 #   (default 5) per job and GATE_BUDGET_MINUTES (default 10) for the whole gate, counted from the
-#   moment a slot is held (waiting for a slot is not the PR's cost). Decimals allowed; 0 disables.
+#   moment the PR's run lock is held, less every second a job queued for capacity ("Concurrency":
+#   waiting is the box's cost, not the PR's). Decimals allowed; 0 disables.
 #   An over-budget job still runs to completion (budgets never kill real work; the watchdog
 #   handles hangs) and then prints GATE <job> OVERBUDGET (<n>s > <budget>s); the whole gate prints
 #   GATE total OVERBUDGET (...). Either makes the verdict FAIL, with the job named in the status
 #   description, unless GATE_BUDGET_ENFORCE=0 (default 1), which keeps the lines and the verdict
 #   PASS: for a queue adopting budgets before its suites fit.
-#   Under load a JOB's budget stretches (bin/_load_lib.sh: min(1-minute load / cores, 2), sampled
-#   when the job starts and when it ends, the larger kept, only above 1.0), and its PASS|FAIL and
-#   OVERBUDGET lines then carry `; budget 300 s ×1.6 (load 2.0 at start, 13.1 at end on 8 cpus)
-#   → 480 s` inside their parentheses. closet's db
+#   Under load a JOB's budget stretches (bin/_load_lib.sh: min(max(1-minute load / cores, gate
+#   slots held), 2), sampled when the job starts and when it ends, the larger kept, only above
+#   1.0), and its PASS|FAIL and OVERBUDGET lines then carry `; budget 300 s ×1.6 (load 2.0 at
+#   start, 13.1 at end on 8 cpus) → 480 s` inside their parentheses (`; 2 gate slots held` before
+#   its `)` when more than one was: the load lags a neighbour gate's bursts). closet's db
 #   tier ran 61-65 s alone and failed 110 s twice at load ~13 on 8 cores (closet #410). The
-#   whole-gate budget is not scaled: it is the owner's wall-clock promise, load or not.
+#   whole-gate budget is not scaled by load: it is the owner's wall-clock promise, load or not.
+#   It scales with what the plan ran (devkit decisions 2026-10-26): GATE_BUDGET_MINUTES is the
+#   floor, raised to the sum, over the jobs that ran, of twice each one's typical seconds (the
+#   median of its newest 10 passing records in this repo's run logs, bin/gate_record.py
+#   typical), capped at the job budget, or the job budget itself for a job with fewer than 3.
+#   locus #155 ran build-ios and unit-ios beside its usual 12 jobs, every one passing, and
+#   failed 600 s at 623-798 s. A total over the floor reads the raised budget and prints
+#   `GATE note: whole-gate budget <b>s for <n> jobs ...`; one over that names the same figure.
 #   The job's start-sample factor reaches its make as DEVKIT_LOAD_SCALE ("1" unscaled), and
 #   tier_guard.sh re-exports its own: lint/vitest.base.mjs multiplies vitest's testTimeout and
 #   hookTimeout by it (finplat #689's frontend-unit timed out at load 169 on 10 cores).
@@ -92,41 +103,42 @@
 #   README "Gate record". A fork refusal ends before the log dir and leaves no record. The
 #   recorder never changes the verdict or exit code; a failure to write is one stderr line.
 #
-# Concurrency: GATE_SLOTS (an integer >= 1; default ceil(cores / 4), at least 1, from
-#   _load_lib.sh's devkit_ncpu) is how many gates may run on this machine at once, across every
-#   repo. With 1 the lock file is exactly $GATE_LOCK, the file the merge queues and linux-box
-#   have always shared; with N > 1 the slots are $GATE_LOCK.1 .. $GATE_LOCK.N. The holder writes
-#   `<repo>#<pr> pid <pid> since <utc>` into its slot file; a waiting gate opens slots for append,
-#   so it never truncates a holder's line. A gate takes the first free slot, else prints
-#   `GATE waiting for a gate slot (<n> running: <repo>#<pr>, ...)` at once and every 30 s,
-#   counting every held $GATE_LOCK* file whatever its owner's GATE_SLOTS, and polls each second.
-#   1 was the 2026-10-05 rule (overlapping full suites caused load-induced timing-test failures);
-#   load-stretched budgets and test timeouts (DEVKIT_LOAD_SCALE, "Budgets") since make a quarter of
-#   the cores the default (2026-10-20). Locks are flock(1), released by the kernel when a gate
-#   dies, so a crashed gate never leaves a stale slot. Gates run with different GATE_SLOTS lock
-#   different files and do not bound each other: set it once per machine (gate.env below).
-#   The pool is bin/_slot_lib.sh's, shared with tier_guard.sh: a tier run by hand outside a gate
-#   takes a slot too (holder `<repo>:<tier>`). The gate exports DEVKIT_SLOT_HOLDER=<its pid> to
-#   its jobs, so a tier inside a job runs on the gate's slot instead of waiting for a second.
-#   Two gates of ONE PR never overlap, whatever GATE_SLOTS: before its slot a gate locks
+# Concurrency (devkit decisions 2026-10-26): every job is admitted to the machine-wide pool
+#   (bin/_slot_lib.sh, a fixed path every vendored copy and the nightly job share) for its cost
+#   before it runs and gives the units back when it ends; the gate holds nothing between jobs.
+#   GATE_CAPACITY (an integer >= 1; default max(4, ceil(cores / 2))) is the pool's size. A job's
+#   cost is its GATE_JOB_COSTS entry, else the heaviest word of its make target: 1 for lint,
+#   docs, deps and metrics, 3 for Docker (db, image, smoke, e2e), 4 for native (ios, swift), 2
+#   for anything else (a test tier). Waiters queue in order of their gate's start, so a running
+#   gate's next job goes ahead of a newer gate's first; while it waits a job prints, at once and
+#   every 30 s,
+#     GATE waiting for capacity: <repo>#<pr> <job> needs <c> of <cap>, <u> in use (<holder> <c>,
+#       ...)[; queued behind <repo>#<pr> <job>, ...]
+#   and its PASS|FAIL line then carries `; queued <n>s` inside the parentheses. A holder whose pid
+#   died is reclaimed by the next look at the pool. A tier run by hand outside a gate is admitted
+#   too (holder `<repo>:<tier>`); a job's make gets DEVKIT_SLOT_HOLDER=<the gate's pid>, so a tier
+#   inside it runs on the job's units instead of asking again. 1 gate at a time was the
+#   2026-10-05 rule, GATE_SLOTS equal slots per whole gate the 2026-10-20 one (gate.env may still
+#   hold it for older vendored copies; this file ignores it).
+#   Two gates of ONE PR never overlap: before its first job a gate locks
 #   $STATE/pr-<pr>.lock, printing `GATE waiting for another gate of PR #<pr> (pid <pid> since
 #   <utc>)` at once and every 30 s, since both would share refs/gate/pr-<pr>, the worktree and the
 #   run numbers under logs/<pr>/ (2026-10-21).
 #
-# Load: GATE_LOAD_MAX (default unset: no check; a number, decimals allowed). Before taking a
-#   slot, the gate waits while EITHER the 1- or 5-minute load average exceeds it, printing one
+# Load: GATE_LOAD_MAX (default unset: no check; a number, decimals allowed). Before its run
+#   lock, the gate waits while EITHER the 1- or 5-minute load average exceeds it, printing one
 #   `GATE waiting: load 1m=<x> 5m=<y> > <max>` line per minute. After GATE_LOAD_WAIT_MINUTES
 #   (default 30; decimals allowed) it proceeds anyway with a `GATE note:`; load alone never
 #   fails a gate, and an unreadable load is a note too. Both minutes count: closet's db tier
 #   failed twice at a 5-minute load of ~30 that had just dipped under 12 on the 1-minute figure
-#   (another repo's Xcode builds, 2026-10-16). The wait is before the slot and the budget clock.
+#   (another repo's Xcode builds, 2026-10-16). The wait is before the budget clock.
 #   Load is `sysctl -n vm.loadavg` (macOS) or /proc/loadavg (Linux), read by _load_lib.sh. Test
 #   hooks, environment only: DEVKIT_LOADAVG_CMD (a command printing "<1m> <5m> ..."),
 #   DEVKIT_NCPU and GATE_LOAD_POLL_SECONDS (default 60).
 #
 # Expected head: GitHub moves refs/pull/<n>/head a few seconds after a push, so a gate started
 #   right after `git push` gated the previous head and posted its verdict there (Orbit #80,
-#   finplat #657). With --expect-head, before taking a slot the gate reads the pull ref
+#   finplat #657). With --expect-head, before its run lock the gate reads the pull ref
 #   (`git ls-remote`, read-only) and, while it names another commit, prints one
 #   `GATE waiting: ...` line and re-polls every GATE_HEAD_POLL_SECONDS (default 5) for up to
 #   GATE_HEAD_WAIT_SECONDS (default 60). After the fetch a head that is still not the expected
@@ -139,11 +151,11 @@
 #   DEVKIT_ALLOW_BATTERY=1 overrides).
 #
 # Per-machine defaults: ${XDG_CONFIG_HOME:-$HOME/.config}/devkit/gate.env, if present, holds
-#   GATE_SLOTS, GATE_SILENCE_SECONDS, GATE_CLEANUP_SECONDS, GATE_JOB_BUDGET_MINUTES, GATE_BUDGET_MINUTES,
+#   GATE_CAPACITY, GATE_SILENCE_SECONDS, GATE_CLEANUP_SECONDS, GATE_JOB_BUDGET_MINUTES, GATE_BUDGET_MINUTES,
 #   GATE_BUDGET_ENFORCE, GATE_LOAD_MAX and GATE_LOAD_WAIT_MINUTES `KEY=value` lines (blank lines and full-line `#` comments
 #   allowed; GATE_REMOTE* lines are gate.sh's and skipped). It is parsed, never sourced: any other
 #   key, quoting, `export` or other shell syntax is a usage error (exit 2) naming the line. An explicit environment variable wins over the
-#   file, so `GATE_SLOTS=1 make gate` still forces one slot. Asking every agent to set
+#   file, so `GATE_CAPACITY=1 make gate` still runs one job at a time. Asking every agent to set
 #   GATE_SLOTS did not stick (eight lanes queued >1 h serially, 2026-10-13); a file does. The
 #   merge queues and linux-box never create it, so they keep the defaults.
 #
@@ -188,9 +200,9 @@ done
 [ -n "$PR" ] || { usage >&2; exit 2; }
 GATE_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 readonly GATE_STARTED
-# Awake from here to exit, the slot wait included: a sleeping box stalls every queued gate too
+# Awake from here to exit, the capacity waits included: a sleeping box stalls every queued gate too
 # (bin/_awake_lib.sh; Linux: run the gate under systemd-inhibit, as that file says). A Mac that
-# no assertion keeps awake (lid closed on battery) is refused first, before a slot or a status.
+# no assertion keeps awake (lid closed on battery) is refused first, before any lock or a status.
 # shellcheck source=bin/_awake_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_awake_lib.sh"
 ! devkit_sleep_forced || { echo "local_gate: $DEVKIT_SLEEP_REASON (DEVKIT_ALLOW_BATTERY=1 overrides)" >&2; exit 2; }
@@ -233,7 +245,7 @@ readonly BUDGET_ENFORCE=${GATE_BUDGET_ENFORCE:-1}
 # shellcheck source=bin/_slot_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_slot_lib.sh"
 slot_pool_init local_gate
-readonly SLOT_LOCK SLOTS
+readonly SLOT_DIR SLOT_CAPACITY
 readonly LOAD_MAX=${GATE_LOAD_MAX:-}
 [ -z "$LOAD_MAX" ] || [[ "$LOAD_MAX" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
   || { echo "local_gate: GATE_LOAD_MAX must be a number (got '$LOAD_MAX')" >&2; exit 2; }
@@ -256,7 +268,7 @@ GATE_RECORDER=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/gate_record.py || ex
 readonly GATE_RECORDER
 # shellcheck source=/dev/null  # bin/toolchain_path.sh: toolchain_path, shared with the hooks
 . "$(dirname "${BASH_SOURCE[0]}")/toolchain_path.sh"
-# Preflight, before a slot, a status or a worktree: the skeleton's tools, devkit's python3 (the
+# Preflight, before a lock, a status or a worktree: the skeleton's tools, devkit's python3 (the
 # outcome record and every vendored tool) and the tools this checkout declares (uv for a uv.lock).
 # A box missing any is one error naming them all, not a FAIL per job (_toolchain_lib.sh).
 devkit_preflight gh git make flock -- "$ROOT" || { echo "local_gate: $DEVKIT_PREFLIGHT_ERROR" >&2; exit 2; }
@@ -271,8 +283,10 @@ GATE_ALLOW_FORKS=0   # set here, not read from the environment: only the plan ma
 # shellcheck source=bin/_timeout_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_timeout_lib.sh"
 GATE_CODE_PATHS=  # the plan's alone, never the environment's (_paths_lib.sh header)
+GATE_JOB_COSTS=   # the plan's alone too: an exported one would re-cost every repo's jobs
 # shellcheck source=/dev/null  # the repo's plan; its contract is in the header
 . "$PLAN"
+slot_costs_check local_gate
 for required in GATE_SLUG GATE_STATE_NAME; do
   [ -n "${!required:-}" ] || { echo "local_gate: $PLAN must set $required" >&2; exit 2; }
 done
@@ -365,13 +379,15 @@ wait_for_head
 wait_for_load
 
 # Two gates of one PR share $GATE_REF, $WT and the run-number pick in $PRDIR: one would remove
-# the other's worktree and both could open the same log dir. With GATE_SLOTS > 1 nothing else
-# keeps them apart, so the second waits here for the first, before it takes a pool slot.
+# the other's worktree and both could open the same log dir. Nothing else keeps them apart, so
+# the second waits here for the first, before its jobs queue for capacity.
 mkdir -p "$STATE" || { echo "local_gate: cannot create $STATE" >&2; exit 2; }
 run_lock_acquire GATE "$STATE/pr-$PR.lock" "another gate of PR #$PR"
-slot_acquire GATE "${GATE_STATE_NAME%-gate}#$PR"
-echo "GATE slot $SLOT/$SLOTS"
-readonly GATE_T0=$SECONDS   # the whole-gate budget starts once a slot is held
+echo "GATE slot capacity $SLOT_CAPACITY"
+readonly GATE_T0=$SECONDS   # the whole-gate budget starts once the PR is this run's
+GATE_ORDER=$(date +%s)      # this gate's place in the capacity queue, for every job (header)
+readonly GATE_ORDER
+QUEUED_SECS=0               # seconds this gate's jobs waited for capacity, off every budget
 
 HEAD_SHA=""
 MAIN_SHA=""
@@ -433,7 +449,7 @@ record_outcome() {
   for name in $OVER_NAMES; do over+=(--over "$name"); done
   printf '%s\n' "$JOB_OUTCOMES" | "$DEVKIT_PYTHON" -I "$GATE_RECORDER" --logdir "$LOGDIR" --runs "$STATE/runs.tsv" \
     --pr "$PR" --head "$HEAD_SHA" --main "$MAIN_SHA" --started "$GATE_STARTED" \
-    --verdict "$RUN_VERDICT" --seconds "${total:-$((SECONDS - GATE_T0))}" \
+    --verdict "$RUN_VERDICT" --seconds "${total:-$((SECONDS - GATE_T0 - QUEUED_SECS))}" \
     ${total:+--total-seconds "$total"} ${over[@]+"${over[@]}"} \
     || echo "local_gate: the outcome record for this run was not written (gate_record.py above)" >&2
 }
@@ -441,11 +457,12 @@ record_outcome() {
 cleanup() {
   # An interrupted gate must not leave a job running in the worktree it is about to remove.
   stop_job
+  slot_release
   # An interrupted gate must not leave the PR showing `pending` forever.
   if [ "$STATUS_OPEN" = 1 ]; then post_status error "Local gate interrupted before a verdict"; fi
   record_outcome
   # Bounded: a hung docker daemon made a plan's `docker rm -fv` block this trap for 12+ min
-  # while the gate held its machine-wide slot (2026-10-17).
+  # while the gate held its machine-wide slot (2026-10-17); here it still holds the PR's run lock.
   devkit_with_timeout "$CLEANUP_SECS" gate_cleanup >/dev/null 2>&1
   [ $? -ne 124 ] || echo "local_gate: gate_cleanup stopped after ${CLEANUP_SECS}s (a hung docker daemon?); containers may be left: docker ps" >&2
   git -C "$ROOT" worktree remove --force "$WT" >/dev/null 2>&1
@@ -488,26 +505,63 @@ write_gate_metrics() {
   mkdir -p "$dir" && printf '{\n%s\n}\n' "$body" >"$dir/gate.json"
 }
 
+# whole_budget: WHOLE_BUDGET_SECS for the jobs this run ran (header, Budgets) and, when it is above
+# the floor, WHOLE_BUDGET_NOTE saying how, also printed as a note. Read only for a total over the
+# floor, which the derived budget never goes below: the records' read costs a python start, and
+# gate_contract.bats runs ~200 gates. The floor alone when the typical seconds cannot be read
+# (one stderr line): a recorder failure never fails a gate.
+whole_budget() {
+  local name typ c sum=0 n=0 names typicals
+  WHOLE_BUDGET_SECS=$GATE_BUDGET_SECS WHOLE_BUDGET_NOTE=""
+  [ "$GATE_BUDGET_SECS" -gt 0 ] && [ "$TOTAL_SECS" -gt "$GATE_BUDGET_SECS" ] || return 0
+  names=$(awk '{ print $1 }' <<<"$JOB_SECONDS")
+  [ -n "$names" ] || return 0
+  # shellcheck disable=SC2086  # one argument per job name; names are [A-Za-z0-9_-]+ (job)
+  typicals=$("$DEVKIT_PYTHON" -I "$GATE_RECORDER" typical --logs "$STATE/logs" --exclude "$LOGDIR" $names) || {
+    echo "local_gate: could not read the jobs' typical seconds (gate_record.py above); whole-gate budget ${GATE_BUDGET_SECS}s" >&2
+    return 0
+  }
+  while read -r name typ; do
+    [ -n "$name" ] || continue
+    n=$((n + 1))
+    if [ "$typ" = - ]; then
+      c=$JOB_BUDGET_SECS
+    else
+      c=$((2 * typ))
+      [ "$JOB_BUDGET_SECS" = 0 ] || [ "$c" -le "$JOB_BUDGET_SECS" ] || c=$JOB_BUDGET_SECS
+    fi
+    sum=$((sum + c))
+  done <<<"$typicals"
+  [ "$sum" -gt "$GATE_BUDGET_SECS" ] || return 0
+  WHOLE_BUDGET_SECS=$sum
+  WHOLE_BUDGET_NOTE="whole-gate budget ${sum}s for $n jobs: twice each one's typical seconds, or its budget with under 3 passing runs; floor ${GATE_BUDGET_SECS}s"
+  note "$WHOLE_BUDGET_NOTE"
+}
+
 # ---- helpers for gate_plan ---------------------------------------------------------------
 job() { # <name> <make target> [VAR=val...]
-  local name=$1 t0=$SECONDS log=$LOGDIR/$1.log rc secs
-  devkit_load_scale "$JOB_BUDGET_SECS"
+  local name=$1 t0 log=$LOGDIR/$1.log rc secs queued
   local budget load_note
   shift
   if [[ ! "$name" =~ ^[A-Za-z0-9_-]+$ ]] || [ "$name" = total ]; then
     echo "local_gate: job name '$name' must match [A-Za-z0-9_-]+ and not be 'total' (it becomes the key gate.<name>.seconds)" >&2
     exit 2
   fi
+  slot_acquire GATE "${GATE_STATE_NAME%-gate}#$PR $name" "$(slot_cost "$name" "$1")" "$GATE_ORDER"
+  QUEUED_SECS=$((QUEUED_SECS + SLOT_QUEUED))
+  queued=$SLOT_QUEUED
+  t0=$SECONDS   # the job's budget starts once it is admitted
+  devkit_load_scale "$JOB_BUDGET_SECS" "$(slot_held_count)"
   # Backgrounded under `set -m` so the job leads its own process group: the watchdog can stop
   # everything under make, and a TERM to the gate runs its trap now instead of after the job.
   set -m
   # The child opens $log after it is forked; create it first so the watchdog's first size read
   # never races a missing file (it printed a `wc` error line before the job's redirect ran).
   : >"$log"
-  # 7>&- 9>&-: the PR lock and the slot stay with this process. A job's descendant that outlives
-  # the gate (a dev server) would otherwise hold both, and the PR's next gate would wait forever.
-  # A tier inside the job finds the slot through DEVKIT_SLOT_HOLDER, not the fd.
-  DEVKIT_LOAD_SCALE=$LOAD_SCALE make -C "$WT" --no-print-directory "$@" </dev/null >"$log" 2>&1 7>&- 9>&- &
+  # 7>&-: the PR lock stays with this process. A job's descendant that outlives the gate (a dev
+  # server) would otherwise hold it, and the PR's next gate would wait forever. A tier inside the
+  # job finds the job's units through DEVKIT_SLOT_HOLDER.
+  DEVKIT_SLOT_HOLDER=$$ DEVKIT_LOAD_SCALE=$LOAD_SCALE make -C "$WT" --no-print-directory "$@" </dev/null >"$log" 2>&1 7>&- &
   JOB_PGID=$!
   set +m
   if job_went_silent "$log"; then
@@ -523,8 +577,10 @@ job() { # <name> <make target> [VAR=val...]
   rc=$?
   JOB_PGID=""
   secs=$((SECONDS - t0))
-  devkit_load_rescale
+  devkit_load_rescale "$(slot_held_count)"
+  slot_release
   budget=$LOAD_BUDGET load_note=$LOAD_NOTE
+  [ "$queued" = 0 ] || load_note="${load_note:+$load_note; }queued ${queued}s"
   local verdict=fail
   if [ "$rc" = 0 ]; then
     verdict=pass
@@ -642,8 +698,10 @@ echo "GATE areas: ${GATE_AREAS:-none}"
 # ---- the repo decides what runs --------------------------------------------------------------
 gate_plan
 
-TOTAL_SECS=$((SECONDS - GATE_T0))
-check_budget total "$TOTAL_SECS" "$GATE_BUDGET_SECS"
+TOTAL_SECS=$((SECONDS - GATE_T0 - QUEUED_SECS))
+[ "$QUEUED_SECS" = 0 ] || note "jobs queued ${QUEUED_SECS}s for capacity in all; not counted in any budget"
+whole_budget
+check_budget total "$TOTAL_SECS" "$WHOLE_BUDGET_SECS" "$WHOLE_BUDGET_NOTE"
 write_gate_metrics "$TOTAL_SECS"
 if [ -n "$OVERBUDGET" ] && [ "$BUDGET_ENFORCE" = 0 ]; then
   note "over budget, not enforced (GATE_BUDGET_ENFORCE=0): $OVERBUDGET"

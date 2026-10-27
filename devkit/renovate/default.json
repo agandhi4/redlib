@@ -21,6 +21,11 @@
   },
   "packageRules": [
     {
+      "description": "A consumer's devkit/ is vendored by devkit-sync (VENDOR_PATHS), so its manifests (devkit/metrics/tools/package.json, jscpd's pin) are devkit's: a Renovate PR there would be overwritten by the next sync and fail devkit-check. devkit's own Renovate updates the source copy (devkit has no devkit/ dir).",
+      "matchFileNames": ["devkit/**"],
+      "enabled": false
+    },
+    {
       "description": "One weekly minor+patch PR per ecosystem (Renovate category: js, python, docker, ci, ...) keeps the queue short. Majors get their own PRs below.",
       "matchCategories": ["js"],
       "matchUpdateTypes": ["minor", "patch"],

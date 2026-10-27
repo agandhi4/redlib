@@ -9,6 +9,9 @@
 # This is the merge path that checks for itself; gate_bite.py counts the merges that skipped it.
 #
 # Refuses (exit 1, one `merge: refused: …` line on stderr) unless:
+#   - the plan's GATE_SLUG is origin's repo, where origin is a GitHub URL (_gh_repo_lib.sh): every
+#     gh call here names GATE_SLUG, so another slug would merge PR #<n> of another repo, a fork's
+#     parent among them (redlib-org/redlib#605, 2026-10-26). A path origin (the tests) has none;
 #   - the PR is OPEN;
 #   - its head's latest `local-gate` status is `success` (GitHub's combined status: the newest
 #     status per context), and so is every context the plan's literal
@@ -18,13 +21,29 @@
 #     just before the merge: "Codex reviewed <sha7>, 0 open threads" when codex_review.py finds
 #     Codex's completed code review of exactly this head and no blocker at all, or "Not required
 #     (<why>) for <sha7>" for a PR exempt from review below. A status something else posted
-#     (pending, failure, a fallback record) is never overwritten. Why (owner-autonomy decision,
+#     (pending, failure, a fallback record CODEX_FALLBACK=1 does not replace, below) is never
+#     overwritten. Why (owner-autonomy decision,
 #     2026-10-23): closet's agents hand-posted it after every clean Codex review.
 #   - main has not moved past the main the gate ran on: the gate's own record of this head
 #     ($XDG_STATE_HOME/<GATE_STATE_NAME>/logs/<n>/gate.json, gate_record.py main-of), else the
 #     `on main <sha>` its local-gate status names (a remote gate's record is on its host), against
 #     GitHub's main now. A moved main prints `re-gate: main moved <sha>→<sha>`: the gate tested
 #     the merge into a main that no longer exists. Neither source naming a main is a refusal.
+#     Carry: unless the gate's result carries (_merge_carry.sh carry_plan): every path but
+#     docs/decisions.md of the head's merge into main now is the gated merge's, and GitHub's
+#     merge (no union driver) conflicts at most there, both sides only appending entries. The
+#     same test runs when GitHub reads the PR as CONFLICTING on the gated main itself (a
+#     conflict the gate's union driver resolved), UNKNOWN re-read for up to MERGE_RETRY_SECONDS
+#     first (settle_mergeable: GitHub computes it lazily after a push). Just before the merge, where GitHub's merge
+#     conflicts in the log, it commits that merge onto the head (decisions_merge.py resolves the
+#     log, blank lines and date order kept), pushes it to the PR's branch, posts
+#     local-gate "Gate of <sha7> carried: only docs/decisions.md differs from its tree; on main
+#     <sha7>" and every other required success verbatim there, and merges that head; where it
+#     is clean, that merge is the checked tree, so only local-gate is posted, on the head
+#     itself. A carry refused says why: `(not carried: <why>)`. Why (2026-10-26): GitHub
+#     ignores merge=union, so any two PRs appending entries conflicted: devkit #234 re-gated 3x,
+#     closet #434/#435 both rebased. Residual: Codex reviewed the old head, so a run that fails
+#     after the push finds a Codex review of an older commit (`@codex review`, or the fallback).
 #   - Codex is not reviewing the PR, and every review thread whose first comment is Codex's is
 #     resolved (codex_review.py: its summary comment's state marker and GraphQL isResolved). A
 #     reply alone leaves a thread open: the fixer replies (fixed in <sha>, or why not), then
@@ -44,13 +63,21 @@
 #     hung, never ran, or is of an older commit refuses, unless the head's
 #     `codex-review` status is success and records a fallback review of this head: "Claude
 #     adversarial review (Codex <why>) of <sha7>", <why> one of `at limit` (claude-kit work loop
-#     §3c), `hung <N> min` or `failed`, so the record says what happened (the refusal offers the
-#     one codex_review.py's blocker names: a failure followed by Codex's usage-limit note is
-#     `at limit`, any other `failed`), or codex_gate.py --on-limit
+#     §3c), `hung <N> min` or `failed`, or codex_gate.py --on-limit
 #     self-review's "Codex unavailable (usage limit); <sha8> passed on Claude self-review" (the
-#     headless worker, owner 2026-09-27). Codex's open threads still block then, as in
-#     codex_gate.py. A head-pinned review of the head also excuses a stale Codex review: what
-#     Codex saw of an older commit adds nothing a review of the head lacks. Nor is a review
+#     headless worker, owner 2026-09-27). The <why> is Codex's observed state, never the agent's
+#     word: `CODEX_FALLBACK=1 make merge PR=<n>` (the agent ran the review; nothing else) posts
+#     the record with the <why> codex_review.py's blocker gives (gap_why: a failure, missing or
+#     stale review answered by Codex's usage-limit note is `at limit`, any other failure
+#     `failed`, a hung one `hung <its minutes now> min`), replacing a fallback record already
+#     there; a review Codex can still give (not yet posted, of an older commit) gets none. A
+#     record already on the head must agree with that state (fallback_agrees): `at limit` and
+#     the usage-limit form need a gap the note answers, `failed` a failed review, `hung <N> min`
+#     a hung one now at least N min old, N not under the plan's limit; else it is refused as
+#     contradicting it. Why (2026-10-26): hand-typed reasons were wrong, rollcall #91 "at limit"
+#     while Codex ran ~20 min, devkit #234 "hung 180 min" for 155. Codex's open threads still
+#     block then, as in codex_gate.py. A head-pinned review of the head also excuses a stale
+#     Codex review: what Codex saw of an older commit adds nothing a review of the head lacks. Nor is a review
 #     required of a Renovate or Dependabot PR whose every commit is that bot's and whose diff
 #     changes only dependency pins (_dependency_pr.py exempt: whole manifests and lockfiles,
 #     compose `image:` and Dockerfile `FROM` lines, lines under a `renovate:` comment); it prints
@@ -118,6 +145,10 @@ case "$2" in
 esac
 PR=$2
 unset DEVKIT_MERGE_VERIFIED
+case "${CODEX_FALLBACK:-}" in
+  ''|1) ;;
+  *) echo "merge: CODEX_FALLBACK must be 1 (you ran the Claude adversarial review of the head) or unset (got '$CODEX_FALLBACK')" >&2; exit 2 ;;
+esac
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
 # shellcheck source=bin/_gate_env.sh
@@ -128,6 +159,12 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
 . "$HERE/_toolchain_lib.sh"
 # shellcheck source=bin/_vendor_paths.sh  # vendoring_only, vendored_from: the devkit-sync exemption
 . "$HERE/_vendor_paths.sh"
+# shellcheck source=bin/_merge_carry.sh  # carry_plan, carry_commit: a gate across a decisions-only main
+. "$HERE/_merge_carry.sh"
+# shellcheck source=bin/_trailer_lib.sh  # devkit_commit_trailer, for the carry's merge commit
+. "$HERE/_trailer_lib.sh"
+# shellcheck source=bin/_gh_repo_lib.sh  # origin_slug, slug_same: the PR is origin's
+. "$HERE/_gh_repo_lib.sh"
 ROOT=$(git -C "$1" rev-parse --show-toplevel) || exit 2
 PLAN=${GATE_PLAN:-$ROOT/scripts/ci/gate_plan.sh}
 
@@ -142,6 +179,9 @@ extra=$(gate_plan_literal "$PLAN" GATE_MERGE_REQUIRES)
 [ -z "$extra" ] || REQUIRED="$REQUIRED ${extra//,/ }"
 
 refuse() { echo "merge: refused: $*" >&2; exit 1; }
+if origin=$(origin_slug "$ROOT") && ! slug_same "$SLUG" "$origin"; then
+  refuse "the plan's GATE_SLUG is $SLUG, not origin's repo $origin; make merge merges origin's PRs only (set GATE_SLUG=$origin)"
+fi
 # The two fallback records (header), whole, with the reviewed head last: a head SHA anywhere
 # else in the text is no record of it (#207 Codex). "Claude adversarial review (Codex <why>) of
 # <sha7>" is fallback_hint's; `at limit` was its only <why> until 2026-10-22 and is still
@@ -189,40 +229,101 @@ review_gap_hints() {
       unreviewed)
         if [ "$detail" = limit ]; then
           echo "merge:   Codex has not reviewed it: it posted its usage-limit note instead (comment '@codex review' once the limit resets). $review" >&2
-          fallback_hint "at limit"
+          fallback_hint "$kind" "$detail"
         else
           echo "merge:   Codex has not reviewed it yet: wait for its summary comment, or comment '@codex review' (a draft: mark it ready, or comment)" >&2
         fi ;;
       stale)
         if [ "$detail" = limit ]; then
           echo "merge:   Codex reviewed ${sha:0:12}, an older commit, and has posted its usage-limit note since (comment '@codex review' once the limit resets). $review" >&2
-          fallback_hint "at limit"
+          fallback_hint "$kind" "$detail"
         else
           echo "merge:   Codex reviewed ${sha:0:12}, an older commit: comment '@codex review' for this head" >&2
         fi ;;
       failed)
         if [ "$detail" = limit ]; then
           echo "merge:   Codex's review of ${sha:0:12} failed at its usage limit. $review" >&2
-          fallback_hint "at limit"
         else
           echo "merge:   Codex's review of ${sha:0:12} failed, with no usage-limit note after it ('@codex review' may retry it). $review" >&2
-          fallback_hint failed
-        fi ;;
+        fi
+        fallback_hint "$kind" "$detail" ;;
       hung)
         echo "merge:   Codex's review of ${sha:0:12} has run $detail min, over GATE_CODEX_RUNNING_MAX_MIN=$running_max: treated as failed. $review" >&2
-        fallback_hint "hung $detail min" ;;
+        fallback_hint "$kind" "$detail" ;;
     esac
   done <<<"$1"
   local recorded
   recorded=$(codex_review_success)
   [ -z "$recorded" ] || echo "merge:   the head's codex-review success ('$recorded') records no fallback review of ${head:0:7}" >&2
+  [ -z "${CODEX_FALLBACK:-}" ] || echo "merge:   CODEX_FALLBACK=1 records a fallback only where Codex cannot review (failed, hung, or answered by its usage-limit note)" >&2
   [ -z "$not_exempt" ] || echo "merge:   a bot PR, but its review is required: $not_exempt" >&2
   [ -z "$not_docs" ] || echo "merge:   not docs-only, so its review is required: $not_docs" >&2
   [ -z "$not_sync" ] || echo "merge:   it changes .devkit-rev, but is no devkit sync, so its review is required: $not_sync" >&2
 }
 
-fallback_hint() { # <why>
-  echo "merge:   gh api repos/$SLUG/statuses/$head -f state=success -f context=$CODEX_CONTEXT -f description='Claude adversarial review (Codex $1) of ${head:0:7}'" >&2
+# fallback_hint <gap kind> <detail>: the one command that records the fallback, and the record
+# it will post. The agent never types the reason (header).
+fallback_hint() {
+  echo "merge:   CODEX_FALLBACK=1 make merge PR=$PR   (posts $CODEX_CONTEXT: '$(fallback_record "$(gap_why "$1" "$2")")')" >&2
+}
+
+# gap_why <gap kind> <detail>: the <why> of the fallback record a codex_review.py gap calls for
+# (header); exit 1 for a gap Codex can still close itself (a review not yet posted, or stale,
+# with no usage-limit note answering it). The one mapping: the hints, the record
+# CODEX_FALLBACK=1 posts and fallback_agrees all read it.
+gap_why() {
+  case $1:$2 in
+    hung:*) echo "hung $2 min" ;;
+    failed:limit|unreviewed:limit|stale:limit) echo "at limit" ;;
+    failed:*) echo failed ;;
+    *) return 1 ;;
+  esac
+}
+
+fallback_record() { echo "Claude adversarial review (Codex $1) of ${head:0:7}"; }
+
+# observed_whys: gap_why of every gap in $codex_blockers, one per line (none when Codex can still
+# review every one).
+observed_whys() {
+  local kind detail
+  while IFS=$'\t' read -r kind _ _ detail; do
+    gap_why "$kind" "$detail" || true
+  done < <(grep -E "$REVIEW_GAPS" <<<"$codex_blockers")
+}
+
+# fallback_agrees <recorded description>: 0 when the reason the record names is one Codex's
+# state shows now (header); else 1, with the contradiction in $disagreement. Reads
+# $codex_blockers and $running_max (read_codex).
+fallback_agrees() {
+  local claimed whys n m
+  whys=$(observed_whys)
+  if [[ "$1" =~ ${FALLBACK_RECORD_RES[0]} ]]; then claimed=${BASH_REMATCH[1]}; else claimed="at limit"; fi
+  case $claimed in
+    "hung "*)
+      n=${claimed#hung }; n=${n% min}
+      m=$(sed -n 's/^hung \([0-9]*\) min$/\1/p' <<<"$whys" | sort -n | tail -1)
+      [ -n "$m" ] && [ "$n" -ge "$running_max" ] && [ "$n" -le "$m" ] && return 0 ;;
+    # A failure at the limit is still a failure: `failed` is true, if less precise.
+    failed) grep -qE $'^failed\t' <<<"$codex_blockers" && return 0 ;;
+    *) grep -qxF "$claimed" <<<"$whys" && return 0 ;;
+  esac
+  [ -z "$whys" ] || whys=$(paste -sd ',' - <<<"$whys" | sed 's/,/, /g')
+  disagreement="it says Codex $claimed, but Codex's state is ${whys:-no failure, hang or usage limit}"
+  return 1
+}
+
+# codex_fallback: with CODEX_FALLBACK=1, set $codex_status to the fallback record Codex's state
+# calls for (the first gap's gap_why) and return 0; else 1. Never over a pending or failed
+# codex-review someone posted (header). Asked by the required-status loop and check_codex.
+codex_fallback() {
+  local why got
+  [ -n "${CODEX_FALLBACK:-}" ] || return 1
+  case "$codex_status" in "Claude adversarial review "*) return 0 ;; esac
+  got=$(awk -F'\t' -v c="$CODEX_CONTEXT" '$1 == c { print $2; exit }' <<<"$statuses")
+  case "$got" in ''|success) ;; *) return 1 ;; esac
+  why=$(observed_whys | head -1)
+  [ -n "$why" ] || return 1
+  codex_status=$(fallback_record "$why")
 }
 
 # pr_changes: read PR <n>'s authors and changed files once, for every exemption (header): sets
@@ -383,7 +484,12 @@ check_codex() {
     *) echo "merge: $PLAN: GATE_CODEX_REVIEW must be 0 or 1 (got '$required')" >&2; exit 2 ;;
   esac
   if grep -qE "$REVIEW_GAPS" <<<"$codex"; then
-    if recorded=$(fallback_review); then
+    if codex_fallback; then
+      echo "merge: no Codex review of head ${head:0:12}; CODEX_FALLBACK=1 records the fallback Codex's state calls for: $codex_status"
+      codex=$(grep -vE "$REVIEW_GAPS" <<<"$codex")
+    elif recorded=$(fallback_review); then
+      fallback_agrees "$recorded" \
+        || refuse "the head's $CODEX_CONTEXT record '$recorded' contradicts what Codex did: $disagreement; CODEX_FALLBACK=1 make merge PR=$PR records the observed reason"
       echo "merge: no Codex review of head ${head:0:12}; its codex-review status records the fallback: $recorded"
       codex=$(grep -vE "$REVIEW_GAPS" <<<"$codex")
     elif review_exempt; then
@@ -393,10 +499,11 @@ check_codex() {
   [ -z "$codex" ] || refuse_codex "$codex"
 }
 
-info=$(gh pr view "$PR" --repo "$SLUG" --json state,headRefOid,isDraft,labels \
-  --jq '[.state, .headRefOid, .isDraft, ([.labels[].name] | join(","))] | @tsv') \
+info=$(gh pr view "$PR" --repo "$SLUG" --json state,headRefOid,isDraft,labels,mergeable,headRefName,isCrossRepository \
+  --jq '[.state, .headRefOid, .isDraft, .mergeable, .headRefName, .isCrossRepository, ([.labels[].name] | join(","))] | @tsv') \
   || { echo "merge: cannot read PR #$PR of $SLUG (gh above)" >&2; exit 2; }
-IFS=$'\t' read -r state head draft labels <<<"$info"
+# Labels last: tab is IFS whitespace, so an empty field anywhere else would shift the rest.
+IFS=$'\t' read -r state head draft mergeable branch cross labels <<<"$info"
 [ "$state" = OPEN ] || refuse "PR #$PR is ${state:-unknown}, not OPEN"
 [[ "$head" =~ ^[0-9a-f]{40}$ ]] || { echo "merge: gh gave no head commit for PR #$PR ('$head')" >&2; exit 2; }
 
@@ -433,6 +540,8 @@ for context in $REQUIRED; do
     elif review_exempt; then
       codex_status="Not required ($exemption) for ${head:0:7}"
       continue
+    elif codex_fallback; then
+      continue
     fi
   fi
   wrong="${wrong:+$wrong, }$context=${got:-none}"
@@ -455,7 +564,90 @@ if [ -z "$gated_main" ]; then
   [[ "$description" =~ on\ main\ ([0-9a-f]{7,40}) ]] && gated_main=${BASH_REMATCH[1]}
 fi
 [ -n "$gated_main" ] || refuse "re-gate: cannot tell which main the gate of ${head:0:12} ran on (no $record and no \`on main <sha>\` in its status); run make gate PR=$PR"
-main_unmoved
+
+# plan_carry: when main moved past the gated main, or GitHub cannot merge the PR, refuse unless
+# the gate carries (header, "Carry"): then set $carry_tree and make the main it checks against
+# the gated one. Reads git objects, so main and the head are fetched here.
+carry_tree=""
+carry_resolved=""
+plan_carry() {
+  local refusal gated
+  case "$main_now" in
+    "$gated_main"*) refusal="PR #$PR conflicts with main ${main_now:0:12} on GitHub, whose merge ignores the union driver the gate's merge used; rebase it and run make gate PR=$PR" ;;
+    *) refusal="re-gate: main moved ${gated_main:0:12}→${main_now:0:12}; run make gate PR=$PR" ;;
+  esac
+  [ "$cross" = false ] && [ -n "$branch" ] \
+    || refuse "$refusal (not carried: the head branch of a cross-repository PR is not this repo's to push)"
+  fetch_main "$ROOT" "pull/$PR/head" \
+    || refuse "$refusal (not carried: cannot fetch PR #$PR's head and main, git above)"
+  gated=$(git -C "$ROOT" rev-parse --verify -q "$gated_main^{commit}") \
+    || refuse "$refusal (not carried: the gated main ${gated_main:0:12} is not in this clone)"
+  carry_plan "$ROOT" "$head" "$gated" "$main_now" || refuse "$refusal (not carried: $CARRY_WHY)"
+  carry_tree=$CARRY_TREE carry_resolved=$CARRY_RESOLVED
+  echo "merge: main ${main_now:0:12} differs from the gated main ${gated_main:0:12} only in $CARRY_PATH appends: carrying the gate of ${head:0:12}"
+  gated_main=$main_now
+}
+# settle_mergeable: GitHub computes `mergeable` lazily, so just after a push (the head's, or main's)
+# it reads UNKNOWN, and a decisions.md conflict there went uncarried until GitHub's merge refused
+# it (#238 follow-up). Re-read it every MERGE_POLL_SECONDS for at most MERGE_RETRY_SECONDS; still
+# UNKNOWN, one line says the merge goes ahead uncarried.
+settle_mergeable() {
+  local deadline=$((SECONDS + ${MERGE_RETRY_SECONDS:-30}))
+  while [ "$mergeable" = UNKNOWN ] && [ "$SECONDS" -lt "$deadline" ]; do
+    sleep "${MERGE_POLL_SECONDS:-2}"
+    mergeable=$(gh pr view "$PR" --repo "$SLUG" --json mergeable --jq .mergeable) \
+      || { echo "merge: cannot read PR #$PR's mergeable state (gh above)" >&2; exit 2; }
+  done
+  [ "$mergeable" != UNKNOWN ] \
+    || echo "merge: GitHub still reads PR #$PR's mergeability as UNKNOWN after ${MERGE_RETRY_SECONDS:-30} s; merging uncarried (a decisions.md conflict then fails the merge: rerun make merge PR=$PR)"
+}
+case "$main_now" in "$gated_main"*) settle_mergeable; [ "$mergeable" != CONFLICTING ] || plan_carry ;; *) plan_carry ;; esac
+
+# apply_carry: where GitHub's merge conflicts in the log, commit the carried merge onto the head,
+# push it to the PR's branch, wait for GitHub to show it as the head, and post every required
+# context there: local-gate names the head it carries and the main its tree is on; any other is
+# the old head's success, verbatim (a context with none yet is posted by its own step below, onto
+# the new head). From here on $head is it. Where GitHub's merge is clean, it already is the
+# carried tree: only local-gate is posted, on the head as it is, so nothing is pushed (a pushed
+# commit would make a bot's PR a person's: Renovate stops rebasing it, the bot exemption ends).
+apply_carry() {
+  local carried context description deadline
+  [ -n "$carry_resolved" ] || { post_carried "$head" "$GATE_CONTEXT"; return; }
+  carried=$(carry_commit "$ROOT" "$carry_tree" "$head" "$main_now" "$PR") \
+    || { echo "merge: cannot commit the carried merge (git above)" >&2; exit 2; }
+  git -C "$ROOT" push -q origin "$carried:refs/heads/$branch" \
+    || { echo "merge: cannot push the carried merge ${carried:0:12} to $branch (git above)" >&2; exit 2; }
+  echo "merge: pushed ${carried:0:12} to $branch: main ${main_now:0:12} merged into ${head:0:12}, $CARRY_PATH resolved"
+  deadline=$((SECONDS + ${MERGE_RETRY_SECONDS:-30}))
+  until [ "$(gh pr view "$PR" --repo "$SLUG" --json headRefOid --jq .headRefOid)" = "$carried" ]; do
+    [ "$SECONDS" -lt "$deadline" ] \
+      || refuse "re-gate: GitHub does not show the carried merge ${carried:0:12} as PR #$PR's head after ${MERGE_RETRY_SECONDS:-30} s; make merge PR=$PR again"
+    sleep "${MERGE_POLL_SECONDS:-2}"
+  done
+  # shellcheck disable=SC2086  # $REQUIRED is a space-separated list
+  post_carried "$carried" $REQUIRED
+  head=$carried
+}
+
+# post_carried <commit> <context>...: post each context's carried success on <commit>: local-gate's
+# names the head it carries; any other is the head's own success, verbatim, an empty description
+# included (by state, not text); a context the head has none of is skipped.
+post_carried() {
+  local commit=$1 context description
+  shift
+  for context in "$@"; do
+    if [ "$context" = "$GATE_CONTEXT" ]; then
+      description="Gate of ${head:0:7} carried: only $CARRY_PATH differs from its tree; on main ${main_now:0:7}"
+    else
+      description=$(awk -F'\t' -v c="$context" '$1 == c && $2 == "success" { print "=" $3; exit }' <<<"$statuses")
+      [ -n "$description" ] || continue
+      description=${description#=}
+    fi
+    gh api "repos/$SLUG/statuses/$commit" -f state=success -f context="$context" -f description="$description" >/dev/null \
+      || { echo "merge: cannot post $context on ${commit:0:12} (gh above)" >&2; exit 2; }
+    echo "merge: posted $context success on ${commit:0:12}: $description"
+  done
+}
 
 # Fail closed, like every gh read above: a Codex state this cannot read is exit 2, never a merge.
 check_codex
@@ -486,6 +678,12 @@ esac
 # a draft is readied, which a refusal must not leave done, and once more after it.
 read_main
 main_unmoved
+if [ -n "$carry_tree" ]; then
+  apply_carry
+  # The push, GitHub's catching up and the posts take seconds; main may have moved in them (#238 Codex).
+  read_main
+  main_unmoved
+fi
 if [ -n "$codex_status" ]; then
   gh api "repos/$SLUG/statuses/$head" -f state=success -f context="$CODEX_CONTEXT" \
     -f description="$codex_status" >/dev/null \

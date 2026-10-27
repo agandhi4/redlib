@@ -157,3 +157,59 @@ makefile_fixed_pg() {
       for (i = 1; i <= nout; i++) print out[i]
     }' "${files[@]}"
 }
+
+# makefile_tier_target <tier>: the rule a gate would run to get `tier_guard.sh <tier>` run: the
+# first rule of makefile_files whose recipe (tab-led lines, or inline after `target: ;`) runs it,
+# the script named directly or through a variable set to its path (finplat's `TIER_GUARD =
+# $(CURDIR)/devkit/bin/tier_guard.sh`, closet's `TIER := devkit/bin/tier_guard.sh`), or the
+# first rule whose recipe runs that one as the one goal of `$(MAKE) ... <rule>`, one level up (finplat's
+# test-db brings Postgres and runs ci-db with its URL: ci-db alone has no database); nothing when
+# none does. Continuation lines are joined first, so a call split over lines is one. Used by:
+# metrics_collect.sh (the tier a floor's file comes from).
+makefile_tier_target() {
+  local files=() file
+  while IFS= read -r file; do files+=("$file"); done < <(makefile_files)
+  [ "${#files[@]}" -gt 0 ] || return 0
+  awk -v tier="$1" '
+    { lines[++n] = $0 }
+    !/^\t/ && match($0, /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*[?:+]?=/) {
+      value = $0; sub(/^[^=]*=[[:space:]]*/, "", value); sub(/[[:space:]]+$/, "", value)
+      if (value ~ /(^|\/)tier_guard\.sh$/) { name = $0; sub(/[[:space:]]*[?:+]?=.*/, "", name); vars[name] = 1 }
+    }
+    END {
+      # Pass 1: every (rule, logical recipe line), inline recipes included. Tab-led lines belong
+      # to a rule only: a define body or an assignment continued onto tab-led lines resets it.
+      for (i = 1; i <= n; i++) {
+        line = lines[i]
+        if (indef) { if (line ~ /^[[:space:]]*endef/) indef = 0; continue }
+        if (skip) { skip = (line ~ /\\$/); continue }
+        if (line !~ /^\t/) {
+          if (line ~ /^[[:space:]]*(#|$)/ || line ~ /^[[:space:]]*(ifn?eq|ifn?def|else|endif)([[:space:]]|$)/) continue
+          if (line ~ /^(export[[:space:]]+|override[[:space:]]+)?define[[:space:]]/) { indef = 1; target = ""; continue }
+          if (line ~ /^[^:=]*[?+!]?=/ || line ~ /^[^=]*::?=/ || line !~ /:/) {
+            target = ""; skip = (line ~ /\\$/); continue
+          }
+          target = line; sub(/:.*/, "", target); sub(/[[:space:]].*/, "", target)
+          if (!match(line, /:[^;]*;/)) continue
+          line = substr(line, RSTART + RLENGTH)
+        }
+        while (line ~ /\\$/ && i < n) { sub(/\\$/, " ", line); line = line lines[++i] }
+        for (v in vars) gsub("\\$[({]" v "[)}]", "tier_guard.sh", line)
+        if (target != "") { rule[++m] = target; call[m] = line }
+      }
+      for (k = 1; k <= m; k++)
+        if (call[k] ~ ("(^|[^A-Za-z0-9_.-])tier_guard\\.sh[[:space:]]+" tier "([[:space:]]|$)")) { inner = rule[k]; break }
+      if (inner == "") exit
+      # Pass 2: a wrapper whose $(MAKE) call has the inner rule as its one goal (options and
+      # VAR=value aside): a catch-all `ci` making several tiers is no wrapper of one.
+      for (k = 1; k <= m; k++) {
+        # A computed target (the `$(COV_UNIT):` file rule of kitchen) is no goal a make call names.
+        if (rule[k] == inner || rule[k] ~ /\$/ || !match(call[k], /\$[({]MAKE[)}][^;&|]*/)) continue
+        nw = split(substr(call[k], RSTART + 7, RLENGTH - 7), w, /[[:space:]]+/)
+        goals = 0; goal = ""
+        for (j = 1; j <= nw; j++) if (w[j] != "" && w[j] !~ /^-/ && w[j] !~ /=/) { goals++; goal = w[j] }
+        if (goals == 1 && goal == inner) { print rule[k]; exit }
+      }
+      print inner
+    }' "${files[@]}"
+}

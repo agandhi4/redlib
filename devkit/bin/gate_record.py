@@ -12,6 +12,11 @@ Read back (dependency_merge.sh: whether a dependency PR's gate failed, and on wh
   gate_record.py verdict-of <gate.json> <head>  pass, fail or error, or nothing
   gate_record.py failures [--code-only] <gate.json> <head>
       one `<job> (<verdict>): <rules>` line per failed job; --code-only keeps the PR's code's own
+Read back (local_gate.sh: the whole-gate budget scales with the jobs the plan ran):
+  gate_record.py typical --logs D [--exclude D] <job>...
+      one `<job> <seconds>|-` line per job: the median seconds of its newest TYPICAL_RUNS
+      passing records under D/<pr>/<run>/gate.json (newest first, --exclude the running gate's
+      own dir), or `-` with fewer than TYPICAL_MIN of them
 Copied back (remote_gate.sh, after the host's gate: a remote run's record is on the host, so
 without this BITE and pr_merge.sh on this machine never saw it):
   gate_record.py import --pr N --runs F --logdir D < ledger
@@ -51,7 +56,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
+import statistics
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -410,6 +417,54 @@ def recorded_failures(path: Path, head: str, code_only: bool = False) -> list[st
     return lines
 
 
+# The typical seconds of a job: the median of its newest TYPICAL_RUNS passing records, read from
+# at most TYPICAL_FILES run records (newest first); under TYPICAL_MIN it has none yet.
+TYPICAL_RUNS = 10
+TYPICAL_MIN = 3
+TYPICAL_FILES = 300
+
+
+def typical_seconds(logs: Path, exclude: Path | None, names: list[str]) -> dict[str, int | None]:
+    """Per name, the median seconds (rounded up) of its newest TYPICAL_RUNS records with verdict
+    pass in the run records under `logs` (local_gate.sh "Run logs": <pr>/<head7>-<n>/gate.json;
+    `latest` links skipped), or None with fewer than TYPICAL_MIN. A budget or error verdict never
+    counts: an overrun must not raise the bar it overran."""
+    paths = [p for p in logs.glob("*/*/gate.json") if not p.parent.is_symlink()]
+    if exclude is not None:
+        paths = [p for p in paths if p.parent.resolve() != exclude.resolve()]
+    paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    seen: dict[str, list[int]] = {name: [] for name in names}
+    for path in paths[:TYPICAL_FILES]:
+        try:
+            jobs = json.loads(path.read_text(encoding="utf-8")).get("jobs")
+        except (OSError, ValueError, AttributeError):
+            continue
+        for name, got in seen.items():
+            job = jobs.get(name) if isinstance(jobs, dict) else None
+            if not isinstance(job, dict) or len(got) >= TYPICAL_RUNS:
+                continue
+            secs = job.get("seconds")
+            if job.get("verdict") == "pass" and isinstance(secs, int):
+                got.append(secs)
+        if all(len(got) >= TYPICAL_RUNS for got in seen.values()):
+            break
+    return {
+        name: math.ceil(statistics.median(got)) if len(got) >= TYPICAL_MIN else None
+        for name, got in seen.items()
+    }
+
+
+def _cmd_typical(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="gate_record.py typical")
+    p.add_argument("--logs", type=Path, required=True)
+    p.add_argument("--exclude", type=Path)
+    p.add_argument("jobs", nargs="*")
+    args = p.parse_args(argv)
+    for name, secs in typical_seconds(args.logs, args.exclude, args.jobs).items():
+        print(f"{name} {'-' if secs is None else secs}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -465,6 +520,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if argv[:1] == ["import"]:
         return _cmd_import(argv[1:])
+    if argv[:1] == ["typical"]:
+        return _cmd_typical(argv[1:])
     args = build_parser().parse_args(argv)
     args.over = set(args.over)
     try:

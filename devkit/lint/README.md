@@ -292,7 +292,8 @@ config still importing it.
 Repo-owned configs import the bases by name and devkit-sync cannot edit them, so `exports.txt`
 lists every export of `eslint.base.mjs` and `vitest.base.mjs`. To retire one, keep it and mark
 its line `deprecated <date> <migration>`: devkit-check warns each consumer file importing it, with
-that migration, and the line and export go 30 days later. `tests/lint_contract.bats` holds each
+that migration (never a `docs` path of `_paths_lib.sh`, such as decisions.md or a CHANGELOG.md:
+dated history may name a retired export), and the line and export go 30 days later. `tests/lint_contract.bats` holds each
 module's exports to the list and refuses a line leaving it early (against the merge base).
 
 ## swift-format
@@ -331,13 +332,14 @@ own code. Opting in can move the numbers, so the adopting PR runs `make metrics-
 | Base | Collector flag | Holds | Stays in the repo |
 |---|---|---|---|
 | `knip.base.jsonc` | `ts.mjs --knip --knip-base` | `ignoreDependencies` for the tools devkit's collectors run (dependency-cruiser, eslint-plugin-sonarjs, jscpd); `ignore` `devkit/**` | entries, `paths`, `ignoreBinaries`, stack choices such as shadcn/ui's `src/components/ui/**` and openapi-typescript's `schema.d.ts` |
-| `jscpd.base.json` | `jscpd.mjs --base` | `ignore`: tests (`tests/`, `test/`, `__tests__/`, `test-helpers/`, `*.test.*`, `*.spec.*`, `test-setup.*`, `conftest.py`), `*.d.ts`, and non-code: `*.md`, `*.txt` (a font's OFL licence), `LICENSE`/`LICENCE`/`COPYING` and lockfiles | `format`, extra ignores; `--min-tokens` stays a flag |
-| `vulture.toml` | `python.py --vulture --vulture-base <set>[,<set>…]` | `[tool.vulture] min_confidence = 60`; decorator sets `fastapi`, `flask`, `pydantic`, `sqlalchemy` | `paths`, whitelist files, `ignore_names` |
+| `jscpd.base.json` | `jscpd.mjs --base` | `ignore`: tests (`tests/`, `test/`, `__tests__/`, `test-helpers/`, `*.test.*`, `*.spec.*`, `test-setup.*`, `conftest.py`), `*.d.ts`, generated migrations (`migrations/`: Django, Alembic, drizzle), and non-code: `*.md`, `*.txt` (a font's OFL licence), `LICENSE`/`LICENCE`/`COPYING` and lockfiles | `format`, extra ignores; `--min-tokens` stays a flag |
+| `vulture.toml` | `python.py --vulture --vulture-base <set>[,<set>…]` | `[tool.vulture] min_confidence = 60`; decorator sets `fastapi`, `flask`, `pydantic`, `sqlalchemy`; `django` (Django and DRF: decorators, hook names, and a `declarative` table of the bases whose class bodies the framework reads, `Meta`, the classes it finds itself, and `hooks`: the methods it calls on a subclass of a base named by its full dotted name (`rest_framework.*Serializer`), such as a serializer's `validate`/`create`/`validate_{field}` or a view's `get_queryset`, dropped only on such a class, a `{field}` only for a declared field; python.py applies the table and vulture never sees it. The set's global `ignore_names` holds only URLconf names and middleware `process_*`) | `paths`, whitelist files, `ignore_names` |
 
 The repo config is read where the tool would read it: knip's `knip.json[c]`/`.knip.json[c]` or
 package.json `knip` under `--root` (a `knip.ts` is code and is exit 2), jscpd's `.jscpd.json` or
 package.json `jscpd` in the working directory, and vulture's `[tool.vulture]` in
-`<root>/pyproject.toml`. The tools resolve the merged file's globs and paths against their
+`<root>/pyproject.toml`, or the file `--vulture-config` names when that pyproject is not the
+repo's own (a fork's upstream project). The tools resolve the merged file's globs and paths against their
 working directory, so the temporary file lives outside the repo.
 
 A plain `npx knip` or `jscpd` run by hand does not see the base. Its only effect is the

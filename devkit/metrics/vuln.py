@@ -37,6 +37,10 @@ PR for it, and the scorecard reads the snapshot instead):
                           (instalite's web/), which the scorecard reads as `ratchet.vuln` NA:
                           there is no production exposure to measure
 and one `vuln: <severity> <package>@<version> <id>` line per hit on stderr, worst first.
+--findings <file> also writes each hit as JSON, for bin/vuln_watch.py (the nightly's new-advisory
+issues): [{"id", "severity", "packages": [{"ecosystem", "name", "version", "fixed", "locks":
+[[<uv|npm|pnpm|cargo>, <the flag's path>]]}]}], `fixed` the lowest fixed version above the
+locked one in the advisory's ranges (null when none is published), worst first.
 With --compose:
   vuln.<scope>.images             service image references
   vuln.<scope>.images_unpinned    neither a digest nor a tag other than `latest` (no tag is
@@ -44,8 +48,14 @@ With --compose:
   vuln.<scope>.images_undigested  no `@sha256:` digest: a tag can be re-pushed, a digest cannot
 and one `vuln: unpinned <file>:<line> <service> <image>` line per unpinned image on stderr.
 
-Severity: OSV `database_specific.severity` when present, else the CVSS v3/v4 base score
-banded (>= 9 CRITICAL, >= 7 HIGH, >= 4 MODERATE, else LOW), else UNKNOWN (counted in total).
+Severity: OSV `database_specific.severity` when present (GitHub's), else the score of the newest
+CVSS entry that scores, banded (>= 9 CRITICAL, >= 7 HIGH, >= 4 MODERATE, else LOW): a v3.x or
+v4.0 vector is scored by metrics/_cvss.py, a bare number read as one. An advisory with neither
+takes the worst severity among its `aliases` (a RUSTSEC record's GHSA or CVE twin), one
+fetch per alias id per run, one hop (an alias's own aliases are not followed); the stderr line
+names the alias. An alias OSV does not serve (or cannot be reached for) leaves it as it was.
+Else UNKNOWN (counted in total): a CVSS v2 vector or no severity anywhere (an unmaintained or
+unsound RUSTSEC note has no twin).
 Determinism: the same lockfile gives the same answer for a given day; the keys are dated by
 the snapshot, not by the code, which is why they stay untracked. Exit 2 on an unreadable
 source, a `uv export` failure, or an OSV error (no silent zero: a collector that cannot reach
@@ -72,18 +82,20 @@ OSV_URL = os.environ.get("OSV_URL", "https://api.osv.dev")
 BATCH = 1000  # OSV's querybatch limit
 ORDER = ["CRITICAL", "HIGH", "MODERATE", "LOW", "UNKNOWN"]
 
+Package = tuple[str, str, str]  # (OSV ecosystem, name, version)
+Lock = tuple[str, str]  # (source kind: uv | npm | pnpm | cargo, the path its flag named)
+
 
 class CollectorError(Exception):
     """An unreadable source or an OSV failure (exit 2)."""
 
 
-def _compose_reader() -> ModuleType:
-    """bin/_compose.py by path (`python3 -I` keeps it off sys.path; VENDOR_PATHS vendors bin/
-    beside metrics/), the reader guard_check.py's compose rules use."""
-    name = "devkit_compose"
+def _devkit_module(relpath: str, name: str) -> ModuleType:
+    """A devkit file as module <name>, once, by path: `python3 -I` keeps this directory off
+    sys.path. VENDOR_PATHS vendors bin/ beside metrics/."""
     if name in sys.modules:
         return sys.modules[name]
-    path = Path(__file__).resolve().parent.parent / "bin" / "_compose.py"
+    path = Path(__file__).resolve().parent.parent / relpath
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
         raise CollectorError(f"cannot load {path}")
@@ -96,7 +108,7 @@ def _compose_reader() -> ModuleType:
 
 def compose_images(files: list[str], scope: str) -> dict[str, int]:
     """The image keys over the compose files' services; each unpinned one named on stderr."""
-    reader = _compose_reader()
+    reader = _devkit_module("bin/_compose.py", "devkit_compose")  # guard_check's compose reader
     refs = []
     for f in files:
         try:
@@ -117,9 +129,13 @@ def compose_images(files: list[str], scope: str) -> dict[str, int]:
 def uv_packages(project: Path) -> list[tuple[str, str, str]]:
     if not (project / "uv.lock").is_file():
         raise CollectorError(f"{project}: no uv.lock")
+    # --frozen reads the lock as committed, which is what is measured. The caller's lock policy
+    # is dropped: uv refuses --frozen beside UV_LOCKED=1, which the python-fastapi scaffold
+    # exports for every ci-* target (ci-metrics included).
+    env = {k: v for k, v in os.environ.items() if k not in ("UV_LOCKED", "UV_FROZEN")}
     proc = subprocess.run(
         ["uv", "export", "--frozen", "--no-dev", "--format", "requirements-txt", "--no-hashes", "--project", str(project)],
-        capture_output=True, text=True, check=False,
+        capture_output=True, text=True, check=False, env=env,
     )
     if proc.returncode != 0:
         raise CollectorError(f"uv export failed in {project}: {proc.stderr.strip()[:200]}")
@@ -256,62 +272,189 @@ def osv(path: str, body: dict | None = None) -> dict:
         raise CollectorError(f"OSV {path}: {e}") from e
 
 
+class Records:
+    """OSV advisory records by id, each fetched at most once per run: hits that share an
+    alias (several RUSTSEC ids behind one GHSA) cost one query for it."""
+
+    def __init__(self) -> None:
+        self._cache: dict[str, dict | None] = {}
+
+    def get(self, vid: str) -> dict:
+        """A hit's own record; unreadable is exit 2 (no hit is dropped)."""
+        record = self._cache.get(vid)
+        if record is None:
+            record = self._cache[vid] = osv(f"/v1/vulns/{vid}")
+        return record
+
+    def alias(self, vid: str) -> dict | None:
+        """An alias's record, or None when OSV does not serve it (a CVE it never imported) or
+        cannot be reached: the advisory then keeps the severity its own record gives."""
+        if vid not in self._cache:
+            try:
+                self._cache[vid] = osv(f"/v1/vulns/{vid}")
+            except CollectorError as e:
+                print(f"vuln: alias unreadable, severity not taken from it: {e}", file=sys.stderr)
+                self._cache[vid] = None
+        return self._cache[vid]
+
+
+def resolved_severity(record: dict, records: Records) -> tuple[str, str | None]:
+    """The record's severity and, when it came from an alias, that alias's id. Aliases are
+    asked only when the record itself is UNKNOWN; the worst one wins, so two twins that
+    disagree never understate the hit."""
+    own = severity_of(record)
+    if own != "UNKNOWN":
+        return own, None
+    graded = []
+    for alias in sorted(record.get("aliases") or []):
+        twin = records.alias(alias)
+        if twin is not None and (sev := severity_of(twin)) != "UNKNOWN":
+            graded.append((ORDER.index(sev), alias, sev))
+    if not graded:
+        return own, None
+    _, alias, sev = min(graded)
+    return sev, alias
+
+
 def severity_of(vuln: dict) -> str:
     db = vuln.get("database_specific") or {}
     sev = str(db.get("severity") or "").upper()
     if sev in ORDER:
         return sev
-    for s in vuln.get("severity") or []:
+    cvss = _devkit_module("metrics/_cvss.py", "devkit_cvss")
+    # GHSA records often carry both CVSS_V3 and CVSS_V4: the newer is the advisory's own reading.
+    for s in sorted(vuln.get("severity") or [], key=lambda s: str(s.get("type", "")), reverse=True):
         score = str(s.get("score", ""))
-        m = re.search(r"CVSS:[34]\.\d/.*", score)
-        if not m:
-            try:
-                n = float(score)
-            except ValueError:
-                continue
-            return "CRITICAL" if n >= 9 else "HIGH" if n >= 7 else "MODERATE" if n >= 4 else "LOW"
+        try:
+            n = cvss.score(score) if score.startswith("CVSS:") else float(score)
+        except ValueError:
+            continue
+        return "CRITICAL" if n >= 9 else "HIGH" if n >= 7 else "MODERATE" if n >= 4 else "LOW"
     return "UNKNOWN"
 
 
-def locked_vulns(args: argparse.Namespace) -> dict[str, int]:
-    """OSV over the locked production packages: the severity keys and the packages queried."""
-    packages: list[tuple[str, str, str]] = []
-    for p in args.uv:
-        packages.extend(uv_packages(Path(p)))
-    for f in args.npm_lock:
-        packages.extend(npm_packages(Path(f)))
-    for f in args.pnpm_lock:
-        packages.extend(pnpm_packages(Path(f)))
-    for f in args.cargo_lock:
-        packages.extend(cargo_packages(Path(f)))
-    packages = sorted(set(packages))
+def locked_packages(args: argparse.Namespace) -> dict[Package, set[Lock]]:
+    """Every locked production package, with the lockfiles that list it."""
+    found: dict[Package, set[Lock]] = {}
+    sources = (
+        ("uv", args.uv, uv_packages),
+        ("npm", args.npm_lock, npm_packages),
+        ("pnpm", args.pnpm_lock, pnpm_packages),
+        ("cargo", args.cargo_lock, cargo_packages),
+    )
+    for kind, paths, reader in sources:
+        for p in paths:
+            for package in reader(Path(p)):
+                found.setdefault(package, set()).add((kind, p))
+    return found
+
+
+def _version_key(version: str) -> tuple:
+    """An order over one advisory's versions: release numbers (trailing zeros dropped, so 1.0 is
+    1.0.0), then a pre-release (`1.0rc1`, `1.0.0-rc.1`) before its final and a PEP 440 post
+    release after it. Tags compare part by part, numbers numerically (rc.2 < rc.10), words
+    lexically: right for alpha < beta < rc, not for PEP 440's dev-before-alpha. A build suffix
+    (`+local`) is ignored."""
+    m = re.match(r"v?(\d+(?:\.\d+)*)(.*)$", version.split("+")[0])
+    if not m:
+        return ((), 0, ())
+    release = tuple(int(n) for n in m.group(1).split("."))
+    while release and release[-1] == 0:
+        release = release[:-1]
+    tag = m.group(2).lstrip("-._")
+    rank = 1 if not tag else 2 if tag.startswith("post") else 0
+    words = re.findall(r"\d+|[a-z]+", tag.lower())
+    parts = tuple((0, int(w), "") if w.isdigit() else (1, 0, w) for w in words)
+    return (release, rank, parts)
+
+
+def _same_name(ecosystem: str, a: str, b: str) -> bool:
+    if ecosystem != "PyPI":
+        return a == b
+    return re.sub(r"[-_.]+", "-", a).lower() == re.sub(r"[-_.]+", "-", b).lower()  # PEP 503
+
+
+def fixed_version(record: dict, package: Package) -> str | None:
+    """The lowest `fixed` event above the locked version in the advisory's ranges for this
+    package (GIT ranges name commits, not versions, and are skipped)."""
+    ecosystem, name, version = package
+    fixes = []
+    for affected in record.get("affected") or []:
+        pkg = affected.get("package") or {}
+        if pkg.get("ecosystem") != ecosystem:
+            continue
+        if not _same_name(ecosystem, pkg.get("name", ""), name):
+            continue
+        for r in affected.get("ranges") or []:
+            if r.get("type") != "GIT":
+                fixes.extend(e["fixed"] for e in r.get("events") or [] if "fixed" in e)
+    above = [f for f in fixes if _version_key(f) > _version_key(version)]
+    return min(above, key=_version_key) if above else None
+
+
+def locked_vulns(args: argparse.Namespace) -> tuple[dict[str, int], list[dict]]:
+    """OSV over the locked production packages: the severity keys and the packages queried, and
+    each hit as a --findings record."""
+    locks = locked_packages(args)
+    packages = sorted(locks)
     # A lockfile with only dev dependencies (instalite's web/) has an empty production set:
     # that is the answer, zero exposure, not a broken source.
     if not packages:
         print("vuln: 0 locked production packages (dev-only lockfile): nothing to query", file=sys.stderr)
-    hits: dict[str, set[tuple[str, str]]] = {}  # vuln id -> {(name, version)}
+    hits: dict[str, set[Package]] = {}
     for i in range(0, len(packages), BATCH) if packages else []:
         chunk = packages[i : i + BATCH]
         res = osv("/v1/querybatch", {"queries": [{"package": {"name": n, "ecosystem": eco}, "version": v} for eco, n, v in chunk]})
-        for (eco, n, v), r in zip(chunk, res.get("results", [])):
+        for package, r in zip(chunk, res.get("results", [])):
             for vuln in r.get("vulns") or []:
-                hits.setdefault(vuln["id"], set()).add((n, v))
-    rows = []
+                hits.setdefault(vuln["id"], set()).add(package)
+    records = Records()
+    findings = []
+    via: dict[str, str] = {}  # finding id -> the alias its severity came from
     for vid in sorted(hits):
-        rows.append((severity_of(osv(f"/v1/vulns/{vid}")), vid))
+        record = records.get(vid)
+        severity, alias = resolved_severity(record, records)
+        if alias:
+            via[vid] = alias
+        affected = [
+            {
+                "ecosystem": package[0],
+                "name": package[1],
+                "version": package[2],
+                "fixed": fixed_version(record, package),
+                "locks": sorted(locks[package]),
+            }
+            for package in sorted(hits[vid])
+        ]
+        findings.append({"id": vid, "severity": severity, "packages": affected})
+    findings.sort(key=lambda f: (ORDER.index(f["severity"]), f["id"]))
     counts = {s: 0 for s in ORDER}
-    for sev, _ in rows:
-        counts[sev] += 1
-    for sev, vid in sorted(rows, key=lambda r: (ORDER.index(r[0]), r[1])):
-        pk = ", ".join(f"{n}@{v}" for n, v in sorted(hits[vid]))
-        print(f"vuln: {sev} {pk} {vid}", file=sys.stderr)
-    print(f"vuln: {len(packages)} locked production packages, {len(rows)} vulnerabilities ({counts['CRITICAL']} critical, {counts['HIGH']} high)", file=sys.stderr)
-    return {
+    for f in findings:
+        counts[f["severity"]] += 1
+        pk = ", ".join(f"{p['name']}@{p['version']}" for p in f["packages"])
+        source = f" (severity of alias {via[f['id']]})" if f["id"] in via else ""
+        print(f"vuln: {f['severity']} {pk} {f['id']}{source}", file=sys.stderr)
+    print(
+        f"vuln: {len(packages)} locked production packages, {len(findings)} vulnerabilities "
+        f"({counts['CRITICAL']} critical, {counts['HIGH']} high)",
+        file=sys.stderr,
+    )
+    keys = {
         f"vuln.{args.scope}.critical": counts["CRITICAL"],
         f"vuln.{args.scope}.high": counts["HIGH"],
-        f"vuln.{args.scope}.total": len(rows),
+        f"vuln.{args.scope}.total": len(findings),
         f"vuln.{args.scope}.packages": len(packages),
     }
+    return keys, findings
+
+
+def _write(path: str | None, doc: object) -> None:
+    text = json.dumps(doc, indent=2) + "\n"
+    if path:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(text)
+    else:
+        sys.stdout.write(text)
 
 
 def main() -> int:
@@ -323,25 +466,25 @@ def main() -> int:
     ap.add_argument("--cargo-lock", action="append", default=[], help="a Cargo.lock")
     ap.add_argument("--compose", action="extend", nargs="+", default=[], metavar="FILE", help="compose files (image references)")
     ap.add_argument("--out", help="write the JSON here (default: stdout)")
+    ap.add_argument("--findings", help="also write each hit here as JSON (header)")
     args = ap.parse_args()
     locked = bool(args.uv or args.npm_lock or args.pnpm_lock or args.cargo_lock)
     if not (locked or args.compose):
         ap.error("at least one of --uv, --npm-lock, --pnpm-lock, --cargo-lock, --compose")
     out: dict[str, int] = {}
+    findings: list[dict] = []
     try:
         if args.compose:
             out.update(compose_images(args.compose, args.scope))
         if locked:
-            out.update(locked_vulns(args))
+            keys, findings = locked_vulns(args)
+            out.update(keys)
     except CollectorError as e:
         print(f"vuln: {e}", file=sys.stderr)
         return EXIT_USAGE
-    text = json.dumps(out, indent=2) + "\n"
-    if args.out:
-        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.out).write_text(text)
-    else:
-        sys.stdout.write(text)
+    _write(args.out, out)
+    if args.findings:
+        _write(args.findings, findings)
     return 0
 
 

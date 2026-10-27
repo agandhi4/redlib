@@ -35,8 +35,11 @@
 
 # shellcheck disable=SC2034  # read by gate.sh and remote_gate.sh, which source this file
 GATE_REMOTE_KEYS='GATE_REMOTE|GATE_REMOTE_HOST|GATE_REMOTE_ROOT|GATE_REMOTE_SSH_OPTS'
+# GATE_SLOTS is read only by vendored copies from before the capacity pool (bin/_slot_lib.sh), so
+# a gate.env that still sets it stays valid. Gotcha: an older copy exits 2 on a key it does not
+# know, so a gate.env line GATE_CAPACITY= waits until every repo has synced past 2026-10-26.
 # shellcheck disable=SC2034  # same
-GATE_LOCAL_KEYS='GATE_SLOTS|GATE_SILENCE_SECONDS|GATE_CLEANUP_SECONDS|GATE_JOB_BUDGET_MINUTES|GATE_BUDGET_MINUTES|GATE_BUDGET_ENFORCE|GATE_LOAD_MAX|GATE_LOAD_WAIT_MINUTES'
+GATE_LOCAL_KEYS='GATE_CAPACITY|GATE_SLOTS|GATE_SILENCE_SECONDS|GATE_CLEANUP_SECONDS|GATE_JOB_BUDGET_MINUTES|GATE_BUDGET_MINUTES|GATE_BUDGET_ENFORCE|GATE_LOAD_MAX|GATE_LOAD_WAIT_MINUTES'
 
 gate_env_load() { # <who> <apply-keys> <ignore-keys>
   local who=$1 apply=$2 ignore=$3 file line key value n=0

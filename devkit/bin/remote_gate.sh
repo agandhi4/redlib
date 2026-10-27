@@ -12,8 +12,8 @@
 #                         finplat's is ~/gates/finplat. `~` is expanded ON THE HOST.
 #   GATE_REMOTE_SSH_OPTS  extra ssh options, word-split (e.g. `-p 2222 -o ConnectTimeout=10`);
 #                         they come first, so they override the defaults below.
-# Nothing else crosses ssh: the host's own environment and gate.env set GATE_SLOTS etc., so a
-# laptop's GATE_SLOTS=4 never loosens the host's one-gate-at-a-time lock.
+# Nothing else crosses ssh: the host's own environment and gate.env set GATE_CAPACITY etc., so a
+# laptop's GATE_CAPACITY=8 never loosens the host's pool.
 #
 # On the host (remote_main below), under a per-checkout flock:
 #   1. clone GATE_SLUG (read from this checkout's plan) with `gh repo clone` if absent; refuse a

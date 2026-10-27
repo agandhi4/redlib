@@ -50,10 +50,11 @@
 # wedged daemon hangs the job until the watchdog; route it through devkit/bin/docker_bounded.sh.
 #
 # Also (WARNINGS, exit 0): a repo that gates through devkit merges through it (bin/pr_merge.sh,
-# which refuses a head without a local-gate success). A Makefile with a `gate` target and no
-# `merge` target is named, and so is each line of AGENTS.md's `## Workflow` section that tells
-# the reader to run `gh pr merge`: lanes do what that text says, so the text moves with the
-# target. Only an instruction counts (workflow_merge_lines): the line starts with the command, it
+# which refuses a head without a local-gate success) and opens PRs through it (bin/pr_create.sh,
+# which names origin's repo). A Makefile with a `gate` target and no `merge` or no `pr` target is
+# named, and so is each line of AGENTS.md's `## Workflow` section that tells the reader to run
+# `gh pr merge` or `gh pr create`: lanes do what that text says, so the text moves with the
+# target. Only an instruction counts (workflow_gh_lines): the line starts with the command, it
 # sits in a code fence, or `run`/`then` leads into it. A ban ("never `gh pr merge --auto`",
 # closet) is the rule this enforces, not a breach. AGENTS.md is read like the plan: the working
 # tree, or the index under --staged.
@@ -79,17 +80,26 @@
 # bats (devkit #212). `bats_assert_check.py --fix` appends the `|| false` that fixes most.
 # It reads the working tree even under --staged: a warning judges the files a lane edits next.
 #
-# Also (WARNINGS, exit 0): a tracked stylesheet whose Tailwind v4 `@import "tailwindcss"` has no
-# source(...) scope that leaves devkit/ out, or a source()/@source path that reaches it
-# (tailwind_unscoped). Unscoped, v4 scans every file
-# git tracks, so a word in devkit's comments ("shadow") became a CSS class and moved rollcall's
-# bundle bound with no src/ change (#81). Working tree, like the bats check.
+# Also (WARNINGS, exit 0): a tracked stylesheet whose Tailwind v4 scan covers devkit/: an
+# `@import "tailwindcss"` with no source(...) built from the repo root (the scan starts at the
+# building package, tw_build_root), or a source()/@source path that reaches it
+# (tailwind_unscoped). Unscoped, v4 scans every file under that start .gitignore keeps, so a word
+# in devkit's comments ("shadow") became a CSS class and moved rollcall's bundle bound with no
+# src/ change (#81). Working tree, like the bats check.
 #
 # Also (WARNINGS, exit 0): a tracked file outside devkit/ that imports a lint base and names one
 # of its exports devkit/lint/exports.txt marks deprecated, with that line's migration. The
 # deprecation window is how devkit retires an export a repo-owned config imports (the sync cannot
 # edit those configs, so a removal broke three repos' sync PRs, #227). The working tree, or the
-# index under --staged.
+# index under --staged. A `docs` path in _paths_lib.sh's table (docs/*, any *.md: decisions.md,
+# CHANGELOG.md) is prose, never an import, and dated history may name what was retired: it is
+# never scanned. Why (2026-10-26): closet reworded a past decisions.md entry just to silence it.
+#
+# Also, where origin is a GitHub repo (bin/_gh_repo_lib.sh): the plan's literal GATE_SLUG is
+# origin's (owner and name without case), since the gate and make merge act on GATE_SLUG alone;
+# and gh's default repo in this clone is origin (gh_default_heal, one line when it sets it, a
+# WARNING when git cannot). Why (2026-10-26): in redlib, a fork, a bare `gh pr create` opened
+# its PR on the public parent. Healed, not failed: it is clone config no commit carries.
 set -euo pipefail
 STAGED=0
 case "${1:-}" in
@@ -103,6 +113,10 @@ esac
 . "$(dirname "${BASH_SOURCE[0]}")/_paths_lib.sh"
 # shellcheck source=bin/_makefile_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_makefile_lib.sh"
+# shellcheck source=bin/_gate_env.sh  # gate_plan_literal: GATE_SLUG as the gate reads it
+. "$(dirname "${BASH_SOURCE[0]}")/_gate_env.sh"
+# shellcheck source=bin/_gh_repo_lib.sh  # origin_slug, slug_same, gh_default_heal
+. "$(dirname "${BASH_SOURCE[0]}")/_gh_repo_lib.sh"
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 # The vendored tree, .devkit-rev and the .swift-format copies: both sides come from the INDEX,
@@ -220,6 +234,14 @@ if [ -n "$plan_src" ]; then
     break
   done <<<"$plan"
 fi
+if origin=$(origin_slug .); then
+  gh_default_heal . devkit-check || echo "devkit-check: WARNING: cannot make origin gh's default repo (git above)" >&2
+  plan_slug=$(gate_plan_literal <(printf '%s\n' "$plan_src") GATE_SLUG)
+  if [ -n "$plan_slug" ] && ! slug_same "$plan_slug" "$origin"; then
+    echo "devkit-check: scripts/ci/gate_plan.sh: GATE_SLUG=$plan_slug is not origin's repo ($origin); the gate and make merge act on GATE_SLUG, so set it to origin's" >&2
+    exit 1
+  fi
+fi
 # baseline_file <path> <the command that creates it> <why>: the header's warn-then-fail rule. The
 # index under --staged, else the working tree, as the plan is read.
 readonly BASELINE_FAILS_FROM=2026-11-01
@@ -280,27 +302,34 @@ if [[ "$targets" == *" gate "* && "$targets" != *" merge "* ]]; then
   # shellcheck disable=SC2016  # $(PR) is make's variable, printed literally
   echo 'devkit-check: WARNING: the Makefile has a gate target but no merge target; add: merge: ; devkit/bin/pr_merge.sh "$(PR)"' >&2
 fi
+if [[ "$targets" == *" gate "* && "$targets" != *" pr "* ]]; then
+  echo "devkit-check: WARNING: the Makefile has a gate target but no pr target; add: pr: ; devkit/bin/pr_create.sh (it opens the PR on origin, never a fork's parent)" >&2
+fi
 if [ "$STAGED" = 1 ]; then
   agents_src=$(git show :AGENTS.md 2>/dev/null) || agents_src=""
 else
   agents_src=$(cat AGENTS.md 2>/dev/null) || agents_src=""
 fi
-# The line numbers of the Workflow section's lines that instruct `gh pr merge`, from stdin.
-workflow_merge_lines() {
-  awk '
+# workflow_gh_lines <gh pr subcommand>: the line numbers of the Workflow section's lines that
+# instruct `gh pr <subcommand>`, from stdin.
+workflow_gh_lines() {
+  awk -v cmd="gh pr $1" '
     /^## / { wf = ($0 ~ /^## Workflow/); fence = 0; next }
     !wf { next }
     /^[ \t]*(```|~~~)/ { fence = !fence; next }
     {
       l = tolower($0)
-      if (l !~ /gh pr merge/) next
-      if (fence || l ~ /^[ \t]*([-*+]|[0-9]+\.)?[ \t]*`?gh pr merge/) { print NR; next }
-      if (l ~ /(^|[^a-z])(run|then)[ \t]+`?gh pr merge/ && l !~ /(never|not|n.t)[ \t]+(run|then)[ \t]+`?gh pr merge/) print NR
+      if (index(l, cmd) == 0) next
+      if (fence || l ~ ("^[ \t]*([-*+]|[0-9]+\\.)?[ \t]*`?" cmd)) { print NR; next }
+      if (l ~ ("(^|[^a-z])(run|then)[ \t]+`?" cmd) && l !~ ("(never|not|n.t)[ \t]+(run|then)[ \t]+`?" cmd)) print NR
     }'
 }
 while IFS= read -r line; do
   [ -z "$line" ] || echo "devkit-check: WARNING: AGENTS.md:$line: the Workflow section merges with gh pr merge; say make merge PR=<n> (it refuses a head without a local-gate success)" >&2
-done <<<"$(workflow_merge_lines <<<"$agents_src")"
+done <<<"$(workflow_gh_lines merge <<<"$agents_src")"
+while IFS= read -r line; do
+  [ -z "$line" ] || echo "devkit-check: WARNING: AGENTS.md:$line: the Workflow section opens PRs with gh pr create; say make pr BODY_FILE=<file> (gh's default in a fork is its parent)" >&2
+done <<<"$(workflow_gh_lines create <<<"$agents_src")"
 renovate_args=(audit)
 [ "$STAGED" = 0 ] || renovate_args+=(--staged)
 while IFS= read -r issue; do
@@ -309,47 +338,75 @@ done <<<"$("$(dirname "${BASH_SOURCE[0]}")/python.sh" -I "$(dirname "${BASH_SOUR
 while IFS= read -r issue; do
   [ -z "$issue" ] || echo "devkit-check: WARNING: $issue (devkit/bin/bats_assert_check.py --fix)" >&2
 done <<<"$("$(dirname "${BASH_SOURCE[0]}")/python.sh" -I "$(dirname "${BASH_SOURCE[0]}")/bats_assert_check.py" --root .)"
-# tailwind_unscoped: "<css>:<line>" for each place a tracked stylesheet (outside devkit/) has
-# Tailwind v4 scan devkit/: an `@import "tailwindcss"` with no source(...), or a source() or
-# `@source` path (source(none)'s explicit list) that tw_reaches_devkit. A path that does not
-# resolve is Tailwind's own error, not this check's.
-# tw_reaches_devkit <top> <css> <path>: the directory <path> names from <css>'s (a glob's part
-# before its first wildcard; a file's directory) is <top>, above it or inside <top>/devkit/.
-tw_reaches_devkit() {
-  local d dir
-  d=$(dirname "$2")/${3%%[\*\?\{\[]*}
+top=$(pwd -P)
+# tailwind_unscoped: "<css>:<line>\t<dir>" for each place a tracked stylesheet (outside devkit/)
+# has Tailwind v4 scan devkit/, <dir> being where that scan starts: an `@import "tailwindcss"`
+# with no source(...) (from tw_build_root), or a source() or `@source` path (source(none)'s
+# explicit list) whose tw_dir tw_reaches_devkit. A path that does not resolve is Tailwind's own
+# error, not this check's.
+# tw_build_root <top> <css>: where an unscoped scan starts. That is the `base` @tailwindcss/postcss
+# and the CLI default to (the build's cwd) or @tailwindcss/vite's (vite's root, the cwd by
+# default): the package that builds <css>, the nearest directory at or above it holding a
+# package.json, else <top>. Why (orbit #128): frontend/src/assets/main.css, unscoped, scans
+# frontend/ only; judging every unscoped import as the repo root's warned there falsely. A vite
+# `root:` or postcss `base:` set in a config is not read; none in the fleet sets one.
+tw_build_root() {
+  local d
+  d=$(cd "$(dirname "$2")" && pwd -P)
+  while [[ "$d" == "$1/"* ]] && [ ! -f "$d/package.json" ]; do d=$(dirname "$d"); done
+  [[ "$d" == "$1/"* ]] || d=$1
+  echo "$d"
+}
+# tw_dir <css> <path>: the directory <path> names from <css>'s (a glob's part before its first
+# wildcard; a file's directory), symlinks resolved; 1 when it does not exist.
+tw_dir() {
+  local d
+  d=$(dirname "$1")/${2%%[\*\?\{\[]*}
   [ -d "$d" ] || d=$(dirname "$d")
-  dir=$(cd "$d" 2>/dev/null && pwd -P) || return 1
-  case "$dir/" in "$1/devkit/"*) return 0 ;; "$1/"?*) return 1 ;; esac
-  return 0
+  cd "$d" 2>/dev/null && pwd -P
+}
+# tw_reaches_devkit <top> <dir> [auto]: a scan from <dir> covers devkit/: <dir> is <top>, above it
+# or inside <top>/devkit/. auto: Tailwind's automatic detection (no source(), or source()), which
+# skips what .gitignore ignores, so not when devkit/ is ignored; an @source path is scanned
+# regardless (Tailwind's docs: the way to scan an ignored tree).
+tw_reaches_devkit() {
+  case "$2/" in "$1/devkit/"*) ;; "$1/"?*) return 1 ;; esac
+  [ -z "${3:-}" ] || ! git check-ignore -q --no-index devkit/
 }
 tailwind_unscoped() {
-  local css hit top
-  top=$(pwd -P)
+  local css hit dir
   while IFS= read -r css; do
     [ -f "$css" ] || continue
     hit=$(grep -nE "^[[:space:]]*@import[[:space:]]+[\"']tailwindcss(/utilities(\\.css)?)?[\"']" "$css" | head -n 1) || hit=""
     if [ -n "$hit" ] && [[ ! "$hit" =~ source\([[:space:]]*none[[:space:]]*\) ]]; then
-      if [[ ! "$hit" =~ source\([[:space:]]*[\"\']([^\"\']*)[\"\'] ]] || tw_reaches_devkit "$top" "$css" "${BASH_REMATCH[1]}"; then
-        echo "$css:${hit%%:*}"
+      if [[ "$hit" =~ source\([[:space:]]*[\"\']([^\"\']*)[\"\'] ]]; then
+        dir=$(tw_dir "$css" "${BASH_REMATCH[1]}") || dir=""
+      else
+        dir=$(tw_build_root "$top" "$css")
       fi
+      [ -z "$dir" ] || ! tw_reaches_devkit "$top" "$dir" auto || printf '%s:%s\t%s\n' "$css" "${hit%%:*}" "$dir"
     fi
     # `@source not "<path>"` excludes and `@source inline(...)` names classes: neither matches.
     while IFS= read -r hit; do
       [[ "$hit" =~ @source[[:space:]]+[\"\']([^\"\']*)[\"\'] ]] || continue
-      ! tw_reaches_devkit "$top" "$css" "${BASH_REMATCH[1]}" || echo "$css:${hit%%:*}"
+      dir=$(tw_dir "$css" "${BASH_REMATCH[1]}") || continue
+      ! tw_reaches_devkit "$top" "$dir" || printf '%s:%s\t%s\n' "$css" "${hit%%:*}" "$dir"
     done < <(grep -nE "^[[:space:]]*@source[[:space:]]+[\"']" "$css" || true)
   done < <(git ls-files -- '*.css' ':!:devkit/')
 }
-while IFS= read -r raw; do
-  [ -z "$raw" ] || echo "devkit-check: WARNING: $raw: Tailwind v4 scans devkit/ from here (an unscoped @import \"tailwindcss\", or a source() or @source path reaching the repo root or devkit/), and a word in its comments becomes a CSS class (rollcall #81: .shadow); scope it to the app's sources: @import \"tailwindcss\" source(\"<dir>\")" >&2
+while IFS=$'\t' read -r place dir; do
+  [ -n "$place" ] || continue
+  case "$dir" in "$top") dir="the repo root" ;; "$top/"*) dir=${dir#"$top/"}/ ;; esac
+  echo "devkit-check: WARNING: $place: Tailwind v4's scan from $dir covers devkit/ (an unscoped @import \"tailwindcss\" scans the package that builds it; a source() or @source path, what it names), and a word in its comments becomes a CSS class (rollcall #81: .shadow); scope it to the app's sources: @import \"tailwindcss\" source(\"<dir>\")" >&2
 done <<<"$(tailwind_unscoped)"
 grep_args=(-lwF --all-match)
 [ "$STAGED" = 0 ] || grep_args+=(--cached)
 while read -r module name state since migration; do
   [ "$state" = deprecated ] || continue
   while IFS= read -r file; do
-    [ -z "$file" ] || echo "devkit-check: WARNING: $file: $name (devkit/lint/$module) is deprecated since $since; $migration" >&2
+    [ -n "$file" ] || continue
+    _devkit_area "$file"
+    [ "$DEVKIT_AREA" = docs ] || echo "devkit-check: WARNING: $file: $name (devkit/lint/$module) is deprecated since $since; $migration" >&2
   done <<<"$(git grep "${grep_args[@]}" -e "$name" -e "devkit/lint/$module" -- ':!devkit/' || true)"
 done <<<"$(git show :devkit/lint/exports.txt 2>/dev/null | grep -v '^#' || true)"
 echo "devkit-check: ok (${_commit:0:7})"
