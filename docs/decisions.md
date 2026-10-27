@@ -213,3 +213,8 @@ Consequence: a comments failure never fails the page: post-only page, `[thread] 
 Why: devkit #249 scores RustSec CVSS vectors, so RUSTSEC-2026-0194 (quadratic duplicate-attribute check) and -0195 (unbounded `NsReader` namespace allocation) count as high: both `A:H`, fixed in quick-xml 0.41. quick-xml comes only through `rss` (and its `atom_syndication`), which we use to write feeds, never to parse untrusted XML, but the lock carried 0.37.5.
 Decision: raise `rss` to 2.1.2 (quick-xml ^0.41, atom_syndication 0.12.10) in Cargo.toml, not only the lock, so a downgrade cannot reintroduce the range. Its 2.0.13–2.1.2 changelog has no public API change.
 Consequence: vuln.app.high is 0 again. The 18 advisories OSV still lists carry no severity (bincode, h2, tokio, unsafe-libyaml, zstd, zstd-sys and 12 in zstd-safe) and stay report-only.
+
+## 2026-10-27 — jscpd is devkit's pin; `make pr` opens PRs on the fork
+Why: devkit #235 pins jscpd once (devkit/metrics/tools, installed by devkit/bin/npm_tool.sh), so `tools/metrics/` was a second pin of the same 5.4.2 to keep in step. devkit #255 adds `make pr` (devkit/bin/pr_create.sh, origin only): a raw `gh pr create` here defaults to the public parent redlib-org/redlib, where a PR was opened by mistake on 2026-10-26.
+Decision: drop `tools/metrics/`, `make lock` and `make metrics-deps`, and the `dup` line's `--bin`; `.nvmrc` stays (the Node jscpd runs on). Add the template `pr:` target. Clone count unchanged: 15 (1.44 %) before and after.
+Consequence: open PRs with `make pr BODY_FILE=…`, never bare `gh pr create`. A jscpd bump is a devkit sync, not a repo PR.

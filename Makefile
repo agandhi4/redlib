@@ -16,7 +16,7 @@ CI_IMAGE ?= redlib:ci
 CI_BUILD_VERSION ?= $(shell git rev-parse --short=7 HEAD)
 
 .DEFAULT_GOAL := help
-.PHONY: help ci-quick ci-guards ci-lint ci-typecheck ci-unit test-live ci-image gate merge install hooks-check devkit-sync devkit-check toolchain-check workflows-check docs-check release-check secrets-check secrets-staged upstream-review lock metrics-deps ci-metrics metrics-snapshot metrics-tighten metrics-rebaseline
+.PHONY: help ci-quick ci-guards ci-lint ci-typecheck ci-unit test-live ci-image gate merge install hooks-check devkit-sync devkit-check toolchain-check workflows-check docs-check release-check secrets-check secrets-staged upstream-review pr ci-metrics metrics-snapshot metrics-tighten metrics-rebaseline
 
 help: ## list targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
@@ -87,27 +87,25 @@ ci-image: ## build Dockerfile as $(CI_IMAGE) with APP_VERSION=$(CI_BUILD_VERSION
 # devkit/bin/metrics_collect.sh runs the collectors in scripts/ci/metrics.conf and compares the
 # snapshot with docs/metrics/ratchet.json as committed on origin/main (devkit README "Metrics
 # ratchet"). The collectors are python3 and the pinned toolchain's clippy, which
-# metrics_collect.sh puts on PATH itself, plus jscpd: dev-only npm tooling pinned by
-# tools/metrics' lockfile on the .nvmrc node, never in the image (.dockerignore), so every
-# metrics target installs it first (metrics-deps).
-lock: ## refresh tools/metrics/package-lock.json (jscpd's pin); Cargo.lock is cargo's
-	npm install --package-lock-only --no-audit --no-fund --prefix tools/metrics
-metrics-deps: ## the npm tools metrics.conf runs (jscpd), from tools/metrics' lockfile
-	npm ci --prefix tools/metrics --no-audit --no-fund
-ci-metrics: metrics-deps ## the metrics ratchet: collect, then check against docs/metrics/ratchet.json (gate's last job)
+# metrics_collect.sh puts on PATH itself, plus jscpd: devkit's npm pin on the .nvmrc node,
+# installed on first use (devkit/bin/npm_tool.sh), never in the image.
+ci-metrics: ## the metrics ratchet: collect, then check against docs/metrics/ratchet.json (gate's last job)
 	devkit/bin/metrics_collect.sh check
-metrics-snapshot: metrics-deps ## collect the metrics into build/metrics.json, no check
+metrics-snapshot: ## collect the metrics into build/metrics.json, no check
 	devkit/bin/metrics_collect.sh snapshot
-metrics-tighten: metrics-deps ## collect, then lock the better numbers into docs/metrics/ratchet.json; SEED=1 bounds new keys
+metrics-tighten: ## collect, then lock the better numbers into docs/metrics/ratchet.json; SEED=1 bounds new keys
 	devkit/bin/metrics_collect.sh tighten
 # KEYS=<key>[,<key>] loosens only the named bounds and leaves scorecard.json alone (make hands
 # command-line variables to the recipe's environment, where metrics_collect.sh reads KEYS).
-metrics-rebaseline: metrics-deps ## collect, then overwrite every bound, or only KEYS=a,b (label the PR metrics-rebaseline)
+metrics-rebaseline: ## collect, then overwrite every bound, or only KEYS=a,b (label the PR metrics-rebaseline)
 	devkit/bin/metrics_collect.sh rebaseline
 
 gate: ## make gate PR=<n> [GATE_ARGS=--no-post]
 	@test -n "$(PR)" || { echo "usage: make gate PR=<number> [GATE_ARGS=--no-post]" >&2; exit 2; }
 	devkit/bin/gate.sh "$(PR)" $(GATE_ARGS)
+
+pr: ## make pr BODY_FILE=<file> [TITLE=…] [DRAFT=1]; push, open the PR on origin (never a fork's parent)
+	devkit/bin/pr_create.sh
 
 merge: ## make merge PR=<n>; refused unless the head has local-gate success
 	@test -n "$(PR)" || { echo "usage: make merge PR=<number>" >&2; exit 2; }
