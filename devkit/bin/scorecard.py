@@ -436,7 +436,8 @@ LOCKFILES = frozenset(
 
 def pins_tools_only(repo: Repo, manifest: str) -> bool:
     """A manifest whose directory tracks nothing but it and a lockfile pins tools, not a stack:
-    the rust scaffold's tools/metrics/package.json (jscpd) is no TypeScript app."""
+    a tools/metrics/package.json pinning jscpd (homelab, claude-kit, kitchen, redlib until they
+    take devkit's pin, metrics/tools) is no TypeScript app."""
     parent = Path(manifest).parent
     if parent == Path("."):
         return False
@@ -698,8 +699,9 @@ def wired_tiers(repo: Repo) -> None:
     repo.add("tiers", not unbudgeted, f"{evidence}; unbudgeted: {', '.join(unbudgeted) or 'none'}")
 
 
-# A tier_guard command that floors a runner: the runner the tier's suite is.
-TIER_FLOOR = re.compile(r"--floor\s+(pytest|vitest)=")
+# A tier_guard command that floors a runner: the runner the tier's suite is (`=<min>`, or bare
+# once the ratchet holds the floor).
+TIER_FLOOR = re.compile(r"--floor\s+(pytest|vitest)(?:=|\s|$)")
 
 
 def logical_lines(recipe: list[str]) -> list[str]:
@@ -756,6 +758,19 @@ def clock_targets(root: Path) -> set[str]:
     return {words[1] for spec in jobs.split("|") if len(words := spec.split()) >= 2}
 
 
+def ratchet_floor_runners(repo: Repo, recipe: list[str]) -> set[str]:
+    """The pytest and vitest runners the ratchet floors for the tiers a recipe's tier_guard calls
+    name: tier_guard floors a runner its bound names even when the recipe does not
+    (metrics_ratchet.py, Floors), so the recipe alone can miss the tier's suite (#233 Codex)."""
+    tiers = {m.group(1) for line in logical_lines(recipe) for m in TIER_GUARD_CALL.finditer(line)}
+    return {
+        runner
+        for tier in tiers
+        for runner in ("pytest", "vitest")
+        if f"tests.{tier}.{runner}" in repo.metrics
+    }
+
+
 def wired_clock_shift(repo: Repo) -> None:
     """Every pytest or vitest tier reruns with the wall clock shifted: GATE_JOBS_CLOCK names its
     target, or a target whose recipe runs it (finplat's `test-db` starts Postgres, then `ci-db`)
@@ -771,7 +786,7 @@ def wired_clock_shift(repo: Repo) -> None:
             m.group(1)
             for line in logical_lines(recipe) if TIER_GUARD_CALL.search(line)
             for m in TIER_FLOOR.finditer(line)
-        }
+        } | ratchet_floor_runners(repo, recipe)
         for target, recipe in rules.items()
         if TIER_TARGET.match(target)
     }

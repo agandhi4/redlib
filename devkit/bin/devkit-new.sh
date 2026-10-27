@@ -229,9 +229,9 @@ fi
 # The bounds for the first commit: metrics.conf's collectors (whatever the stack declares) run
 # once and fill docs/metrics/ratchet.json, so `make ci-metrics` holds on this tree. On the
 # pins, as the lock step: a collector may need the stack's node. The stack's own make target,
-# not the script: its prerequisite installs what the collectors run (the rust stack's
-# metrics-deps: jscpd in tools/metrics; a real `devkit new --stack rust` failed "jscpd is not
-# installed" when this called metrics_collect.sh directly). TIGHTEN_RUN_TIERS=1: a collector
+# not the script: a prerequisite there installs what the collectors run (a real `devkit new
+# --stack rust` failed "jscpd is not installed" when this called metrics_collect.sh directly,
+# back when its jscpd was the repo's own tools/metrics). TIGHTEN_RUN_TIERS=1: a collector
 # that reads a tier's output (the rust stack's coverage) gets that tier run first, so the first
 # commit bounds coverage too instead of the rebaseline stopping on a missing report.
 echo "devkit-new: make metrics-rebaseline"

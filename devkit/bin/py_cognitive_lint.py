@@ -2,7 +2,7 @@
 """ci-lint's cognitive-complexity step for Python: no function over 15 (complexipy) in the
 files a change touches, or in the whole tree once the repo is at 0.
 
-  uv run --frozen python devkit/bin/py_cognitive_lint.py --root . --src server --scope backend
+  uv run --locked python devkit/bin/py_cognitive_lint.py --root . --src server --scope backend
       [--bounds docs/metrics/ratchet.json] [--base-ref origin/main] [--python <interpreter>]
 
 Why: ruff has no cognitive-complexity rule, so Python held `cognitive_over_15` only as a

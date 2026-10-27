@@ -91,6 +91,7 @@ Usage:
   metrics_ratchet.py rebaseline --snapshot S --bounds B [--report-only F] [--keys K1,K2]
   metrics_ratchet.py merge --out OUT [--skipped NAME]... [--] [INPUT.json...]
   metrics_ratchet.py loosened --base-ref REF --head-ref REF [--repo DIR] [--bounds REL]
+  metrics_ratchet.py floors --bounds B [--tier T]
 
 Key shape (docs/metrics-keys.md): flat dotted keys `<domain>.<scope>.<stat>`, numbers only,
 no whitespace. A collector file may also be nested objects (flattened to dotted keys) or
@@ -116,7 +117,7 @@ Bounds (`docs/metrics/ratchet.json`): `{"<metric>": {"direction": "lower"|"highe
 "higher" fails when value < bound. `null` exists only in the starter
 (templates/metrics/ratchet.json): `rebaseline` fills it, `check` refuses it, so a copied
 template never gates on a placeholder such as coverage 0. `rebaseline` also seeds every
-snapshot key the bounds do not track yet (except the `gate`, `tier` and `tests` domains, never
+snapshot key the bounds do not track yet (except the `gate` and `tier` domains, never
 seeded, and the report-only keys, which it also drops from the bounds) with the direction
 its domain fixes (DOMAIN_DIRECTIONS, the docs/metrics-keys.md table); a key of an unknown
 domain is an error naming it, so a repo-specific domain is added by hand with its direction.
@@ -137,6 +138,20 @@ and fails even with --rebaseline-ok: a renamed or removed metric is fixed by edi
 bounds file (which itself needs the label).
 WORSE fails with or without --rebaseline-ok; the label only accepts LOOSENED, REMOVED and
 DIRECTION bound lines, and under it each WORSE key prints a `metrics-rebaseline: ...` fix line.
+
+Floors (2026-10-26): `tests.<tier>.<runner>`, tier_guard.sh's count of the tests a tier ran, is
+bounded `higher`: the bound IS the tier's floor, and tier_guard.sh reads it less the slack
+(`floors`). Why:
+devkit's UNIT_BATS_FLOOR sat at 638 while 820 ran (#231), so 180 tests could vanish unseen; a
+Makefile floor raised by hand is never raised. Floors now ratchet like code metrics, with three
+differences. A gain locks in only past FLOOR_SLACK of the bound (gain_to_lock_in), so a PR that
+adds a few tests commits nothing, while a suite that grew by more than 5% fails until tightened.
+`tighten` seeds an unbounded floor key without --seed and `check` prints it `UNSEEDED` and passes,
+so a consumer that syncs this is never failed by the sync, only held from its first tighten on.
+A tier the gate did not run (area-scoped) writes no tier-<tier> file, so a floor whose tier-*
+source emitted nothing reads SKIPPED, not MISSING (skipped_collector); a tier that ran without
+the runner's count is MISSING. Lowering a floor is `rebaseline --keys` under the label, in the
+PR that removes the tests.
 
 Exit codes: 0 ok, 1 ratchet failed (`tighten`: a WORSE or MISSING key, after writing the
 tightened bounds), 2 usage error or unreadable/invalid file or base ref.
@@ -175,10 +190,17 @@ DOMAIN_DIRECTIONS = {
     "allowlist": "lower",
     "lint": "lower",
     "meta": "lower",
+    "tests": "higher",
 }
-# Never seeded by rebaseline (docs/metrics-keys.md): area-scoped jobs leave them absent on
-# narrow PRs and the seconds are noisy. A repo may still track one by hand, with headroom.
-NEVER_SEEDED_DOMAINS = frozenset({"gate", "tier", "tests"})
+# Never seeded by rebaseline (docs/metrics-keys.md): the seconds are noisy. A repo may still
+# track one by hand, with headroom.
+NEVER_SEEDED_DOMAINS = frozenset({"gate", "tier"})
+# Test-count floors (module docstring, Floors). Seeded by a plain tighten; a gain locks in only
+# past FLOOR_SLACK of the bound (rounded down: a 3-test suite locks in every gain).
+FLOOR_DOMAIN = "tests"
+FLOOR_SLACK = 0.05
+# tier_guard.sh's files, build/metrics/tier-<tier>.json: written only by a tier that ran.
+TIER_SOURCE_PREFIX = "tier-"
 # Report-only (module docstring): never gated, whatever the bounds file says. `vuln` moves with
 # a new advisory, not a code change; fan-in of a hub is architecture, not drift; a duplicated
 # share rises when unduplicated lines are deleted; a file's length alone never justifies a split.
@@ -217,10 +239,18 @@ class Snapshot:
     # Keys their collector declared report-only (module docstring): a property of how this
     # build was measured, which the key's name cannot carry (bundle.*.kb_total is gated for vite).
     report_only: frozenset[str] = frozenset()
+    # A schema 2 snapshot (merge's envelope) names every key's source, so a source it lacks did
+    # not emit; a schema 1 or flat one says nothing either way.
+    provenance: bool = False
 
     def is_report_only(self, metric: str) -> bool:
         """Never gated: by name (is_report_only) or by its collector's declaration."""
         return is_report_only(metric) or metric in self.report_only
+
+    @property
+    def ran(self) -> frozenset[str]:
+        """The collectors that emitted at least one key."""
+        return frozenset(self.sources.values())
 
 
 SNAPSHOT_SCHEMA = 2
@@ -281,6 +311,7 @@ def load_snapshot(path: Path, *, allow_empty: bool = False) -> Snapshot:
         raise InputError(f"snapshot {path} must be a JSON object")
     sources: dict[str, str] = {}
     skipped: frozenset[str] = frozenset()
+    provenance = False
     declared = _declared_report_only(doc, path)
     # An envelope: only `metrics` holds measurements; `commit` and `schema_version` would
     # otherwise flatten into bogus metrics (commit.dirty is skipped, schema_version not).
@@ -292,6 +323,7 @@ def load_snapshot(path: Path, *, allow_empty: bool = False) -> Snapshot:
             where = f"snapshot {path}"
             sources = {k: _collector_name(v, where) for k, v in raw_sources.items()}
             skipped = frozenset(_collector_name(n, where) for n in raw_skipped)
+            provenance = True
         doc = doc["metrics"]
     values = _flatten(doc)
     if not values and not allow_empty:
@@ -299,7 +331,9 @@ def load_snapshot(path: Path, *, allow_empty: bool = False) -> Snapshot:
     undeclared = sorted(declared - set(values))
     if undeclared:
         raise InputError(f"snapshot {path}: report_only names {', '.join(undeclared)}, which it does not emit")
-    return Snapshot(values=values, sources=sources, skipped=skipped, report_only=declared)
+    return Snapshot(
+        values=values, sources=sources, skipped=skipped, report_only=declared, provenance=provenance
+    )
 
 
 def _declared_report_only(doc: dict[str, object], path: Path) -> frozenset[str]:
@@ -459,12 +493,26 @@ def _with_value(metric: str, bound: Bound, snapshot: Snapshot) -> Bound:
 
 
 def skipped_collector(metric: str, bound: Bound, snapshot: Snapshot) -> str | None:
-    """The collector that would have measured `metric` but did not run, else None. Only a
-    bound with a `source` that is in the snapshot's `skipped` qualifies: a key with no source
-    (bounds written before schema 2) or whose collector ran is MISSING."""
-    if metric not in snapshot.values and bound.source in snapshot.skipped:
+    """The collector that would have measured `metric` but did not run, else None. A bound
+    whose `source` is in the snapshot's `skipped` qualifies, and so does one whose source is a
+    tier file that emitted nothing (a tier the gate did not run; module docstring, Floors): a
+    key with no source (bounds written before schema 2) or whose collector ran is MISSING."""
+    if metric in snapshot.values or bound.source is None:
+        return None
+    if bound.source in snapshot.skipped:
+        return bound.source
+    # Only a schema 2 snapshot says which sources emitted: a flat one reads MISSING.
+    if (
+        snapshot.provenance
+        and bound.source.startswith(TIER_SOURCE_PREFIX)
+        and bound.source not in snapshot.ran
+    ):
         return bound.source
     return None
+
+
+def is_floor(metric: str) -> bool:
+    return metric.partition(".")[0] == FLOOR_DOMAIN
 
 
 def is_report_only(metric: str) -> bool:
@@ -491,13 +539,16 @@ def seed_bound(metric: str, snapshot: Snapshot, bounds_path: Path) -> Bound:
     return Bound(direction, snapshot.values[metric], snapshot.sources.get(metric))
 
 
-def seed_bounds(snapshot: Snapshot, bounds: dict[str, Bound], bounds_path: Path) -> dict[str, Bound]:
+def seed_bounds(
+    snapshot: Snapshot, bounds: dict[str, Bound], bounds_path: Path, *, floors_only: bool = False
+) -> dict[str, Bound]:
     """A first bound for every seedable snapshot key the bounds do not track (rebaseline, and
-    tighten under --seed), in key order."""
+    tighten under --seed), in key order; with floors_only, the floor keys alone (a plain
+    tighten)."""
     return {
         metric: seed_bound(metric, snapshot, bounds_path)
         for metric in sorted(set(snapshot.values) - set(bounds))
-        if seedable(metric, snapshot)
+        if seedable(metric, snapshot) and (is_floor(metric) or not floors_only)
     }
 
 
@@ -527,12 +578,18 @@ def classify(value: float, bound: float, direction: str) -> str:
     return "BETTER" if is_better(value, bound, direction) else "WORSE"
 
 
-def gain_to_lock_in(value: float, bound: float) -> bool:
-    """True when a BETTER value must be committed as the bound before check passes: any gain
-    on an integer key, a gain past LOCK_IN_TOLERANCE on a float key."""
-    if isinstance(value, int) and isinstance(bound, int):
-        return True
-    return abs(value - bound) > LOCK_IN_TOLERANCE
+def lock_in_slack(metric: str, value: float, bound: float) -> float:
+    """How far `value` may beat `bound` before check demands a tighten: FLOOR_SLACK of the
+    bound on a floor, none on any other integer key (its gain is deterministic and real),
+    LOCK_IN_TOLERANCE on a float key."""
+    if is_floor(metric):
+        return int(bound * FLOOR_SLACK)
+    return 0 if isinstance(value, int) and isinstance(bound, int) else LOCK_IN_TOLERANCE
+
+
+def gain_to_lock_in(metric: str, value: float, bound: float) -> bool:
+    """True when a BETTER value must be committed as the bound before check passes."""
+    return abs(value - bound) > lock_in_slack(metric, value, bound)
 
 
 def _fmt(value: float | None) -> str:
@@ -634,17 +691,83 @@ def _status_line(metric: str, bound: Bound, snapshot: Snapshot, bounds_path: Pat
     if status == "BETTER":  # tighten reaches here only with a gain within the tolerance
         note = (
             f" — run make metrics-tighten and commit {bounds_path}"
-            if gain_to_lock_in(value, bound.bound)
-            else f" (within tolerance {LOCK_IN_TOLERANCE}; not a failure)"
+            if gain_to_lock_in(metric, value, bound.bound)
+            else f" (within tolerance {_fmt(lock_in_slack(metric, value, bound.bound))}; "
+            "not a failure)"
         )
     print(f"ratchet {metric} {_fmt(value)} vs {_fmt(bound.bound)} {status}{note}")
     return status
+
+
+def _within_main(
+    worse: list[tuple[str, float, float]], base: dict[str, Bound] | None
+) -> list[tuple[str, float, float, float]]:
+    """The WORSE keys whose bound is stricter than main's while the value still meets main's:
+    a bound tightened past what this tree measures, which a merge of two moved bounds settles
+    to (the driver's stricter wins). Raising it to the value loosens nothing against main, so
+    `make metrics-rebaseline KEYS=` fixes it with no label. Each is (metric, value, bound,
+    main's bound)."""
+    out = []
+    for metric, value, bound in worse:
+        main = base.get(metric) if base is not None else None
+        if main is None or main.bound is None:
+            continue
+        if is_better(bound, main.bound, main.direction) and classify(
+            value, main.bound, main.direction
+        ) != "WORSE":
+            out.append((metric, value, bound, main.bound))
+    return out
 
 
 def _rebaseline_command(keys: Iterable[str]) -> str:
     """The command a fix line names: keyed to the WORSE keys, so it moves no other bound."""
     named = ",".join(sorted(keys))
     return f"`make metrics-rebaseline KEYS={named or '<key>[,<key>]'}`"
+
+
+def _worse_failed(
+    worse: list[tuple[str, float, float]],
+    loosened: int,
+    base: dict[str, Bound] | None,
+    rebaseline_ok: bool,
+    bounds_path: Path,
+) -> bool:
+    """check's verdict on the WORSE keys and the bounds looser than main: the fix lines it prints,
+    and whether they fail the run. Three causes, three fixes: under the label a value past its
+    committed bound; a bound stricter than main's that this tree misses (_within_main: a
+    rebaseline with no label); anything else, a regression or an unlabelled loosening."""
+    if worse and rebaseline_ok:
+        # The label admits a looser committed bound, never a value past the committed one.
+        for metric, value, bound_value in worse:
+            _fail(
+                f"metrics-rebaseline: {metric} {_fmt(value)} is past its bound "
+                f"{_fmt(bound_value)}; `make metrics-rebaseline KEYS={metric}` and commit "
+                f"{bounds_path}, or fix the regression"
+            )
+        return True
+    settled = _within_main(worse, base) if not loosened else []
+    if worse and len(settled) == len(worse):
+        for metric, value, bound_value, main_bound in settled:
+            _fail(
+                f"ratchet: {metric} {_fmt(value)} is past this PR's bound {_fmt(bound_value)} but "
+                f"within main's {_fmt(main_bound)}: a bound tightened past this tree, as a merge "
+                "of two moved bounds settles (the stricter wins, measured on neither tree)"
+            )
+        _fail(
+            f"ratchet FAIL: {len(worse)} bound(s) stricter than main's that this tree does not "
+            f"meet; {_rebaseline_command(m for m, _, _ in worse)} and commit {bounds_path} "
+            "(no label: each stays within main's bound)"
+        )
+        return True
+    if worse or (loosened and not rebaseline_ok):
+        _fail(
+            f"ratchet FAIL: {len(worse)} metric(s) worse than their bound, "
+            f"{loosened} bound(s) looser than main; fix them, or, if a tool change "
+            f"moved the numbers, commit the looser {bounds_path} "
+            f"({_rebaseline_command(m for m, _, _ in worse)}) and label the PR metrics-rebaseline"
+        )
+        return True
+    return False
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -683,13 +806,21 @@ def cmd_check(args: argparse.Namespace) -> int:
         counts[status] += 1
         if status == "WORSE":
             worse.append((metric, snapshot.values[metric], bound.bound))
-        elif status == "BETTER" and gain_to_lock_in(snapshot.values[metric], bound.bound):
+        elif status == "BETTER" and gain_to_lock_in(metric, snapshot.values[metric], bound.bound):
             unlocked.append(metric)
 
     untracked = sorted(set(snapshot.values) - set(bounds))
     if args.show_untracked:
         for metric in untracked:
             print(f"ratchet {metric} {_fmt(snapshot.values[metric])} UNTRACKED")
+    # A floor a repo has not seeded yet (module docstring, Floors): named, never failed, so the
+    # devkit-sync that brings floors in passes and the author's next tighten seeds them.
+    for metric in untracked:
+        if is_floor(metric):
+            print(
+                f"ratchet {metric} {_fmt(snapshot.values[metric])} UNSEEDED (a test-count floor: "
+                f"make metrics-tighten seeds it into {bounds_path}; not a failure)"
+            )
     print(
         f"ratchet summary same={counts['SAME']} better={counts['BETTER']} "
         f"worse={counts['WORSE']} missing={counts['MISSING']} skipped={counts['SKIPPED']} "
@@ -704,22 +835,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             f"remove or rename them in {bounds_path} (a renamed key's new name: run {SEED_HINT})"
         )
         failed = True
-    if worse and args.rebaseline_ok:
-        # The label admits a looser committed bound, never a value past the committed one.
-        for metric, value, bound_value in worse:
-            _fail(
-                f"metrics-rebaseline: {metric} {_fmt(value)} is past its bound "
-                f"{_fmt(bound_value)}; `make metrics-rebaseline KEYS={metric}` and commit "
-                f"{bounds_path}, or fix the regression"
-            )
-        failed = True
-    elif worse or (moved["loosened"] and not args.rebaseline_ok):
-        _fail(
-            f"ratchet FAIL: {len(worse)} metric(s) worse than their bound, "
-            f"{moved['loosened']} bound(s) looser than main; fix them, or, if a tool change "
-            f"moved the numbers, commit the looser {bounds_path} "
-            f"({_rebaseline_command(m for m, _, _ in worse)}) and label the PR metrics-rebaseline"
-        )
+    if _worse_failed(worse, moved["loosened"], base, args.rebaseline_ok, bounds_path):
         failed = True
     if unlocked:
         # Not exempted by --rebaseline-ok: the label admits looser bounds, never stale ones.
@@ -739,13 +855,15 @@ def cmd_check(args: argparse.Namespace) -> int:
 def cmd_tighten(args: argparse.Namespace) -> int:
     """Move every bound the snapshot beats to the snapshot value; never loosen any. A
     report-only bound is dropped (no label needed: check ignores it against main). With --seed,
-    every seedable key without a bound gains one at its value. Every WORSE and MISSING key prints
+    every seedable key without a bound gains one at its value, and every floor key does without
+    it. Every WORSE and MISSING key prints
     check's line and makes the exit 1, after the write."""
     snapshot = load_snapshot(Path(args.snapshot), allow_empty=True)
     bounds_path = Path(args.bounds)
     bounds = load_bounds(bounds_path)
     # Resolved before anything is written: an unknown domain is exit 2 with the file untouched.
-    seeds = seed_bounds(snapshot, bounds, bounds_path) if args.seed else {}
+    # Floors are seeded without --seed (module docstring, Floors).
+    seeds = seed_bounds(snapshot, bounds, bounds_path, floors_only=not args.seed)
     tightened = dict(bounds)
     changed = dropped = 0
     failing = {"WORSE": 0, "MISSING": 0}
@@ -763,7 +881,8 @@ def cmd_tighten(args: argparse.Namespace) -> int:
         # the next gate's 92.47.
         if value is not None and (
             bound.bound is None
-            or (is_better(value, bound.bound, bound.direction) and gain_to_lock_in(value, bound.bound))
+            or (is_better(value, bound.bound, bound.direction)
+                and gain_to_lock_in(metric, value, bound.bound))
         ):
             tightened[metric] = _with_value(metric, bound, snapshot)
             changed += 1
@@ -785,7 +904,8 @@ def cmd_tighten(args: argparse.Namespace) -> int:
     notes_s = f" ({', '.join(notes)})" if notes else ""
     print(f"ratchet tightened {changed} bound(s) in {bounds_path}{notes_s}")
     if not args.seed:
-        unbounded = [m for m in sorted(set(snapshot.values) - set(bounds)) if seedable(m, snapshot)]
+        untracked = sorted(set(snapshot.values) - set(tightened))
+        unbounded = [m for m in untracked if seedable(m, snapshot)]
         if unbounded:
             print(
                 f"ratchet untracked {len(unbounded)} key(s) without a bound "
@@ -830,7 +950,7 @@ def rebaseline_keys(
                     f"--keys {key}: not a bound in {bounds_path} and not in the snapshot"
                 )
             if not seedable(key, snapshot):
-                raise InputError(f"--keys {key}: its domain is never bounded (gate, tier, tests)")
+                raise InputError(f"--keys {key}: its domain is never bounded (gate, tier)")
         elif key not in snapshot.values:
             collector = skipped_collector(key, bounds[key], snapshot)
             why = f"collector {collector} did not run" if collector else "absent from it"
@@ -972,6 +1092,31 @@ def cmd_merge(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_floors(args: argparse.Namespace) -> int:
+    """The test-count floors, `<tier> <runner> <min>` per tests.<tier>.<runner> bound in key
+    order, of one tier with --tier: tier_guard.sh's floors, and the tiers metrics_collect.sh
+    needs a fresh tier-<tier>.json from. <min> is the bound less its FLOOR_SLACK: the bound is
+    the gate machine's count, and a tier run elsewhere (Actions, another box) may skip a test
+    that depends on its environment (closet's model-gated spec); `check` in the gate holds the
+    exact bound. A floor that is not a whole number or not `higher` is exit 2: a hand edit both
+    could only misread."""
+    bounds_path = Path(args.bounds)
+    for metric, bound in sorted(load_bounds(bounds_path).items()):
+        domain, _, rest = metric.partition(".")
+        tier, _, runner = rest.partition(".")
+        if domain != FLOOR_DOMAIN or not runner or "." in runner or bound.bound is None:
+            continue
+        if args.tier is not None and tier != args.tier:
+            continue
+        if bound.direction != "higher" or bound.bound != int(bound.bound):
+            raise InputError(
+                f"bounds {bounds_path}: floor {metric} must be a whole number, direction higher"
+            )
+        floor = int(bound.bound) - int(lock_in_slack(metric, bound.bound, bound.bound))
+        print(f"{tier} {runner} {floor}")
+    return EXIT_OK
+
+
 REPORT_ONLY_HELP = (
     "also write the snapshot's report-only keys to FILE (docs/metrics/report-only.json), the "
     "committed copy the scorecard reads"
@@ -997,6 +1142,10 @@ def cmd_loosened(args: argparse.Namespace) -> int:
 # The driver merges key by key: a key one side changed takes that side, a key both changed to
 # the same value takes it, and a key both changed differently takes the STRICTER bound (the
 # direction's better one; never a silent loosening; the gate then measures the merged tree).
+# GOTCHA: that stricter value is one nobody measured on the merged tree (kitchen #25: base 1,
+# main's labelled rebaseline 7, the PR's own tighten 0 -> 0, and the merged tree measured 1), so
+# the driver prints one `ratchet merge:` line per bound it settled, and check names the cause
+# when such a bound is WORSE yet within main's (_within_main).
 # Installed by hooks_check.sh --fix (the .gitattributes lines and the per-clone driver config);
 # git runs it from the worktree's top level as `merge-driver %O %A %B %P` and reads the result
 # from %A. Exit 1 is a conflict git reports: it leaves %A as ours, and the configured fallback
@@ -1008,9 +1157,11 @@ class MergeConflict(Exception):
     """Two sides changed one key in ways the driver will not choose between."""
 
 
-def _stricter_bound(key: str, ours: object, theirs: object) -> object:
+def _stricter_bound(key: str, base: object, ours: object, theirs: object) -> object:
     """ratchet.json: both sides moved one bound. The tighter one wins; null (not yet seeded)
-    loses to a number; a deletion or a direction change is a conflict."""
+    loses to a number; a deletion or a direction change is a conflict. Prints one `ratchet
+    merge:` line naming the three values (git shows a driver's stderr), because the winner was
+    measured on neither side's tree merged with the other."""
     if ours is _ABSENT or theirs is _ABSENT:
         raise MergeConflict(f"{key}: deleted on one side, changed on the other")
     a, b = parse_bounds({key: ours}, "ours")[key], parse_bounds({key: theirs}, "theirs")[key]
@@ -1018,10 +1169,19 @@ def _stricter_bound(key: str, ours: object, theirs: object) -> object:
         raise MergeConflict(f"{key}: direction {a.direction} on one side, {b.direction} on the other")
     if a.bound is None or b.bound is None:
         return theirs if a.bound is None else ours
-    return theirs if is_better(b.bound, a.bound, a.direction) else ours
+    won = theirs if is_better(b.bound, a.bound, a.direction) else ours
+    was = parse_bounds({key: base}, "base")[key].bound if isinstance(base, dict) else None
+    kept = b.bound if won is theirs else a.bound
+    print(
+        f"ratchet merge: {key} base {_fmt(was)}, one side {_fmt(a.bound)}, the other "
+        f"{_fmt(b.bound)} -> {_fmt(kept)} (the stricter; measured on neither tree merged: run "
+        "make ci-metrics before push, and make metrics-rebaseline KEYS=<key> if it is WORSE)",
+        file=sys.stderr,
+    )
+    return won
 
 
-def _wired_wins(key: str, ours: object, theirs: object) -> object:
+def _wired_wins(key: str, _base: object, ours: object, theirs: object) -> object:
     """scorecard.json: both sides changed one check's entry; wired on either side stays wired
     (an unwired record beats a deletion). Of two share-only files' shares, the higher wins."""
     sides = (ours, theirs)
@@ -1033,14 +1193,14 @@ def _wired_wins(key: str, ours: object, theirs: object) -> object:
     raise MergeConflict(f"{key}: changed on both sides and not a check entry or share on both")
 
 
-def _ours(key: str, ours: object, theirs: object) -> object:
+def _ours(key: str, _base: object, ours: object, theirs: object) -> object:
     """report-only.json: observations, not bounds; the next tighten rewrites them anyway."""
     return theirs if ours is _ABSENT else ours
 
 
 # The three committed files by name: how a key both sides changed is settled, and whether the
 # file's nested objects (report-only's metrics and sources) merge per key or as one value.
-_MERGE_RULES: dict[str, tuple[Callable[[str, object, object], object], bool]] = {
+_MERGE_RULES: dict[str, tuple[Callable[[str, object, object, object], object], bool]] = {
     "ratchet.json": (_stricter_bound, False),
     "scorecard.json": (_wired_wins, True),
     "report-only.json": (_ours, True),
@@ -1048,7 +1208,8 @@ _MERGE_RULES: dict[str, tuple[Callable[[str, object, object], object], bool]] = 
 
 
 def merge_json(
-    base: object, ours: object, theirs: object, both: Callable[[str, object, object], object],
+    base: object, ours: object, theirs: object,
+    both: Callable[[str, object, object, object], object],
     *, nested: bool, path: str = "",
 ) -> object:
     """Per-key three-way merge of two JSON objects against their base."""
@@ -1065,7 +1226,7 @@ def merge_json(
         elif nested and all(isinstance(x, dict) for x in (o, t)):
             value = merge_json(b if isinstance(b, dict) else {}, o, t, both, nested=True, path=name)
         else:
-            value = both(name, o, t)
+            value = both(name, b, o, t)
         if value is not _ABSENT:
             out[key] = value
     return out
@@ -1129,7 +1290,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--seed",
         action="store_true",
         help="also add a bound at today's value for every snapshot key without one (the "
-        "direction from its domain); never seeds gate, tier, tests or report-only keys",
+        "direction from its domain; floors are seeded without it); never seeds gate, tier or "
+        "report-only keys",
     )
     tighten.set_defaults(func=cmd_tighten)
 
@@ -1159,6 +1321,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--bounds", default="docs/metrics/ratchet.json", help="the bounds file's repo-relative path"
     )
     loosened.set_defaults(func=cmd_loosened)
+
+    floors = sub.add_parser(
+        "floors", help="print `<tier> <runner> <min>` per test-count floor (tier_guard.sh)"
+    )
+    floors.add_argument("--bounds", required=True, help="bounds JSON (docs/metrics/ratchet.json)")
+    floors.add_argument("--tier", help="only this tier's floors")
+    floors.set_defaults(func=cmd_floors)
 
     merge = sub.add_parser("merge", help="merge collector outputs into one snapshot envelope")
     merge.add_argument("--out", required=True, help="snapshot JSON to write")

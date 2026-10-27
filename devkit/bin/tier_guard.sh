@@ -10,7 +10,8 @@
 #              start-up and migrations inside it count, so keep one-time setup (browser
 #              installs, image builds) outside the guarded command
 #   --floor    a runner whose summary the command prints, and the fewest tests it may report
-#              as run; repeat for a command that runs several runners (pytest then vitest)
+#              as run; repeat for a command that runs several runners (pytest then vitest).
+#              `=<min>` may be left out once the repo's ratchet holds the floor (Floors, below)
 #
 # Output (an API, like local_gate's GATE lines). The command's own output streams through
 # unchanged (stderr merged into stdout); a copy is kept only to read the summaries. Then:
@@ -20,20 +21,23 @@
 #   TIER <tier> OVERBUDGET <s>s (budget <b>s)            exit 1, unless TIER_BUDGET_ENFORCE=0
 #                                                        or DEVKIT_CLOCK_SHIFT (Clock shift)
 #   TIER <tier>: <s>s (budget <b>s) <runner>=<n>...      every check held: exit 0
-# Under load the budget stretches (bin/_load_lib.sh: min(1-minute load / cores, 2), sampled when
-# the command starts and when it ends, the larger stretch kept, only above 1.0) and both budget
-# lines then read `(budget 110 s ×1.6 (load 2.0 at start, 13.1 at end on 8 cpus) → 176 s)`;
+# Under load the budget stretches (bin/_load_lib.sh: min(max(1-minute load / cores, gate slots
+# held), 2), sampled when the command starts and when it ends, the larger stretch kept, only
+# above 1.0) and both budget lines then read `(budget 110 s ×1.6 (load 2.0 at start, 13.1 at end
+# on 8 cpus) → 176 s)`, with `; 2 gate slots held` before the `)` when more than one was;
 # unloaded at both, they are exactly as above. The command runs with DEVKIT_LOAD_SCALE set to the
 # start sample's factor ("1" unscaled), so its runner can stretch its own per-test timeouts
 # by the factor its budget got (lint/vitest.base.mjs does, for vitest).
-# Slot: outside a gate the tier takes one of the machine-wide gate slots first (bin/_slot_lib.sh,
-# GATE_SLOTS from the environment or gate.env, as the gate reads it), holder `<repo>:<tier>`, so
-# `make ci-unit` by hand in four worktrees queues instead of piling onto the gates' load
-# (2026-10-21). While every slot is held it prints, at once and every 30 s,
-#   TIER <tier> waiting for a gate slot (<n> running: <repo>#<pr>, <repo>:<tier>, ...)
-# then `TIER <tier> slot <n>/<slots>`. The wait is before the budget clock. Inside a gate (or
-# another tier) DEVKIT_SLOT_HOLDER names a live holder and the tier runs on that slot, silently;
-# TIER_SLOT=0 (default 1) skips the slot for a deliberately quick single test.
+# Capacity: outside a gate the tier is first admitted to the machine-wide pool the gate's jobs
+# share (bin/_slot_lib.sh; GATE_CAPACITY from the environment or gate.env, as the gate reads it)
+# for its tier name's cost (unit 2, db 3, ...), holder `<repo>:<tier>`, so `make ci-unit` by hand
+# in four worktrees queues instead of piling onto the gates' load (2026-10-21). While it does not
+# fit it prints, at once and every 30 s,
+#   TIER <tier> waiting for capacity: <repo>:<tier> needs <c> of <cap>, <u> in use (<holder> <c>, ...)
+# then `TIER <tier> admitted (cost <c> of <cap>[, queued <n>s])`. The wait is before the budget
+# clock. Inside a gate job (or another tier) DEVKIT_SLOT_HOLDER names a live holder and the tier
+# runs on its units, silently; TIER_SLOT=0 (default 1) stays out of the pool for a deliberately
+# quick single test.
 # A bad invocation exits 2 before the command runs. TIER_BUDGET_ENFORCE=0 (default 1) keeps
 # the OVERBUDGET line but not the failure, for a repo or box adopting budgets, exactly as
 # GATE_BUDGET_ENFORCE does for local_gate's job budgets. Floors have no such switch: a count
@@ -81,8 +85,16 @@
 # vitest config without clockShift()). A file, not an output line: vitest prints a setup
 # file's output per test file, or not at all under `silent`.
 #
-# Budgets are set from GATE timings with headroom and only ever go down; floors are the current
-# counts and move only in the PR that removes tests, saying why in docs/decisions.md.
+# Floors (devkit decisions 2026-10-26): when <root>/docs/metrics/ratchet.json bounds
+# tests.<tier>.<runner> (metrics_ratchet.py, Floors), that bound less 5% is the runner's floor
+# (the gate's ratchet holds the exact bound; a run off the gate's box may skip a test that needs
+# its environment), and the larger of it and a --floor number wins; a runner only the bounds name is floored too, so
+# dropping it from the recipe cannot drop its floor. `make metrics-tighten` seeds the bound from
+# this tier's count and raises it once the count is past it by more than 5%; the gate's metrics
+# job fails until then. It moves down only through `make metrics-rebaseline KEYS=<key>` and the
+# metrics-rebaseline label, in the PR that removes the tests (UNIT_BATS_FLOOR sat at 638 while
+# 820 ran: a Makefile floor raised by hand never was). Budgets are set from GATE timings with
+# headroom and only ever go down.
 set -uo pipefail
 # shellcheck source=bin/_load_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_load_lib.sh"
@@ -94,11 +106,13 @@ set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_slot_lib.sh"
 # shellcheck source=bin/_metrics_conf_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_metrics_conf_lib.sh"
+# shellcheck source=bin/_toolchain_lib.sh  # devkit_python, for the ratchet's floors
+. "$(dirname "${BASH_SOURCE[0]}")/_toolchain_lib.sh"
 
 RUNNERS="pytest vitest playwright cargo bats"
 
 usage() {
-  echo "usage: $0 <tier> --budget <seconds> [--floor <runner>=<min>]... -- <command...>" >&2
+  echo "usage: $0 <tier> --budget <seconds> [--floor <runner>[=<min>]]... -- <command...>" >&2
   echo "       runners: $RUNNERS" >&2
   exit 2
 }
@@ -199,13 +213,15 @@ while [ $# -gt 0 ] && [ "$1" != "--" ]; do
       ;;
     --floor)
       [ $# -ge 2 ] || usage
-      [[ "$2" =~ ^[a-z]+=[0-9]+$ ]] || die "--floor takes <runner>=<min> (got '$2')"
+      [[ "$2" =~ ^[a-z]+(=[0-9]+)?$ ]] || die "--floor takes <runner>[=<min>] (got '$2')"
       runner=${2%%=*}
       case " $RUNNERS " in *" $runner "*) ;; *) die "unknown runner '$runner' (one of: $RUNNERS)" ;; esac
       for f in ${FLOORS[@]+"${FLOORS[@]}"}; do
         [ "${f%% *}" != "$runner" ] || die "--floor $runner given twice"
       done
-      FLOORS+=("$runner ${2#*=}")
+      min=0
+      [ "$runner" = "$2" ] || min=${2#*=}
+      FLOORS+=("$runner $min")
       shift 2
       ;;
     *) usage ;;
@@ -223,6 +239,33 @@ TAKE_SLOT=${TIER_SLOT:-1}
 # report the current directory as the top level: a tier run after `cd backend` would then write
 # backend/build/metrics/ (Orbit #59). Drop both so the lookup answers for the real checkout.
 root=$(env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --show-toplevel 2>/dev/null) || root=$PWD
+
+# ratchet_floors: FLOORS raised to the ratchet's bounds (header: Floors).
+ratchet_floors() {
+  local bounds=$root/docs/metrics/ratchet.json listed runner min f found merged _tier
+  [ -f "$bounds" ] || return 0
+  devkit_python || die "$DEVKIT_PYTHON_ERROR"
+  listed=$("$DEVKIT_PYTHON" -I "$(dirname "${BASH_SOURCE[0]}")/metrics_ratchet.py" floors \
+    --bounds "$bounds" --tier "$TIER") || exit 2
+  while read -r _tier runner min; do
+    [ -n "$runner" ] || continue
+    case " $RUNNERS " in
+      *" $runner "*) ;;
+      *) die "$bounds: floor tests.$TIER.$runner is no runner tier_guard counts (one of: $RUNNERS)" ;;
+    esac
+    found=0 merged=()
+    for f in ${FLOORS[@]+"${FLOORS[@]}"}; do
+      if [ "${f%% *}" = "$runner" ]; then
+        found=1
+        [ "${f#* }" -ge "$min" ] || f="$runner $min"
+      fi
+      merged+=("$f")
+    done
+    [ "$found" = 1 ] || merged+=("$runner $min")
+    FLOORS=("${merged[@]}")
+  done <<<"$listed"
+}
+ratchet_floors
 
 SHIFT=${DEVKIT_CLOCK_SHIFT:-}
 if [ -n "$SHIFT" ]; then
@@ -298,7 +341,7 @@ put_back_inputs() {
 tmp=${TMPDIR:-/tmp}
 LOG=$(mktemp "${tmp%/}/tier-$TIER.XXXXXX") || die "mktemp failed"
 PROOF=""
-trap 'rm -f "$LOG" ${PROOF:+"$PROOF"}; put_back_inputs || exit 1' EXIT
+trap 'slot_release; rm -f "$LOG" ${PROOF:+"$PROOF"}; put_back_inputs || exit 1' EXIT
 if [ -n "$SHIFT" ]; then
   PROOF=$(mktemp "${tmp%/}/tier-$TIER-shift.XXXXXX") || die "mktemp failed"
   export DEVKIT_CLOCK_SHIFT_PROOF=$PROOF
@@ -307,23 +350,31 @@ fi
 
 # A tier's budget is wall time; a nap mid-run would read as test time (bin/_awake_lib.sh).
 devkit_stay_awake
-if [ "$TAKE_SLOT" = 1 ] && ! slot_held_above; then
-  # Only GATE_SLOTS is read from gate.env; the gate's other keys are its own.
-  gate_env_load tier_guard GATE_SLOTS "$GATE_LOCAL_KEYS|$GATE_REMOTE_KEYS"
+# held_slots: the pool's holder count for the budget's stretch (bin/_load_lib.sh, Slots); 1 under
+# TIER_SLOT=0, which stays out of the pool altogether.
+held_slots() { if [ "$TAKE_SLOT" = 1 ]; then slot_held_count; else echo 1; fi; }
+if [ "$TAKE_SLOT" = 1 ]; then
+  # Only GATE_CAPACITY is read from gate.env; the gate's other keys are its own. Inside a gate
+  # too: the tier asks for nothing there, but its budget stretches by the holders.
+  gate_env_load tier_guard GATE_CAPACITY "$GATE_LOCAL_KEYS|$GATE_REMOTE_KEYS"
   slot_pool_init tier_guard
-  slot_acquire "TIER $TIER" "$(repo_name):$TIER"
-  echo "TIER $TIER slot $SLOT/$SLOTS"
+  if ! slot_held_above; then
+    cost=$(slot_cost "$TIER")
+    slot_acquire "TIER $TIER" "$(repo_name):$TIER" "$cost"
+    echo "TIER $TIER admitted (cost $cost of $SLOT_CAPACITY$([ "$SLOT_QUEUED" = 0 ] || echo ", queued ${SLOT_QUEUED}s"))"
+    # The holder for a tier the command runs inside this one (it asks for nothing again).
+    export DEVKIT_SLOT_HOLDER=$$
+  fi
 fi
-devkit_load_scale "$BUDGET"
+devkit_load_scale "$BUDGET" "$(held_slots)"
 start=$SECONDS
-# 9>&- on both sides of the pipe: the slot's fd stays with this process alone, so a stray
-# background child of the command cannot hold the slot after the tier ends (bin/_slot_lib.sh).
-DEVKIT_LOAD_SCALE=$LOAD_SCALE "$@" 9>&- 2>&1 | tee "$LOG" 9>&-
+DEVKIT_LOAD_SCALE=$LOAD_SCALE "$@" 2>&1 | tee "$LOG"
 rc=${PIPESTATUS[0]}
 secs=$((SECONDS - start))
 put_back=0
 put_back_inputs || put_back=1
-devkit_load_rescale
+devkit_load_rescale "$(held_slots)"
+slot_release
 budget_text="budget ${BUDGET}s"
 [ -z "$LOAD_NOTE" ] || budget_text=$LOAD_NOTE
 
@@ -362,7 +413,7 @@ for f in ${FLOORS[@]+"${FLOORS[@]}"}; do
   counts="$counts $runner=$n"
   if [ "$n" -lt "$min" ]; then
     echo "TIER $TIER FLOOR $runner $n < $min"
-    echo "tier_guard: a test file, marker or glob stopped being picked up, or tests now skip; lower a floor only in the PR that removes tests" >&2
+    echo "tier_guard: a test file, marker or glob stopped being picked up, or tests now skip; lower a floor only in the PR that removes tests (make metrics-rebaseline KEYS=tests.$TIER.$runner and the metrics-rebaseline label)" >&2
     failed=1
   fi
 done

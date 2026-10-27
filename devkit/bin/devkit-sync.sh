@@ -47,6 +47,8 @@
 # Merge driver: after vendoring, every path below runs metrics_driver_heal
 # (bin/_gitattributes_lib.sh) with the new devkit/bin, so this clone's merge.devkit-metrics.driver
 # matches the vendored command without another `make install` (rollcall #78).
+# gh's default repo likewise becomes origin (gh_default_heal, bin/_gh_repo_lib.sh): a fork's bare
+# gh resolves to its parent (redlib, 2026-10-26).
 #
 # Hooks: the sync's commit only vendors (devkit/ at .devkit-rev's tree, base copies), so the
 # repo's pre-commit runs none of its steps for it (hook_steps.sh _hook_vendoring_only) and the
@@ -63,6 +65,8 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_trailer_lib.sh"
 # shellcheck source=bin/_gitattributes_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_gitattributes_lib.sh"
+# shellcheck source=bin/_gh_repo_lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_gh_repo_lib.sh"
 STAGE=0
 REF=
 for arg in "$@"; do
@@ -131,6 +135,8 @@ while IFS=' ' read -r base copy; do
 done <<<"$(base_copies)"
 metrics_driver_heal "$ROOT" "$ROOT/devkit/bin" devkit-sync \
   || echo "devkit-sync: cannot set merge.devkit-metrics.driver (git above); make install sets it" >&2
+gh_default_heal "$ROOT" devkit-sync \
+  || echo "devkit-sync: cannot make origin gh's default repo (git above); devkit-check retries it" >&2
 if [ "$CURRENT" = 1 ]; then
   [ "${#REFRESHED[@]}" -gt 0 ] || { echo "devkit at ${UPSTREAM:0:7} (tree ${UPSTREAM_TREE:0:7}), already current"; exit 0; }
   [ "$STAGE" = 1 ] || commit_sync "Refresh devkit base copies to ${UPSTREAM:0:7}" -- "${REFRESHED[@]}"

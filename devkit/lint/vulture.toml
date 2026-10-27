@@ -33,3 +33,121 @@ ignore_decorators = [
 
 [sets.sqlalchemy]
 ignore_decorators = ["@event.listens_for*", "@hybrid_property*", "@*.expression", "@validates*"]
+
+# Django and Django REST framework: names they call by convention, and (`declarative`, devkit's
+# table: python.py strips it before vulture reads the set) the classes whose bodies they read.
+# ignore_names holds only hook names distinctive to Django/DRF; a generic one a framework class
+# overrides (a serializer's `create`, a model's `save`) goes in the repo's own ignore_names.
+[sets.django]
+ignore_decorators = [
+  "@receiver*",
+  "@admin.register*",
+  "@admin.display*",
+  "@admin.action*",
+  "@action*",
+  "@api_view*",
+  "@register.filter*",
+  "@register.simple_tag*",
+  "@register.inclusion_tag*",
+  "@register.tag*",
+]
+ignore_names = [
+  # URLconf module attributes the resolver reads
+  "urlpatterns", "app_name", "handler400", "handler403", "handler404", "handler500",
+  # middleware: plain classes Django calls by these names, no base to scope them to
+  "process_view", "process_exception", "process_template_response",
+  # Every other Django/DRF hook is in [sets.django.declarative.hooks], scoped to its base.
+]
+
+[sets.django.declarative]
+# Class attributes Django/DRF read off the class: model fields and choices, AppConfig and
+# Migration attributes, serializer and form fields, view and admin options, an APIException's
+# default_detail. Globs on the external base's last segment (DRF's many *Serializer, *Field and
+# *View classes; Django's *Admin and *Inline).
+bases = [
+  "Model", "Choices", "TextChoices", "IntegerChoices", "AppConfig", "Migration", "BaseCommand",
+  "*Serializer", "*Field", "*View", "*ViewSet", "*Admin", "*Inline", "Form", "ModelForm",
+  "APIException", "BasePermission", "*FilterSet",
+]
+# Meta inside a model, serializer, form or filter set: options Django reads, never code.
+inner = ["Meta"]
+# Found by Django itself, by dotted path or module: an AppConfig (INSTALLED_APPS), a Migration
+# (the migrations package), a management command. Never an unused class.
+entry = ["AppConfig", "Migration", "BaseCommand"]
+
+# Methods Django and DRF call on a subclass of a base, never by name in the repo's code. The key
+# is an fnmatch glob on the base's full dotted name as the file imports it
+# (`from rest_framework import serializers` + `serializers.ModelSerializer` is
+# rest_framework.serializers.ModelSerializer), so another library's `QListView` or marshmallow's
+# `Field` is no Django base. `{field}` stands for a field the class or a base in --src declares
+# (a body assignment, or its Meta.fields list; `__all__` or `exclude` allows any name).
+# Scoped to the class: a module-level `create()` or a plain class's `validate_foo` stays
+# countable, which a global ignore_names would hide.
+[sets.django.declarative.hooks]
+"rest_framework.*Serializer" = [
+  "validate", "validate_{field}", "get_{field}", "create", "update", "save",
+  "to_representation", "to_internal_value", "get_fields", "get_validators",
+  "run_validation", "get_initial", "get_value", "validate_empty_values",
+]
+"rest_framework.*Field" = [
+  "to_representation", "to_internal_value", "get_attribute", "bind", "get_value",
+  "get_default", "get_initial", "run_validation", "validate_empty_values",
+]
+"rest_framework.*View" = [
+  "get", "post", "put", "patch", "delete", "head", "options", "dispatch", "initial",
+  "get_queryset", "get_object", "get_serializer_class", "get_serializer_context",
+  "get_permissions", "get_throttles", "get_authenticators", "get_parsers", "get_renderers",
+  "perform_create", "perform_update", "perform_destroy", "filter_queryset",
+  "paginate_queryset", "get_paginated_response", "handle_exception", "finalize_response",
+  "get_serializer", "get_exception_handler", "get_exception_handler_context",
+  "get_view_name", "get_view_description", "get_renderer_context", "get_parser_context",
+  "check_permissions", "check_object_permissions", "check_throttles", "permission_denied",
+  "throttled",
+]
+"rest_framework.*ViewSet" = [
+  "list", "retrieve", "create", "update", "partial_update", "destroy", "get_queryset",
+  "get_object", "get_serializer_class", "get_serializer_context", "get_permissions",
+  "perform_create", "perform_update", "perform_destroy", "filter_queryset", "initial",
+]
+"rest_framework.mixins.*Mixin" = [
+  "list", "retrieve", "create", "update", "partial_update", "destroy",
+]
+"rest_framework.permissions.*" = ["has_permission", "has_object_permission"]
+"rest_framework.pagination.*" = [
+  "paginate_queryset", "get_paginated_response", "get_paginated_response_schema",
+  "get_page_size", "get_limit", "get_offset", "get_next_link", "get_previous_link",
+  "get_schema_operation_parameters", "get_html_context", "to_html",
+]
+"rest_framework.authentication.*" = [
+  "authenticate", "authenticate_header", "authenticate_credentials",
+]
+# SimpleRateThrottle's allow_request calls get_rate, get_cache_key, throttle_success and
+# throttle_failure (kitchen #26's McpTokenThrottle.get_rate).
+"rest_framework.throttling.*" = [
+  "allow_request", "wait", "get_cache_key", "get_rate", "parse_rate", "get_ident",
+  "throttle_success", "throttle_failure", "timer",
+]
+"rest_framework.routers.*" = ["get_routes", "get_urls", "get_default_basename"]
+"rest_framework.renderers.*" = ["render"]
+"rest_framework.parsers.*" = ["parse"]
+"django.views.*View" = [
+  "get", "post", "put", "patch", "delete", "head", "options", "dispatch", "get_queryset",
+  "get_object", "get_context_data", "form_valid", "form_invalid", "get_success_url",
+]
+"django.forms.*Form" = ["clean", "clean_{field}", "save"]
+"django.db.models.Model" = [
+  "save", "delete", "clean", "clean_fields", "full_clean", "get_absolute_url", "natural_key",
+]
+"django.contrib.admin.*Admin" = [
+  "get_queryset", "get_readonly_fields", "get_fields", "get_fieldsets", "get_form",
+  "get_list_display", "get_list_filter", "get_search_results", "get_urls", "get_exclude",
+  "get_ordering", "get_inline_instances", "has_*_permission", "save_model", "delete_model",
+  "save_related",
+]
+"django.contrib.admin.*Inline" = [
+  "get_queryset", "get_formset", "get_extra", "get_max_num", "has_*_permission",
+]
+"django_filters.*FilterSet" = ["filter_{field}", "filter_queryset"]
+"django.apps.AppConfig" = ["ready"]
+"django.core.management.*Command" = ["add_arguments", "handle"]
+"django.db.migrations.Migration" = ["apply", "unapply"]

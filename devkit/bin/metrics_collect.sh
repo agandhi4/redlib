@@ -10,8 +10,9 @@
 #   devkit/bin/metrics_collect.sh <snapshot|check|tighten|rebaseline>
 #       [--conf scripts/ci/metrics.conf] [--bounds docs/metrics/ratchet.json] [--out build/metrics.json]
 #   snapshot    run the collectors and merge; build/metrics.json is the report
-#   check --quick  outside the gate only: a collector whose tier inputs are missing or stale is
-#               skipped (its keys SKIPPED), no tier runs, no scorecard; after the ratchet lines a
+#   check --quick  outside the gate only: a collector whose tier inputs are missing or stale, or
+#               whose tool is not installed (its exit 3, a fresh worktree), is skipped (its keys
+#               SKIPPED, the line naming the fix), no tier runs, no scorecard; after the ratchet lines a
 #               gain left unlocked adds `BETTER: run make metrics-tighten before push`. The
 #               pre-push hook's preview (hook_steps.sh), which never blocks the push
 #   check       snapshot, then `metrics_ratchet.py check` (the gate job; METRICS_REBASELINE=1,
@@ -44,8 +45,11 @@
 #   <name> <area> <command...>
 #   name     [A-Za-z0-9_-]+, unique: the collector writes build/metrics/<name>.json and the
 #            snapshot records it as each key's `source`
-#   area     docs|backend|frontend|native|tooling|other|repo: the fleet area whose paths can
-#            change its numbers (`repo` = always runs: a whole-repo tool such as jscpd), or
+#   area     docs|backend|frontend|native|tooling|other, or several comma-separated
+#            (`backend,native`: one jscpd run over server/ and ios/): the fleet areas whose paths
+#            can change its numbers. The gate plan's METRICS group runs for each area a
+#            collector names (_paths_lib.sh), so a native-only change runs a `native`
+#            collector. Or `repo` (always runs when the metrics job does: a whole-repo tool), or
 #            job:<gate job name>: the collector reads that gate job's output rather than the
 #            tree (coverage.py over the report `unit-backend` wrote), so it runs iff that job
 #            ran in this gate
@@ -55,8 +59,8 @@
 # A malformed line is exit 2 naming file:line, before anything runs.
 #
 # Which collectors run: outside the gate (GATE_AREAS unset) all of them. Inside the gate
-# (local_gate.sh exports GATE_AREAS before the plan) an area collector runs when its area is
-# in GATE_AREAS, or when GATE_AREAS holds `other` (a change outside the app halves may move
+# (local_gate.sh exports GATE_AREAS before the plan) an area collector runs when one of its
+# areas is in GATE_AREAS, or when GATE_AREAS holds `other` (a change outside the app halves may move
 # any number); `repo` collectors always run; `tooling` widens nothing (devkit/metrics/*,
 # metrics_collect.sh and metrics_ratchet.py classify as other, so a tooling-only diff cannot
 # move a metric, and its gate runs no tier anyway). A `job:<name>` collector runs iff
@@ -72,7 +76,10 @@
 #
 # Tier inputs, outside the gate: the files a build or test tier writes that a collector reads
 # (the TIER_INPUTS table, bin/_metrics_conf_lib.sh: coverage reports, the statement fixture's
-# build/statements.json, a Next app's build manifest for ts.mjs --bundle). Before any collector runs, every such file of every collector that
+# build/statements.json, a Next app's build manifest for ts.mjs --bundle), and the
+# build/metrics/tier-<tier>.json of every tier the bounds hold a test-count floor for (collector
+# `tier-<tier>`, target the Makefile rule that runs `tier_guard.sh <tier>`: makefile_tier_target),
+# since tighten raises a floor from it (metrics_ratchet.py, Floors). --quick never skips on one. Before any collector runs, every such file of every collector that
 # will run is checked; when any is missing the run stops once (exit 2) listing each file, its
 # collector and the make target of the gate job that writes it (the collector's job:<name> area,
 # looked up in scripts/ci/gate_plan.sh: a GATE_JOBS_* entry or a `job <name> <target>` call).
@@ -129,6 +136,10 @@ RATCHET=$HERE/metrics_ratchet.py
 . "$HERE/_gate_env.sh"
 # shellcheck source=bin/_metrics_conf_lib.sh  # the conf's parse and its TIER_INPUTS table
 . "$HERE/_metrics_conf_lib.sh"
+# shellcheck source=bin/_makefile_lib.sh  # makefile_tier_target: the rule a floor's tier runs in
+. "$HERE/_makefile_lib.sh"
+# shellcheck source=bin/_toolchain_lib.sh  # devkit_python, for floor_tiers before toolchain_path
+. "$HERE/_toolchain_lib.sh"
 # Where every collector writes, and where local_gate.sh and tier_guard.sh already wrote: the
 # merge reads the whole directory.
 readonly COLLECT_DIR=build/metrics
@@ -305,10 +316,11 @@ if [ -z "${GATE_AREAS+x}" ]; then echo "outside the gate: every collector runs";
     repo) echo "repo: always runs"; return ;;
     job:*) ! gate_job_ran "${1#job:}" || echo "gate job ${1#job:} ran"; return ;;
   esac
-  case " $GATE_AREAS " in
-    *" other "*) echo "other paths changed: every collector runs"; return ;;
-    *" $1 "*) echo "$1 paths changed"; return ;;
-  esac
+  case " $GATE_AREAS " in *" other "*) echo "other paths changed: every collector runs"; return ;; esac
+  local area
+  for area in ${1//,/ }; do
+    case " $GATE_AREAS " in *" $area "*) echo "$area paths changed"; return ;; esac
+  done
 }
 # skip_reason <area>: why a skipped collector did not run.
 skip_reason() {
@@ -386,13 +398,41 @@ newest_source() {
   git ls-files -z -- "$1" ':(exclude)docs/metrics' 2>/dev/null \
     | xargs -0 "${STAT_MTIME[@]}" 2>/dev/null | sort -n | tail -1
 }
-# tier_input_state: for the collectors that will run, sets MISSING and STALE (lines
-# "<file>\t<collector>\t<source dir>\t<target or empty>": the empty field last, since IFS=tab
-# reads collapse an empty middle one) and RERUN (the distinct targets to
-# rerun, in conf order): every missing input's, and under TIGHTEN_RUN_TIERS=1 or --fresh every
-# stale input's too. With --fresh every input that exists counts as stale.
+# floor_tiers: the tiers the bounds hold a test-count floor for (metrics_ratchet.py floors), one
+# per line. Their tier-<tier>.json is an input like a coverage report: tier_guard.sh writes it
+# only when the tier runs, and a stale one would tighten a floor to an old count.
+floor_tiers() {
+  [ -f "$BOUNDS" ] || return 0
+  devkit_python || die "$DEVKIT_PYTHON_ERROR"
+  "$DEVKIT_PYTHON" -I "$RATCHET" floors --bounds "$BOUNDS" | awk '!seen[$1]++ { print $1 }'
+  [ "${PIPESTATUS[0]}" = 0 ] || exit 2
+}
+# input_state <file> <name> <target>: adds <file> (<name>'s input, written by `make <target>`) to
+# MISSING or STALE, and its target to RERUN when it must rerun (tier_input_state).
+input_state() {
+  local f=$1 name=$2 target=$3 dir newest
+  dir=$(source_dir "$f")
+  if [ ! -e "$f" ]; then
+    MISSING+="$f"$'\t'"$name"$'\t'"$dir"$'\t'"$target"$'\n'
+  else
+    newest=$(newest_source "$dir")
+    if [ "$FRESH" = 1 ] || { [ -n "$newest" ] && [ "$("${STAT_MTIME[@]}" "$f")" -lt "$newest" ]; }; then
+      STALE+="$f"$'\t'"$name"$'\t'"$dir"$'\t'"$target"$'\n'
+      [ "$FRESH" = 1 ] || [ "${TIGHTEN_RUN_TIERS:-0}" = 1 ] || return 0
+    else
+      return 0
+    fi
+  fi
+  case " $RERUN " in *" $target "*) ;; *) [ -z "$target" ] || RERUN="${RERUN:+$RERUN }$target" ;; esac
+}
+# tier_input_state: for the collectors that will run and the floor tiers (FLOOR_TIERS), sets
+# MISSING and STALE (lines "<file>\t<collector>\t<source dir>\t<target or empty>": the empty
+# field last, since IFS=tab reads collapse an empty middle one; a floor tier's collector is
+# tier-<tier>) and RERUN (the distinct targets to rerun, in conf order, then the floor tiers'):
+# every missing input's, and under TIGHTEN_RUN_TIERS=1 or --fresh every stale input's too. With
+# --fresh every input that exists counts as stale.
 tier_input_state() {
-  local i=0 f target dir newest
+  local i=0 f target tier
   MISSING="" STALE="" RERUN=""
   while [ "$i" -lt "${#NAMES[@]}" ]; do
     if [ "${RUN[$i]}" = 1 ]; then
@@ -400,23 +440,14 @@ tier_input_state() {
         [ -n "$f" ] || continue
         target=""
         case "${COLLECTOR_AREAS[$i]}" in job:*) target=$(plan_job_target "${COLLECTOR_AREAS[$i]#job:}") ;; esac
-        dir=$(source_dir "$f")
-        if [ ! -e "$f" ]; then
-          MISSING+="$f"$'\t'"${NAMES[$i]}"$'\t'"$dir"$'\t'"$target"$'\n'
-        else
-          newest=$(newest_source "$dir")
-          if [ "$FRESH" = 1 ] || { [ -n "$newest" ] && [ "$("${STAT_MTIME[@]}" "$f")" -lt "$newest" ]; }; then
-            STALE+="$f"$'\t'"${NAMES[$i]}"$'\t'"$dir"$'\t'"$target"$'\n'
-            [ "$FRESH" = 1 ] || [ "${TIGHTEN_RUN_TIERS:-0}" = 1 ] || continue
-          else
-            continue
-          fi
-        fi
-        case " $RERUN " in *" $target "*) ;; *) [ -z "$target" ] || RERUN="${RERUN:+$RERUN }$target" ;; esac
+        input_state "$f" "${NAMES[$i]}" "$target"
       done <<<"$(tier_inputs "${COMMANDS[$i]}")"
     fi
     i=$((i + 1))
   done
+  while IFS= read -r tier; do
+    [ -z "$tier" ] || input_state "$COLLECT_DIR/tier-$tier.json" "tier-$tier" "$(makefile_tier_target "$tier")"
+  done <<<"$FLOOR_TIERS"
 }
 # report_stale: one WARNING per stale input, when nothing reran it.
 report_stale() {
@@ -433,6 +464,9 @@ quick_skip_unbuilt() {
   while IFS=$'\t' read -r f name dir target; do
     [ -n "$f" ] && [ "${seen/ $name /}" = "$seen" ] || continue
     seen="$seen$name "
+    # A floor tier is no collector to drop: its keys read SKIPPED without the file (the ratchet's
+    # tier rule), and a stale one is still read, which a preview that never blocks can afford.
+    case $name in tier-*) continue ;; esac
     i=0
     while [ "${NAMES[$i]}" != "$name" ]; do i=$((i + 1)); done
     RUN[i]=0
@@ -447,6 +481,7 @@ quick_skip_unbuilt() {
 }
 # shellcheck disable=SC2031  # plan_job_target's subshell sets its own GATE_AREAS; this is the gate's
 if [ -z "${GATE_AREAS+x}" ]; then
+  FLOOR_TIERS=$(floor_tiers) || exit 2
   tier_input_state
   [ "$QUICK" = 0 ] || quick_skip_unbuilt
   if [ -n "$RERUN" ] && { [ "$FRESH" = 1 ] || [ "${TIGHTEN_RUN_TIERS:-0}" = 1 ]; }; then
@@ -468,6 +503,8 @@ if [ -z "${GATE_AREAS+x}" ]; then
       [ -n "$f" ] || continue
       if [ -n "$target" ]; then
         echo "  $f  ($name; make $target)" >&2
+      elif [ "${name#tier-}" != "$name" ]; then
+        echo "  $f  ($name: $BOUNDS holds its floor, and no Makefile rule runs tier_guard.sh ${name#tier-})" >&2
       else
         echo "  $f  ($name; no gate job in scripts/ci/gate_plan.sh writes it: give the collector a job:<name> area)" >&2
       fi
@@ -483,7 +520,8 @@ fi
 # shellcheck source=bin/toolchain_path.sh
 . "$HERE/toolchain_path.sh"
 # Also resolves and exports DEVKIT_PYTHON (devkit_python), which the ratchet and scorecard calls
-# below run on, so a direct run needs no parent to have set it. Nothing before this runs Python.
+# below run on, so a direct run needs no parent to have set it (floor_tiers resolved it already
+# when the bounds hold a floor).
 toolchain_path . || die "$TOOLCHAIN_ERROR"
 mkdir -p "$COLLECT_DIR" || die "cannot create $COLLECT_DIR"
 for name in ${NAMES[@]+"${NAMES[@]}"}; do
@@ -498,6 +536,19 @@ print_findings() {
   [ ${#files[@]} -eq 0 ] || echo "findings: ${files[*]}"
 }
 trap print_findings EXIT
+# A collector's "a tool it runs is not installed" (metrics/*: MissingToolError). The gate fails on it
+# like any collector failure; --quick, a preview in a worktree that may predate its install,
+# skips it naming the fix.
+EXIT_MISSING_TOOL=3
+# missing_tool_reason <log>: the collector's own line naming the tool, plus the repo's
+# metrics-deps target when its Makefile has one (the repo-local tool installs: claude-kit, ...).
+missing_tool_reason() {
+  local why
+  why=$(grep '^metrics/' "$1" | tail -n 1 | sed 's|^metrics/[^:]*: ||')  # the last: the failure
+  [ -n "$why" ] || why="a tool it runs is not installed (exit $EXIT_MISSING_TOOL; log: $1)"
+  if [ -f Makefile ] && grep -qE '^metrics-deps:' Makefile; then why="$why; make metrics-deps installs it"; fi
+  printf '%s' "$why"
+}
 t0=$SECONDS
 ran=0
 i=0
@@ -512,6 +563,12 @@ while [ "$i" -lt "${#NAMES[@]}" ]; do
     fi
     bash -c "$command" </dev/null >"$log" 2>&1
     rc=$?
+    if [ "$rc" -eq "$EXIT_MISSING_TOOL" ] && [ "$QUICK" = 1 ]; then
+      SKIPPED+=("$name")
+      echo "metrics $name SKIP (--quick, tool missing: $(missing_tool_reason "$log"))"
+      i=$((i + 1))
+      continue
+    fi
     if [ "$rc" -ne 0 ]; then
       echo "metrics $name FAIL (exit $rc; log: $log)"
       tail -n 40 "$log"

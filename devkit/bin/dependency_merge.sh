@@ -52,7 +52,7 @@
 #     conflict too.
 #   - conflicting: `git merge-tree` of the head into the current origin/main fails. Skipped.
 #   - this head already failed a gate here (the marker comment below): skipped until it moves.
-#   - else `make gate PR=<n> GATE_ARGS="--expect-head <head>"`, which takes a machine gate slot
+#   - else `make gate PR=<n> GATE_ARGS="--expect-head <head>"`, whose jobs queue for capacity
 #     like any gate. PASS: `make merge PR=<n>`; a refusal to re-gate (main or the head moved
 #     after the gate, or GitHub refused the merge for it: pr_merge.sh's `re-gate:` lines) is
 #     "skipped behind", and the next run gates the new tree. Otherwise the verdict is the gate
@@ -62,6 +62,12 @@
 #     failures (a gate step such as worktree, toolchain or a conflict; the silence watchdog; a
 #     budget overrun under load: `failures --code-only` is empty): logged with no comment and
 #     no marker, so the next run retries the head. A Dependabot head is never parked on the box.
+# Vulnerabilities: after its PRs, each repo's worktree moves to origin/main and bin/vuln_watch.py
+#   reruns the repo's metrics.conf vuln.py lines on devkit main's collector: one uncounted
+#   `vuln: <slug> …` line (a NEW critical/high id named; `unmeasured (<why>)` when OSV or the conf
+#   cannot be read, never clean), and one `security` issue per repo, opened for a new id, rewritten
+#   as the ids change, closed when none is left. State: $XDG_STATE_HOME/devkit/vuln-watch/. Why
+#   (closet #437, 2026-10-26): `vuln.*` keys are report-only, so advisories reached main unseen.
 # Network: every call to GitHub (git fetch and push, gh) is retried after a transient failure
 #   (net); one still failing is the outcome `network`, never "branch exists" or a regression.
 # Power: a Mac macOS will sleep whatever caffeinate holds (lid closed on battery,
@@ -71,7 +77,9 @@
 #   `<slug>` alone until it has a PR), outcome one of merged failed error network refused skipped
 #   closed pruned current would-sync would-prune would-gate, appended with a UTC stamp to
 #   $XDG_STATE_HOME/devkit/dependency-merge.log; the gate and merge output of a PR go to
-#   $XDG_STATE_HOME/devkit/dependency-merge/<repo>-<n>.log. Then one summary line per repo.
+#   $XDG_STATE_HOME/devkit/dependency-merge/<repo>-<n>.log. Then the checkout given is fast-forwarded
+#   (refresh_checkout: one `checkout fast-forwarded` or `checkout stale` line, uncounted) and
+#   one summary line per repo.
 # Kill switch: ${XDG_CONFIG_HOME:-~/.config}/devkit/dependency-merge.off, read before every PR.
 # One run at a time (flock); a second run exits 0 with one line.
 # Exit 0 when it ran, whatever each PR's outcome; 1 when no repo could be read; 2 usage, a
@@ -89,6 +97,8 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
 . "$HERE/_trailer_lib.sh"
 # shellcheck source=bin/_awake_lib.sh  # devkit_sleep_forced
 . "$HERE/_awake_lib.sh"
+# shellcheck source=bin/_metrics_conf_lib.sh  # metrics_conf_parse, the vuln watch's conf reader
+. "$HERE/_metrics_conf_lib.sh"
 
 readonly MARKER=devkit-dependency-merge
 readonly SYNC_LABEL=devkit-sync
@@ -169,13 +179,17 @@ cleanup_worktree() {
 }
 trap cleanup_worktree EXIT
 
+# note <text>: print `dependency-merge: <text>` and append it to the log, counted by no summary.
+note() {
+  echo "dependency-merge: $1"
+  [ "$DRY_RUN" = 1 ] || printf '%s dependency-merge: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >>"$LOG"
+}
+
 # record <slug>#<n> <outcome> <detail>
 record() {
-  local line="dependency-merge: $1 $2 $3"
-  echo "$line"
+  note "$1 $2 $3"
   OUTCOMES="$OUTCOMES $2"
   LAST_OUTCOME=$2
-  [ "$DRY_RUN" = 1 ] || printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line" >>"$LOG"
 }
 
 # GitHub drops calls (2026-10-24): finplat's sync push died on "RPC failed; curl 56 Connection
@@ -324,11 +338,13 @@ list_prs() {
 # repo_error <label> <why>: one line, and the repo counts as not read.
 repo_error() { echo "dependency-merge: $1: cannot run: $2" >&2; return 1; }
 
-# open_repo <dir>: set SLUG, STATE_NAME, PRS (_dependency_pr.py lines) and WT (a detached
-# worktree of origin/main now, whose plan and vendored devkit run every gate and merge).
+# open_repo <dir>: set ROOT (<dir>, resolved), SLUG, STATE_NAME, PRS (_dependency_pr.py lines)
+# and WT (a detached worktree of origin/main now, whose plan and vendored devkit run every gate
+# and merge).
 open_repo() {
   local root
   root=$(cd "$1" 2>/dev/null && pwd -P) || { repo_error "$1" "not a directory"; return; }
+  ROOT=$root
   net gate_plan_main "$root" || { repo_error "$root" "$PLAN_ERROR"; return; }
   SLUG=$PLAN_SLUG STATE_NAME=$PLAN_STATE_NAME
   PRS=$(list_prs "$SLUG") || { repo_error "$SLUG" "cannot list its open PRs (gh or _dependency_pr.py above)"; return; }
@@ -618,6 +634,68 @@ prune_sync_branches() {
   done <<<"$stale"
 }
 
+# refresh_checkout: fast-forward the checkout the job was given ($ROOT, a repo's primary one) to
+# origin/main after this run's merges, only when it is on main with no tracked changes and the
+# move is a pure fast-forward (merge --ff-only); else one `checkout stale` line, nothing touched.
+# Never a stash, reset or branch switch: a person or a lane may be mid-work there. Why
+# (2026-10-26): a fleet survey for devkit #244 read rollcall's main 9 behind and reported a fixed
+# warning as live. Surveys still read origin/main (lane rules); this narrows what a slip costs.
+refresh_checkout() {
+  local branch behind ahead why=""
+  net fetch_main "$ROOT" || { note "checkout unread: $SLUG: cannot fetch origin main (git above); left as is"; return 0; }
+  behind=$(git -C "$ROOT" rev-list --count HEAD..refs/remotes/origin/main) || return 0
+  [ "$behind" != 0 ] || return 0
+  branch=$(git -C "$ROOT" symbolic-ref -q --short HEAD) || branch="a detached HEAD"
+  ahead=$(git -C "$ROOT" rev-list --count refs/remotes/origin/main..HEAD)
+  if [ "$branch" != main ]; then
+    why="not main"
+  elif ! git -C "$ROOT" diff --quiet HEAD --; then
+    why="tracked changes"
+  elif [ "$ahead" != 0 ]; then
+    why="$ahead local commit(s) not on origin/main"
+  elif [ "$DRY_RUN" = 1 ]; then
+    note "checkout would fast-forward: $SLUG main, $behind behind"
+    return 0
+  elif ! git -C "$ROOT" merge -q --ff-only refs/remotes/origin/main >/dev/null 2>&1 8>&-; then
+    why="merge --ff-only refused (an untracked file in the way, or a git lock)"
+  fi
+  if [ -n "$why" ]; then
+    note "checkout stale: $SLUG on $branch, $behind behind ($why); left as is"
+  else
+    note "checkout fast-forwarded: $SLUG main, $behind commit(s) to $(git -C "$ROOT" rev-parse --short=7 HEAD)"
+  fi
+}
+
+# conf_commands <conf>: each collector command of a metrics.conf, one per line; exit 2 with the
+# parser's message on a malformed line (the lib calls die(), which must not end this run).
+conf_commands() {
+  (
+    die() { echo "$*" >&2; exit 2; }
+    metrics_conf_parse "$1"
+    printf '%s\n' ${COMMANDS[@]+"${COMMANDS[@]}"}
+  )
+}
+
+# watch_vulns: bin/vuln_watch.py over origin/main as this run left it, merges included (header,
+# Vulnerabilities). Its one line is noted, never counted: an advisory is not a PR outcome.
+watch_vulns() {
+  local conf=$WT/scripts/ci/metrics.conf out cmd line args=()
+  { net fetch_main "$WT" && git -C "$WT" checkout -q --detach refs/remotes/origin/main; } >/dev/null 8>&- \
+    || { note "vuln: $SLUG unmeasured (cannot move the worktree to origin main; git above)"; return 0; }
+  if [ -f "$conf" ]; then
+    out=$(conf_commands "$conf" 2>&1) \
+      || { out=${out##*$'\n'}; note "vuln: $SLUG unmeasured (${out#"$WT/"})"; return 0; }
+    while IFS= read -r cmd; do
+      [ -z "$cmd" ] || args+=(--command "$cmd")
+    done <<<"$out"
+  fi
+  [ "$DRY_RUN" = 0 ] || args+=(--dry-run)
+  line=$("$DEVKIT_PYTHON" -I "$HERE/vuln_watch.py" --slug "$SLUG" --root "$WT" \
+    --state-dir "$STATE/vuln-watch" ${args[@]+"${args[@]}"} 8>&-) \
+    || line="vuln: $SLUG unmeasured (vuln_watch.py exit $?; stderr above)"
+  note "$line"
+}
+
 run_repo() {
   local n head decision detail
   open_repo "$1" || return
@@ -628,7 +706,9 @@ run_repo() {
     if halted; then break; fi
     handle_pr "$n" "$head" "$decision" "$detail"
   done 3<<<"$PRS"
+  halted || watch_vulns
   cleanup_worktree
+  halted || refresh_checkout
   summary "$SLUG"
 }
 

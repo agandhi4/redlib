@@ -9,6 +9,7 @@
     "**/test-setup.*",
     "**/conftest.py",
     "**/*.d.ts",
+    "**/migrations/**",
     "**/*.md",
     "**/*.txt",
     "**/LICENSE",
