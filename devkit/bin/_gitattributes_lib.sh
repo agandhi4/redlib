@@ -11,7 +11,10 @@
 # an EDIT of the same lines on both sides merges silently into both versions, out of place. Such
 # edits are rare in an append-only log; docs_check rule 8 (dated H2s in order, each with
 # Why/Decision/Consequence) catches most mangles, and review the merged entry.
-# Only local merges and rebases read .gitattributes drivers; GitHub's own merge button does not.
+# Only local merges and rebases read .gitattributes drivers; GitHub's own merge button does not,
+# so `make merge` resolves that conflict itself (bin/_merge_carry.sh, decisions_merge.py, which
+# also keeps the blank line between entries that this driver's zealous merge drops). A hand
+# rebase still goes through union: check the blank line before the rebased entry.
 # shellcheck disable=SC2034  # read by the scripts that source this file
 DECISIONS_UNION_LINE='docs/decisions.md merge=union'
 

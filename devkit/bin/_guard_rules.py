@@ -312,10 +312,117 @@ def utc_today(file: PyFile) -> list[Hit]:
     return _keep_first(hits)
 
 
+# The Django ORM methods that write the columns they are given as keywords, on any receiver
+# (`Model.objects.filter(..).update(`, a related manager, a queryset by name), and their async
+# twins (kitchen #19: a `.filter().update(state=...)` helper passed `single-writer state`).
+# Only the upserts take `defaults=`/`create_defaults=`.
+_ORM_UPSERTS = frozenset(
+    {"get_or_create", "update_or_create", "aget_or_create", "aupdate_or_create"}
+)
+_ORM_KEYWORD_WRITES = _ORM_UPSERTS | {"update", "create", "aupdate", "acreate"}
+_ORM_DEFAULTS = ("defaults", "create_defaults")
+_ORM_BULK_UPDATE = frozenset({"bulk_update", "abulk_update"})
+_ORM_BULK_CREATE = frozenset({"bulk_create", "abulk_create"})
+
+
+def _callee_name(call: ast.Call) -> str:
+    """The last name of a call's callee (`models.Recipe(` -> Recipe); "" off an expression."""
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    return call.func.id if isinstance(call.func, ast.Name) else ""
+
+
+def _is_builtin_call(call: ast.Call, *names: str) -> bool:
+    return isinstance(call.func, ast.Name) and call.func.id in names
+
+
+def _dict_key(node: ast.expr | None, key: str) -> ast.AST | None:
+    """The node naming KEY in a `{"KEY": ...}` literal or a `dict(KEY=...)` call, else None."""
+    if isinstance(node, ast.Dict):
+        return next((k for k in node.keys if isinstance(k, ast.Constant) and k.value == key), None)
+    if isinstance(node, ast.Call) and _is_builtin_call(node, "dict"):
+        return next((kw for kw in node.keywords if kw.arg == key), None)
+    return None
+
+
+def _keyword(call: ast.Call, key: str) -> ast.AST | None:
+    """The node naming KEY as a keyword of CALL, spelled `KEY=` or spread `**{"KEY": ...}`."""
+    for kw in call.keywords:
+        if kw.arg == key:
+            return kw
+        named = _dict_key(kw.value, key) if kw.arg is None else None
+        if named is not None:
+            return named
+    return None
+
+
+def _built(node: ast.expr | None) -> Iterator[ast.Call]:
+    """The calls that build bulk_create's objects: each element of a list/tuple/set literal, or
+    a comprehension's element, that is a CapWords call (`Recipe(...)`, `models.Recipe(...)`),
+    through `list(...)`/`tuple(...)` and either branch of `a if c else b`. A lowercase callee
+    is a function, not a constructor, so it is never read as one."""
+    if isinstance(node, ast.IfExp):
+        yield from _built(node.body)
+        yield from _built(node.orelse)
+        return
+    if isinstance(node, ast.Call) and _is_builtin_call(node, "list", "tuple") and node.args:
+        yield from _built(node.args[0])
+        return
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        elements: list[ast.expr] = node.elts
+    elif isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+        elements = [node.elt]
+    else:
+        return
+    for element in elements:
+        if isinstance(element, ast.Call) and _callee_name(element)[:1].isupper():
+            yield element
+
+
+def _orm_writes(call: ast.Call, attr: str) -> Iterator[Hit]:
+    """single_writer's ORM shapes in one call; see its docstring."""
+    if not isinstance(call.func, ast.Attribute):
+        return  # a bare `update(state=...)` is a function of the repo's, not the ORM's
+    method = call.func.attr
+    if method in _ORM_KEYWORD_WRITES:
+        named = _keyword(call, attr)
+        if named is not None:
+            yield Hit(named.lineno, f".{method}({attr}=...) writes .{attr}")
+        for name in _ORM_DEFAULTS if method in _ORM_UPSERTS else ():
+            defaults = next((kw.value for kw in call.keywords if kw.arg == name), None)
+            named = _dict_key(defaults, attr)
+            if named is not None:
+                yield Hit(named.lineno, f".{method}({name}={{{attr!r}: ...}}) writes .{attr}")
+    elif method in _ORM_BULK_UPDATE:
+        fields = _argument(call, 1, "fields")
+        if isinstance(fields, (ast.List, ast.Tuple, ast.Set)):
+            for field_name in fields.elts:
+                if isinstance(field_name, ast.Constant) and field_name.value == attr:
+                    yield Hit(field_name.lineno, f".{method}(..., [{attr!r}]) writes .{attr}")
+    elif method in _ORM_BULK_CREATE:
+        for built in _built(_argument(call, 0, "objs")):
+            named = _keyword(built, attr)
+            if named is not None:
+                yield Hit(
+                    named.lineno, f".{method}([{_callee_name(built)}({attr}=...)]) writes .{attr}"
+                )
+
+
 def single_writer(file: PyFile, attr: str) -> list[Hit]:
     """Writes of `<x>.ATTR`: every assignment target (plain, augmented, annotated, tuple, for
-    and with targets) and `setattr(x, "ATTR", v)` with a constant name. Reads, keyword
-    arguments (`Model(ATTR=...)`, `.values(ATTR=...)`) and dict keys are not writes here."""
+    and with targets) and `setattr(x, "ATTR", v)` with a constant name. And every write through
+    the Django ORM's write API on any receiver, births included: `ATTR=` (or `**{"ATTR": ...}`)
+    to .update, .create, .get_or_create and .update_or_create and their a- twins (the upserts'
+    lookups seed the row they create); the `"ATTR"` key of the upserts' `defaults=`/
+    `create_defaults=` literal or `dict(...)`; `"ATTR"` in .bulk_update's field list; `ATTR=` to
+    a CapWords constructor in .bulk_create's objs (a literal, comprehension, list()/tuple() of
+    one, either branch of an `if` expression). Lookalikes that fire: a dict's
+    `d.update(ATTR=...)` (spell it `d["ATTR"] = ...`), a non-ORM client's `.create(ATTR=...)`
+    (stripe, boto), factory_boy's `Factory.create(ATTR=...)` (in tests, which repos exclude).
+    Not seen: a bare `Model(ATTR=...)` outside bulk_create, which syntax cannot tell from a
+    dataclass or value object (finplat, 2026-10-16); names passed by variable (kwargs, defaults,
+    field lists, objects built earlier, `.update(**changes)`); a key built at run time
+    (`**{f"..."}`); `.values(ATTR=...)`; raw SQL, `.raw()` and a cursor; SQLAlchemy."""
     hits = [
         Hit(node.lineno, f"writes .{attr}")
         for node in ast.walk(file.tree)
@@ -326,6 +433,7 @@ def single_writer(file: PyFile, attr: str) -> list[Hit]:
         named = len(args) >= 2 and isinstance(args[1], ast.Constant) and args[1].value == attr
         if call.canonical == "setattr" and named:
             hits.append(Hit(call.line, f"setattr(..., {attr!r}, ...) writes .{attr}"))
+        hits.extend(_orm_writes(call.node, attr))
     return _keep_first(sorted(hits, key=lambda h: h.line))
 
 
