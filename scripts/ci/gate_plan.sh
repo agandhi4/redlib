@@ -15,7 +15,7 @@
 # Askama), so they are code like src/.
 # The smoke boots no listener: that opens only after OAuth bootstrap against Reddit (AGENTS.md
 # "Startup order"). ci-smoke runs the image's binary offline and asserts it and the OCI label
-# report gate-<pr> (Makefile); devkit/bin/publish.sh runs the same two targets before a push.
+# report gate-<pr> (scripts/ci/smoke_image.sh); devkit/bin/publish.sh runs the same two targets before a push.
 GATE_SLUG=agandhi4/redlib
 GATE_STATE_NAME=redlib-gate
 
@@ -36,8 +36,9 @@ PUBLISH_IMAGE=ghcr.io/agandhi4/redlib
 # gate reads .dockerignore itself, so its paths are not repeated here. .gitattributes stays out of
 # this list: it changes the checked-out bytes of the files include_str! embeds.
 GATE_IMAGE_EXCLUDE_PATHS='^(scripts/|extensions/|docs/metrics/|\.githooks/|clippy\.toml$|rustfmt\.toml$|renovate\.json$|\.env\.example$|\.gitignore$|CREDITS$|LICENSE$)'
-# Re-included from the scripts/ exclusion: this file declares the ci-image job.
-GATE_IMAGE_PATHS='^scripts/ci/gate_plan\.sh$'
+# Re-included from the scripts/ exclusion: this file declares the image jobs, and the smoke job
+# runs smoke_image.sh.
+GATE_IMAGE_PATHS='^scripts/ci/(gate_plan|smoke_image)\.sh$'
 
 gate_cleanup() {
   docker rmi -f "$IMAGE" >/dev/null 2>&1 || true

@@ -73,21 +73,11 @@ test-live: ## the #[ignore]d tests that call live Reddit (needs outbound network
 ci-image: ## build Dockerfile as $(CI_IMAGE) with APP_VERSION=$(CI_BUILD_VERSION)
 	DOCKER_CALL_TIMEOUT=900 devkit/bin/docker_bounded.sh build --build-arg APP_VERSION="$(CI_BUILD_VERSION)" -t $(CI_IMAGE) .
 
-# Not devkit's boot_image.sh: the listener opens only after OAuth bootstrap against live Reddit
-# (AGENTS.md "Startup order"), so no health path answers offline. Instead the image's own binary
-# runs with no network and reports its version (`redlib --version` prints instance_info's
-# app_version, which reads the APP_VERSION ENV the footer and /info read): that proves the binary
-# executes on this platform (an arm64 image on the amd64 NAS was `exec format error`,
-# instalite-relay 2026-10-18) and the build arg reached the app. The OCI label is what
-# publish.sh reads back from `latest` as the deployed commit.
+# The boot cannot reach a listener offline, so scripts/ci/smoke_image.sh runs the binary's
+# --version instead (its header says why). tier_guard is the budget boot_image.sh would have been.
+SMOKE_BUDGET_SECONDS ?= 30
 ci-smoke: ## run $(CI_IMAGE)'s binary offline; it and the OCI version label must report $(CI_BUILD_VERSION)
-	@reported=$$(DOCKER_CALL_TIMEOUT=60 devkit/bin/docker_bounded.sh run --rm --network none $(CI_IMAGE) redlib --version); \
-	label=$$(devkit/bin/docker_bounded.sh image inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' $(CI_IMAGE)); \
-	if [ "$$reported" = "Redlib $(CI_BUILD_VERSION)" ] && [ "$$label" = "$(CI_BUILD_VERSION)" ]; then \
-	  echo "ci-smoke: redlib --version and image.version label are $(CI_BUILD_VERSION)"; \
-	else \
-	  echo "ci-smoke: expected $(CI_BUILD_VERSION), the binary reports '$$reported' and the label is '$$label'" >&2; exit 1; \
-	fi
+	devkit/bin/tier_guard.sh smoke --budget $(SMOKE_BUDGET_SECONDS) -- scripts/ci/smoke_image.sh "$(CI_IMAGE)" "$(CI_BUILD_VERSION)"
 
 # Run by homelab's devkit-publish@redlib.timer on linux-box every 5 min, never by hand on a Mac
 # (it refuses anything but native amd64). devkit README "Publish".
