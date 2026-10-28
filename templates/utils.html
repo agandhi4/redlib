@@ -1,7 +1,7 @@
 {% macro options(current, values, default) -%}
 	{% for value in values %}
 		<option value="{{ value }}" {% if current == value.to_string() || (current == "" && value.to_string() == default.to_string()) %}selected{% endif %}>
-			{{ format!("{}{}", value.get(0..1).unwrap_or_default().to_uppercase(), value.get(1..).unwrap_or_default()) }}
+			{% if value.to_string() == "qa" %}Q&amp;A{% else %}{{ format!("{}{}", value.get(0..1).unwrap_or_default().to_uppercase(), value.get(1..).unwrap_or_default()) }}{% endif %}
 		</option>
 	{% endfor %}
 {%- endmacro %}

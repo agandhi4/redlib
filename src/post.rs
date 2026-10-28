@@ -74,11 +74,33 @@ pub async fn canonical_redirect(req: Request<Body>) -> Result<Response<Body>, St
 	}
 }
 
-/// Where `canonical_redirect` sends the reader, or None. A resolved path still lacking a
-/// subreddit (Reddit answered 2xx, so `canonical_path` echoed the bare input) would redirect
-/// back to the same route forever, so only `/r/`, `/u/` and `/user/` paths are followed.
+/// A share link from the Reddit apps' Share button (`/r/<sub>/s/<id>`, `/u/<name>/s/<id>`, and
+/// `/user/<name>/s/<id>`, upstream #560): Reddit's HEAD redirects it to the post, which
+/// `canonical_path` follows. The share query (`share_id`, tracking) is dropped. Used by the
+/// `…/s/:id` routes in `main.rs`.
+pub async fn share_redirect(req: Request<Body>) -> Result<Response<Body>, String> {
+	let id = req.param("id").unwrap_or_default();
+	let owner = match (req.param("sub"), req.param("name")) {
+		(Some(sub), _) => format!("r/{sub}"),
+		(None, Some(name)) => format!("u/{name}"),
+		(None, None) => String::new(),
+	};
+	if owner.is_empty() || !(8..12).contains(&id.len()) {
+		return error(req, "Nothing here").await;
+	}
+	let resolved = canonical_path(format!("/{owner}/s/{id}"), 3).await;
+	match resolved.map(|path| path.and_then(|path| canonical_target(&path, None, None))) {
+		Ok(Some(target)) => Ok(redirect(&target)),
+		Ok(None) => error(req, "Share link is invalid. It may point to a removed post or a banned community.").await,
+		Err(e) => error(req, &e).await,
+	}
+}
+
+/// Where a resolved post link sends the reader, or None. Only a post path (`/comments/` under
+/// `/r/`, `/u/` or `/user/`) is followed: on a 2xx `canonical_path` echoes its input, and a bare
+/// `/comments/<id>` or an unresolved share link would redirect back to its own route forever.
 fn canonical_target(path: &str, comment_id: Option<&str>, query: Option<&str>) -> Option<String> {
-	if !["/r/", "/u/", "/user/"].iter().any(|prefix| path.starts_with(prefix)) {
+	if !["/r/", "/u/", "/user/"].iter().any(|prefix| path.starts_with(prefix)) || !path.contains("/comments/") {
 		return None;
 	}
 	let mut target = path.to_string();
@@ -285,5 +307,8 @@ mod tests {
 		// canonical_path echoes its input on a 2xx; following it would loop on /comments/:id.
 		assert_eq!(canonical_target("/comments/1xadhhx", None, None), None);
 		assert_eq!(canonical_target("/comments/1xadhhx/title/", Some("kfbqlbc"), None), None);
+		// A share link Reddit answered 2xx instead of redirecting.
+		assert_eq!(canonical_target("/r/nyc/s/AbCdEfGh12", None, None), None);
+		assert_eq!(canonical_target("/u/spez/s/AbCdEfGh12", None, None), None);
 	}
 }

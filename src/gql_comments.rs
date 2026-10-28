@@ -244,6 +244,8 @@ fn comment_item(node: &Value, parent: &str) -> Option<Value> {
 			"score": node["score"].as_i64().unwrap_or_default(),
 			"score_hidden": node["isScoreHidden"] == true,
 			"stickied": node["isStickied"] == true,
+			// Reddit's own collapse (an admin takedown, a low score), the JSON API's `collapsed`.
+			"collapsed": node["isInitiallyCollapsed"] == true,
 			"distinguished": node["distinguishedAs"].as_str().map(str::to_lowercase),
 			"author_flair_type": flair_type,
 			"author_flair_richtext": flair_richtext,
@@ -259,8 +261,10 @@ fn comment_item(node: &Value, parent: &str) -> Option<Value> {
 
 /// Author, markdown body and body HTML, in the JSON API's spelling of deleted and removed
 /// comments, which `comments::build_comment` recognises (removed ones link to the archive).
+/// A removed or taken-down comment arrives with `authorInfo: null`; the JSON API named its
+/// author `[deleted]`, which routes to the deleted-account page, not to a user.
 fn content(node: &Value, deleted: bool) -> (String, String, String) {
-	let author = node["authorInfo"]["name"].as_str().unwrap_or("[unknown]");
+	let author = node["authorInfo"]["name"].as_str().unwrap_or("[deleted]");
 	if deleted {
 		return ("[deleted]".into(), "[deleted]".into(), "<p>[deleted]</p>".into());
 	}
@@ -549,6 +553,12 @@ mod tests {
 		takedown["node"]["isAdminTakedown"] = true.into();
 		let data = &item(&takedown, "p").unwrap().1["data"];
 		assert_eq!((data["author"].as_str(), data["body"].as_str()), (Some("a"), Some("[ Removed by Reddit ]")));
+		// As Reddit sends one: no author, and collapsed by Reddit.
+		takedown["node"]["authorInfo"] = Value::Null;
+		takedown["node"]["isInitiallyCollapsed"] = true.into();
+		let data = &item(&takedown, "p").unwrap().1["data"];
+		assert_eq!((data["author"].as_str(), data["collapsed"].as_bool()), (Some("[deleted]"), Some(true)));
+		assert_eq!(item(&tree, "p").unwrap().1["data"]["collapsed"], false);
 
 		let deleted = json!({"depth": 0, "node": {"__typename": "DeletedComment"}});
 		let data = &item(&deleted, "p").unwrap().1["data"];

@@ -104,7 +104,7 @@
 		{% block footer %}
 			<footer>
 				<div class="footer-buttons">
-					<p><span id="version">{{ crate::instance_info::app_version() }}&emsp;</span><a href="/info" title="View instance information">ⓘ View instance info</a>&emsp;<a href="https://github.com/redlib-org/redlib" title="View code on GitHub">&lt;&gt; Code</a></p>
+					<p><span id="version">{{ crate::instance_info::app_version() }}&emsp;</span><a href="/info" title="View instance information">ⓘ View instance info</a>&emsp;<a href="{{ crate::instance_info::source_url() }}" title="View this instance's code on GitHub">&lt;&gt; Code</a></p>
 				</div>
 			</footer>
 		{% endblock %}
