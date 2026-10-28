@@ -1,4 +1,4 @@
-docs/decisions.md merge=union
+docs/decisions.md merge=devkit-decisions
 docs/metrics/ratchet.json merge=devkit-metrics
 docs/metrics/report-only.json merge=devkit-metrics
 docs/metrics/scorecard.json merge=devkit-metrics

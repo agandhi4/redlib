@@ -6,7 +6,7 @@ ARG TARGETARCH
 ## builder image
 ########################
 # One builder per target arch, picked by BuildKit's TARGETARCH; only the selected stage builds.
-# Each rust-musl-cross image runs on the platform it targets, so an amd64 build (ghcr.yml) and an
+# Each rust-musl-cross image runs on the platform it targets, so an amd64 build (linux-box's publish) and an
 # arm64 build (the local gate on Apple Silicon, issue #7) both compile natively, never under QEMU.
 # Never build one arch's image on the other arch's builder variant: the x86_64-musl image's
 # arm64 variant cross-compiles, and boring-sys2's bindgen then looks for x86_64 glibc headers it
