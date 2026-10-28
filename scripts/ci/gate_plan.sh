@@ -5,16 +5,17 @@
 #
 #   *.md, docs/** only                   -> docs (docs-check)
 #   devkit/, .devkit-rev, hooks only     -> quick (ci-quick runs docs-check and every guard)
-#   anything else (src/, static/, templates/, Cargo.*, Makefile, scripts/, .github/, ...)
-#                                        -> quick + unit + image, then ci-metrics last
+#   anything else (src/, static/, templates/, Cargo.*, Makefile, scripts/, ...)
+#                                        -> quick + unit + image (ci-image, then ci-smoke),
+#                                           then ci-metrics last
 #                                           (scripts/ci/metrics.conf); image skips only when
 #                                           every path is in GATE_IMAGE_EXCLUDE_PATHS
 # Rust sources sit at the repo root, so the table calls them "other", which runs every group
 # whose areas include it; static/ and templates/ are compiled into the binary (include_str!,
 # Askama), so they are code like src/.
-# There is no smoke job: the listener opens only after OAuth bootstrap against Reddit
-# (AGENTS.md "Startup order"), so no health path answers without live Reddit. ci-image asserts
-# the image ENV and OCI label carry gate-<pr> instead (release identity).
+# The smoke boots no listener: that opens only after OAuth bootstrap against Reddit (AGENTS.md
+# "Startup order"). ci-smoke runs the image's binary offline and asserts it and the OCI label
+# report gate-<pr> (scripts/ci/smoke_image.sh); devkit/bin/publish.sh runs the same two targets before a push.
 GATE_SLUG=agandhi4/redlib
 GATE_STATE_NAME=redlib-gate
 
@@ -26,15 +27,18 @@ GATE_JOBS_BACKEND="unit ci-unit"
 # devkit runs it last and passes METRICS_REBASELINE=1 when the PR carries the
 # metrics-rebaseline label. vuln-app queries OSV, so the gate host needs outbound network.
 GATE_JOBS_METRICS="metrics ci-metrics"
-GATE_JOBS_IMAGE="image ci-image CI_IMAGE=$IMAGE CI_BUILD_VERSION=gate-$PR"
+GATE_JOBS_IMAGE="image ci-image CI_IMAGE=$IMAGE CI_BUILD_VERSION=gate-$PR|smoke ci-smoke CI_IMAGE=$IMAGE CI_BUILD_VERSION=gate-$PR"
+# What devkit/bin/publish.sh pushes to (read as this literal line, never sourced).
+PUBLISH_IMAGE=ghcr.io/agandhi4/redlib
 # Every app path builds the image (devkit 2026-10-17: a plan excludes paths, never areas). These
 # reach no stage's output: `COPY . ./` copies them, but neither cargo build nor the release stage
 # reads them (only src/, static/, templates/, build.rs, Cargo.* and rust-toolchain.toml are). The
-# gate reads .dockerignore itself, so its paths (.github/) are not repeated here. .gitattributes stays out of this list: it changes the
-# checked-out bytes of the files include_str! embeds.
+# gate reads .dockerignore itself, so its paths are not repeated here. .gitattributes stays out of
+# this list: it changes the checked-out bytes of the files include_str! embeds.
 GATE_IMAGE_EXCLUDE_PATHS='^(scripts/|extensions/|docs/metrics/|\.githooks/|clippy\.toml$|rustfmt\.toml$|renovate\.json$|\.env\.example$|\.gitignore$|CREDITS$|LICENSE$)'
-# Re-included from the scripts/ exclusion: this file declares the ci-image job.
-GATE_IMAGE_PATHS='^scripts/ci/gate_plan\.sh$'
+# Re-included from the scripts/ exclusion: this file declares the image jobs, and the smoke job
+# runs smoke_image.sh.
+GATE_IMAGE_PATHS='^scripts/ci/(gate_plan|smoke_image)\.sh$'
 
 gate_cleanup() {
   docker rmi -f "$IMAGE" >/dev/null 2>&1 || true

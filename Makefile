@@ -1,33 +1,32 @@
-# The repo's check API: the PR gate (scripts/ci/gate_plan.sh) and Actions (quick-check.yml) call
-# these targets and nothing else, so a check changes here, once.
+# The repo's check API: the PR gate (scripts/ci/gate_plan.sh), the git hooks and linux-box's
+# publisher (`make publish`) call these targets and nothing else, so a check changes here, once.
 #
 # Rust comes from rust-toolchain.toml. make's SHELL puts the same pinned toolchain first on PATH
 # for every recipe line and $(shell …) that the gate and the hooks use, so a hand-run
 # `make ci-quick` works on a machine with no Rust and no recipe can be the one left out
 # (devkit decisions 2026-10-19 "Lanes own their Postgres port; recipes run on the pins"). Under the
-# gate or a hook the PATH is already built and the line skips it. On Actions
-# setup-rust-toolchain has already put the pin on PATH, and rust_toolchain.sh reuses it.
+# gate or a hook the PATH is already built and the line skips it.
 SHELL := devkit/bin/toolchain_shell.sh
 CARGO ?= cargo
 CI_IMAGE ?= redlib:ci
-# The image's APP_VERSION, and what ci-image then asserts its ENV and OCI label carry: the bare
-# 7-char sha, as ghcr.yml passes it; the gate passes gate-<pr> (scripts/ci/gate_plan.sh) because
+# The image's APP_VERSION, and what ci-smoke asserts the binary and the OCI label report: the bare
+# 7-char sha, as publish.sh passes it; the gate passes gate-<pr> (scripts/ci/gate_plan.sh) because
 # it builds a merge commit that never ships.
 CI_BUILD_VERSION ?= $(shell git rev-parse --short=7 HEAD)
 
 .DEFAULT_GOAL := help
-.PHONY: help ci-quick ci-guards ci-lint ci-typecheck ci-unit test-live ci-image gate merge install hooks-check devkit-sync devkit-check toolchain-check workflows-check docs-check release-check secrets-check secrets-staged upstream-review pr ci-metrics metrics-snapshot metrics-tighten metrics-rebaseline
+.PHONY: help ci-quick ci-guards ci-lint ci-typecheck ci-unit test-live ci-image ci-smoke publish gate merge install hooks-check devkit-sync devkit-check toolchain-check workflows-check docs-check release-check secrets-check secrets-staged upstream-review pr ci-metrics metrics-snapshot metrics-tighten metrics-rebaseline
 
 help: ## list targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
 
-# The union recipe: Actions and the gate run ci-quick; the two git hooks run its parts
+# The union recipe: the gate runs ci-quick; the two git hooks run its parts
 # (scripts/ci/hooks.conf, devkit README "Git hooks"): pre-commit the seconds-long ci-guards,
 # secrets-staged and ci-lint, pre-push ci-typecheck and ci-unit. A new quick check goes into a
 # part, and a new part into both ci-quick and one hook, or the hooks stop covering the gate.
 # Guards first: an in-repo devkit/ edit, a disagreeing Rust pin or an unpinned action fails
 # before anything compiles.
-ci-quick: ci-guards secrets-check ci-lint ci-typecheck ## guards, secrets, fmt and clippy (Actions + gate)
+ci-quick: ci-guards secrets-check ci-lint ci-typecheck ## guards, secrets, fmt and clippy (the gate's quick job)
 
 ci-guards: devkit-check toolchain-check workflows-check docs-check release-check ## pre-commit: the repo guards, no compile
 
@@ -67,22 +66,23 @@ ci-unit: ## cargo test with line coverage, offline (live-Reddit tests are #[igno
 test-live: ## the #[ignore]d tests that call live Reddit (needs outbound network)
 	$(CARGO) test --locked -- --ignored --test-threads=1
 
-# Builds for the host's platform (the Dockerfile picks its builder by TARGETARCH), so the gate on
-# the arm64 Mac compiles natively instead of under QEMU (issue #7). ghcr.yml publishes linux/amd64
-# from the same Dockerfile; the two differ only in which builder stage runs.
-#
-# No boot: the listener opens only after OAuth bootstrap against live Reddit (AGENTS.md "Startup
-# order"), so devkit's boot_image.sh BOOT_EXPECT_VERSION cannot run here. The build arg is checked
-# where it lands instead: the image's ENV (what the app reads) and its OCI version label.
-ci-image: ## build Dockerfile as $(CI_IMAGE) with APP_VERSION=$(CI_BUILD_VERSION), then assert ENV + label carry it
+# Build only (devkit-check's publish contract): the gate runs ci-image then ci-smoke as two jobs,
+# and devkit/bin/publish.sh runs both on linux-box before it pushes. Builds for the host's
+# platform (the Dockerfile picks its builder by TARGETARCH), so the gate on the arm64 Mac compiles
+# natively instead of under QEMU (issue #7), and linux-box builds the amd64 image it ships.
+ci-image: ## build Dockerfile as $(CI_IMAGE) with APP_VERSION=$(CI_BUILD_VERSION)
 	DOCKER_CALL_TIMEOUT=900 devkit/bin/docker_bounded.sh build --build-arg APP_VERSION="$(CI_BUILD_VERSION)" -t $(CI_IMAGE) .
-	@env=$$(devkit/bin/docker_bounded.sh image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $(CI_IMAGE) | sed -n 's/^APP_VERSION=//p'); \
-	label=$$(devkit/bin/docker_bounded.sh image inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' $(CI_IMAGE)); \
-	if [ "$$env" = "$(CI_BUILD_VERSION)" ] && [ "$$label" = "$(CI_BUILD_VERSION)" ]; then \
-	  echo "ci-image: APP_VERSION and image.version label are $(CI_BUILD_VERSION)"; \
-	else \
-	  echo "ci-image: expected $(CI_BUILD_VERSION), image has APP_VERSION='$$env' label='$$label'" >&2; exit 1; \
-	fi
+
+# The boot cannot reach a listener offline, so scripts/ci/smoke_image.sh runs the binary's
+# --version instead (its header says why). tier_guard is the budget boot_image.sh would have been.
+SMOKE_BUDGET_SECONDS ?= 30
+ci-smoke: ## run $(CI_IMAGE)'s binary offline; it and the OCI version label must report $(CI_BUILD_VERSION)
+	devkit/bin/tier_guard.sh smoke --budget $(SMOKE_BUDGET_SECONDS) -- scripts/ci/smoke_image.sh "$(CI_IMAGE)" "$(CI_BUILD_VERSION)"
+
+# Run by homelab's devkit-publish@redlib.timer on linux-box every 5 min, never by hand on a Mac
+# (it refuses anything but native amd64). devkit README "Publish".
+publish: ## move ghcr.io/agandhi4/redlib:latest to a gated main (linux-box only)
+	devkit/bin/publish.sh .
 
 # devkit/bin/metrics_collect.sh runs the collectors in scripts/ci/metrics.conf and compares the
 # snapshot with docs/metrics/ratchet.json as committed on origin/main (devkit README "Metrics

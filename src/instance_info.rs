@@ -16,10 +16,11 @@ use time::OffsetDateTime;
 /// retrieved from the info endpoint.
 pub static INSTANCE_INFO: LazyLock<InstanceInfo> = LazyLock::new(InstanceInfo::new);
 
-/// The build's one version string: the image's `APP_VERSION` (the bare 7-char sha from ghcr.yml,
+/// The build's one version string: the image's `APP_VERSION` (the bare 7-char sha from publish.sh,
 /// the same string as its OCI version label, the `sha-<7>` image tag and the `ship-<date>-<sha7>` git tag), or
 /// `v<crate semver>` outside an image (`cargo run`, tests). Read once; the env is fixed per process.
-/// Used by: the footer (templates/base.html), /info, the startup log line (main.rs), `source_url`.
+/// Used by: the footer (templates/base.html), /info, the startup log line and `--version` (main.rs,
+/// which make ci-smoke asserts), `source_url`.
 pub fn app_version() -> &'static str {
 	static APP_VERSION: LazyLock<String> = LazyLock::new(|| match std::env::var("APP_VERSION") {
 		Ok(version) if !version.is_empty() => version,

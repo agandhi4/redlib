@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Mark a commit as shipped: create the annotated git tag `ship-<YYYY-MM-DD>-<sha7>` on GitHub.
-# The deploying step calls it right after it moves `latest` (Orbit/locus CI after the push;
-# finplat's deploy function after prod /health/ready reports the sha). Design:
+# The publisher calls it right after it moves `latest` (bin/publish.sh; Actions publish jobs
+# until each repo moves to it). Design:
 # ~/projects/solo/standardization/release-identity-design.md §2.
 #
-# Usage: devkit/bin/ship_tag.sh <owner/repo> <sha> [--date YYYY-MM-DD]
+# Usage: devkit/bin/ship_tag.sh <owner/repo> <sha> [--date YYYY-MM-DD] [--note <text>]
 #   <sha>   full 40-hex commit sha; it must be reachable from main
 #   --date  the ship date in the tag name; default today in UTC
+#   --note  a paragraph added to the tag message (publish.sh --ungated's reason); a tag that
+#           already exists keeps its message
 #   On success prints exactly one stdout line, SHIP_TAG=<tag>, whether the tag was created now
 #   or already pointed at <sha>. Progress goes to stderr.
 #   Exit 0 ok, 1 refused or failed (sha not on main, tag points at another commit, gh error),
@@ -25,15 +27,17 @@
 #   or an ancestor of it. A PR-branch or force-pushed-away sha would mark something never merged.
 set -uo pipefail
 
-usage() { echo "usage: $0 <owner/repo> <sha> [--date YYYY-MM-DD]" >&2; exit 2; }
+usage() { echo "usage: $0 <owner/repo> <sha> [--date YYYY-MM-DD] [--note <text>]" >&2; exit 2; }
 die() { echo "ship_tag: $*" >&2; exit 1; }
 
 REPO=
 SHA=
 DATE=
+NOTE=
 while [ $# -gt 0 ]; do
   case "$1" in
     --date) [ $# -ge 2 ] || usage; DATE=$2; shift ;;
+    --note) [ $# -ge 2 ] || usage; NOTE=$2; shift ;;
     -h|--help) usage ;;
     -*) echo "ship_tag: unknown option $1" >&2; usage ;;
     *)
@@ -104,7 +108,9 @@ esac
 
 if read_tag; then judge_existing; fi
 
-tag_sha=$(api -X POST "repos/$REPO/git/tags" -f tag="$TAG" -f message="Shipped $SHA on $DATE" \
+MESSAGE="Shipped $SHA on $DATE"
+[ -z "$NOTE" ] || MESSAGE="$MESSAGE"$'\n\n'"$NOTE"
+tag_sha=$(api -X POST "repos/$REPO/git/tags" -f tag="$TAG" -f message="$MESSAGE" \
   -f object="$SHA" -f type=commit --jq .sha) || die "creating tag object $TAG failed: $(api_error)"
 
 if api -X POST "repos/$REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$tag_sha" --jq .ref >/dev/null; then

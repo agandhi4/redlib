@@ -225,3 +225,8 @@ Consequence: open PRs with `make pr BODY_FILE=…`, never bare `gh pr create`. A
 **Decision:** `make upstream-review` also lists open upstream PRs updated after `.upstream-pr-rev` (a UTC time); a review moves both marks. The first PR review ships as 0.43.2 (`docs/fork.md` "Reviews").
 **Consequence:** a PR that gets new commits after its review is listed again; the PR list needs an authenticated `gh`.
 
+
+## 2026-10-28 — Images ship from linux-box's publisher; Actions deleted; `ci-smoke` runs `--version`
+**Why:** Actions stopped running here on 2026-10-22, so three releases went out by a hand build on the NAS (fork.md's recipe), and the owner chose one fleet publisher (devkit #273, design answers Q1/Q4 2026-10-27). devkit-check's publish contract needs a build-only `ci-image` and a `ci-smoke` gate job, but this image cannot boot offline (the listener waits on Reddit OAuth).
+**Decision:** devkit b47c27b; `PUBLISH_IMAGE=ghcr.io/agandhi4/redlib` and `publish:` (homelab `devkit-publish@redlib.timer`). `ci-image` only builds; `ci-smoke` (`scripts/ci/smoke_image.sh` under tier_guard, 30 s) runs the image's binary with `--network none` and asserts `redlib --version` (now `instance_info::app_version()`, not the crate semver) and the OCI label equal `CI_BUILD_VERSION`. ghcr.yml, quick-check.yml and the hand-ship recipe are deleted. Rejected: booting against live Reddit (a flaky gate), and opening the listener before OAuth (the Startup order rule).
+**Consequence:** a merge that changes an image input reaches `latest` within 5 min plus the build; a docs or devkit-only merge publishes nothing. The smoke catches a wrong-arch or broken binary and a lost APP_VERSION, not a routing break. `--version` outside an image prints `v<semver>`.

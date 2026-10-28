@@ -193,7 +193,7 @@ One Rust binary (hyper server, `src/main.rs` router) that proxies Reddit's JSON 
 
 This fork runs one instance (`reddit.box`), so it carries one deployment path; upstream's recipes (Docker Compose and CLI, Podman Quadlets, systemd, launchd, Replit/Heroku, NetBSD) were removed with the files they used. See [upstream's README](https://github.com/redlib-org/redlib#deployment) for those.
 
-- **Image:** every push to `main` builds `ghcr.io/agandhi4/redlib` (`.github/workflows/ghcr.yml`), tagged `sha-<7>` and `latest`, and creates the git tag `ship-<YYYY-MM-DD>-<sha7>`. The bare `<sha7>` is the image's `APP_VERSION`, its OCI version label and the version in the page footer.
+- **Image:** linux-box's `devkit-publish@redlib.timer` (homelab `hosts/linux-box/publish.list`) runs `make publish` (`devkit/bin/publish.sh`) every 5 min: once every commit since `latest` passed the gate and one changed an image input, it builds `ghcr.io/agandhi4/redlib` at `main`, runs `make ci-smoke` on it, pushes `sha-<7>` and `latest`, and creates the git tag `ship-<YYYY-MM-DD>-<sha7>`. Nothing is published from a Mac or by hand. The bare `<sha7>` is the image's `APP_VERSION`, its OCI version label and the version in the page footer.
 - **Stack:** the compose file lives in the homelab repo (`stacks/redlib/docker-compose.yml`); its hourly `deploy.sh update` timer pulls `latest`. Instance settings are env vars there.
 
 ## Tracking upstream

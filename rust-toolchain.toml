@@ -1,6 +1,5 @@
 # The one Rust version string for this repo (AGENTS.md "Toolchain"). rustup, the devkit gate
-# (devkit/bin/rust_toolchain.sh), Actions (setup-rust-toolchain reads this file) and the image
-# builder all resolve it; toolchain-check fails when anything else names a different version.
+# (devkit/bin/rust_toolchain.sh) and the image builder all resolve it; toolchain-check fails when anything else names a different version.
 # No `targets`: the Dockerfile adds the one musl target its builder stage needs (x86_64 or
 # aarch64, by TARGETARCH), so nothing else downloads musl std it never builds.
 [toolchain]

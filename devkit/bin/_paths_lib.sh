@@ -8,6 +8,7 @@
 #   devkit_areas <paths>            DEVKIT_AREAS=" a b " ("" for none), areas in DEVKIT_AREA_ORDER
 #   devkit_gate_areas <paths>       export GATE_AREAS, GATE_HAS_<AREA>=0|1, GATE_ONLY_TOOLING_OR_DOCS
 #   devkit_default_gate_plan        the plan body a repo's gate_plan() calls (contract below)
+#   devkit_image_group_runs         true when the IMAGE group runs for $CHANGED (publish.sh)
 #
 # Areas (one `case`, first match wins, so a specific entry sits above the general one it carves
 # out of; each entry names the repo or devkit fact it comes from):
@@ -44,8 +45,8 @@ declare -F metrics_conf_parse >/dev/null || . "$(dirname "${BASH_SOURCE[0]}")/_m
 # Never run from the merged tree by a job: the gate and hook machinery (run from the invoking
 # checkout, main's copy), the guards ci-quick runs (devkit-check, docs/toolchain/workflows/
 # release/ci-targets checks, own-commit, ios-check, hooks_check, bats_assert_check and their libs), and fleet
-# operations run from a devkit checkout or after merge (sync, new, monthly audit, ship_tag in
-# publish.yml, the nightly dependency merge and its vuln_watch.py), machine setup (install_gh_shim.sh, whose --check
+# operations run from a devkit checkout or after merge (sync, new, monthly audit, the publisher
+# publish.sh with ship_tag.sh and registry_prune.sh, the nightly dependency merge and its vuln_watch.py), machine setup (install_gh_shim.sh, whose --check
 # the scorecard reads; install_dependency_merge.sh, install_monthly_audit.sh, _launchd_job_lib.sh,
 # and job_launcher.sh, the launchd entry they install), and
 # ios_device.sh, which only a person's `make ios-install` runs against a phone.
@@ -54,7 +55,7 @@ DEVKIT_TOOLING_BIN="local_gate.sh gate.sh remote_gate.sh _paths_lib.sh
   devkit-check.sh _vendor_paths.sh docs_check.sh toolchain_check.sh ci_targets_check.sh
   _makefile_lib.sh workflows_check.sh _workflows_lib.sh release_check.sh _dockerfile_lib.sh
   _gitattributes_lib.sh _trailer_lib.sh own_commit_check.py _dockerignore.py py_cognitive_lint.py changed_lint.py _changed_files.py
-  devkit-sync.sh devkit-new.sh monthly_audit.sh dead_alert_audit.py ship_tag.sh scorecard.py agent_cost.py secrets_check.sh migration_check.py
+  devkit-sync.sh devkit-new.sh monthly_audit.sh dead_alert_audit.py ship_tag.sh publish.sh registry_prune.sh scorecard.py agent_cost.py secrets_check.sh migration_check.py
   gate_record.py pr_merge.sh merge_rules.sh pr_create.sh _gh_repo_lib.sh codex_review.py _codex_rules.sh _merge_carry.sh decisions_merge.py gate_bite.py _repo_identity.py _renovate.py install_gh_shim.sh
   dependency_merge.sh _dependency_pr.py vuln_watch.py install_dependency_merge.sh install_monthly_audit.sh _launchd_job_lib.sh job_launcher.sh
   ios_check.py ios_device.sh bats_assert_check.py"
@@ -473,6 +474,12 @@ _devkit_image_areas() {
   devkit_areas "$paths"
   DEVKIT_IMAGE_AREAS=" ${DEVKIT_AREAS:- } "
 }
+
+# devkit_image_group_runs: whether the gate's IMAGE group would run for $CHANGED, by the gate's
+# own definition (after devkit_gate_areas, with the plan's GATE_IMAGE_* set and $WT holding the
+# tree's root .dockerignore). Exit 0 yes, 1 no, 2 a bad plan ERE. Used by publish.sh: a merge
+# that changes no image input publishes nothing.
+devkit_image_group_runs() { _devkit_group_runs IMAGE; }
 
 _devkit_image_input_changed() {
   local path

@@ -6,7 +6,7 @@
 #   --stack     a directory under templates/new/stacks/ (python-fastapi, node-service, rust,
 #               next-vercel, swift-app, infra-compose)
 #   --dir       parent directory; the repo is <dir>/<name> (default: the current directory)
-#   --no-image  no Dockerfile, publish workflow or smoke; ci-image and ci-smoke become stubs.
+#   --no-image  no Dockerfile, publish target or smoke; ci-image and ci-smoke become stubs.
 #               Implied for a stack whose stack.conf says STACK_IMAGE=0 (next-vercel: Vercel builds;
 #               swift-app: Xcode and TestFlight ship it; infra-compose runs other repos' images)
 #   --list      print the stacks and exit
@@ -211,7 +211,6 @@ if [ "$STACK_QUICK_CHECK_TARGET" != ci-quick ]; then
 fi
 
 if [ "$IMAGE" = 0 ]; then
-  rm -f .github/workflows/publish.yml
   for f in $STACK_IMAGE_FILES; do rm -f "$f"; done
 fi
 
@@ -285,5 +284,5 @@ Owner steps (they act on GitHub, so devkit new does not run them):
   2. sync its settings and labels, from the devkit checkout: github/repo_settings.sh $NAME && github/labels_sync.sh $NAME
 Then:
   3. grant the Mend Renovate app access to $OWNER/$NAME (renovate.json extends devkit's preset)
-  4. replace the <!-- --> placeholders in README.md, docs/architecture.md and AGENTS.md's Architecture; add a homelab stack under stacks/$NAME when it deploys
+  4. replace the <!-- --> placeholders in README.md, docs/architecture.md and AGENTS.md's Architecture; add a homelab stack under stacks/$NAME when it deploys, and $NAME to hosts/linux-box/publish.list (homelab hosts/linux-box/README.md, "Publisher") when it publishes an image
 MSG
