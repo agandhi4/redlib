@@ -19,13 +19,27 @@ pub static INSTANCE_INFO: LazyLock<InstanceInfo> = LazyLock::new(InstanceInfo::n
 /// The build's one version string: the image's `APP_VERSION` (the bare 7-char sha from ghcr.yml,
 /// the same string as its OCI version label, the `sha-<7>` image tag and the `ship-<date>-<sha7>` git tag), or
 /// `v<crate semver>` outside an image (`cargo run`, tests). Read once; the env is fixed per process.
-/// Used by: the footer (templates/base.html), /info, the startup log line (main.rs).
+/// Used by: the footer (templates/base.html), /info, the startup log line (main.rs), `source_url`.
 pub fn app_version() -> &'static str {
 	static APP_VERSION: LazyLock<String> = LazyLock::new(|| match std::env::var("APP_VERSION") {
 		Ok(version) if !version.is_empty() => version,
 		_ => concat!("v", env!("CARGO_PKG_VERSION")).to_string(),
 	});
 	&APP_VERSION
+}
+
+const SOURCE_REPO: &str = "https://github.com/agandhi4/redlib";
+
+/// The footer's "Code" link: this fork at the running commit, since the AGPL offer is for the
+/// source of what runs, not upstream's (whose link the footer carried; upstream #568 makes it a
+/// setting). Outside an image `app_version` is the semver, which names no commit: the repo root.
+pub fn source_url() -> String {
+	let version = app_version();
+	if !version.is_empty() && version.chars().all(|c| c.is_ascii_hexdigit()) {
+		format!("{SOURCE_REPO}/tree/{version}")
+	} else {
+		SOURCE_REPO.to_string()
+	}
 }
 
 /// Handles instance info endpoint
@@ -265,12 +279,14 @@ mod tests {
 	fn app_version_is_the_image_build_arg() {
 		assert_eq!(app_version(), "abc1234");
 		assert_eq!(InstanceInfo::new().app_version, "abc1234");
+		assert_eq!(source_url(), "https://github.com/agandhi4/redlib/tree/abc1234");
 	}
 
 	#[test]
 	#[sealed_test(env = [("APP_VERSION", "")])]
 	fn app_version_falls_back_to_crate_semver() {
 		assert_eq!(app_version(), concat!("v", env!("CARGO_PKG_VERSION")));
+		assert_eq!(source_url(), "https://github.com/agandhi4/redlib");
 	}
 
 	#[test]

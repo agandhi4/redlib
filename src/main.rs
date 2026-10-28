@@ -2,20 +2,17 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::cmp_owned)]
 
-use cached::proc_macro::cached;
 use clap::{Arg, ArgAction, Command};
 use std::sync::LazyLock;
 
 use futures_lite::FutureExt;
 use hyper::{header::HeaderValue, Body, Request, Response};
 use log::{info, warn};
-use redlib::client::canonical_path;
 use redlib::media_proxy::proxy;
 use redlib::oauth::init_oauth_client;
 use redlib::preferences::ThemeAssets;
 use redlib::server::{self, RequestExt};
 use redlib::startup_check::rate_limit_check;
-use redlib::transport::CLIENT;
 use redlib::utils::{error, redirect};
 use redlib::{config, db, duplicates, headers, instance_info, post, search, settings, subreddit, subreddit_rss, user};
 
@@ -270,10 +267,10 @@ async fn main() {
 		.at("/comment-collapse.js")
 		.get(|_| resource(include_str!("../static/comment-collapse.js"), "text/javascript", true).boxed());
 
-	app.at("/commits.atom").get(|_| async move { proxy_commit_info().await }.boxed());
-	app.at("/instances.json").get(|_| async move { proxy_instances().await }.boxed());
-
 	// Proxy media through Redlib
+	app.at("/vid/:id/dash/:size").get(|r| proxy(r, "https://v.redd.it/{id}/DASH_{size}").boxed());
+	app.at("/vid/:id/cmaf/:size").get(|r| proxy(r, "https://v.redd.it/{id}/CMAF_{size}").boxed());
+	// Before 0.43.2 a DASH fallback was /vid/<id>/<size>; pages sw.js cached then still name it.
 	app.at("/vid/:id/:size").get(|r| proxy(r, "https://v.redd.it/{id}/DASH_{size}").boxed());
 	app.at("/hls/:id/*path").get(|r| proxy(r, "https://v.redd.it/{id}/{path}").boxed());
 	app.at("/img/*path").get(|r| proxy(r, "https://i.redd.it/{path}").boxed());
@@ -389,24 +386,11 @@ async fn main() {
 	app.at("/info").get(|r| instance_info::instance_info(r).boxed());
 	app.at("/info.:extension").get(|r| instance_info::instance_info(r).boxed());
 
-	// Handle obfuscated share links.
-	// Note that this still forces the server to follow the share link to get to the post, so maybe this wants to be updated with a warning before it follow it
-	app.at("/r/:sub/s/:id").get(|req: Request<Body>| {
-		Box::pin(async move {
-			let sub = req.param("sub").unwrap_or_default();
-			match req.param("id").as_deref() {
-				// Share link
-				Some(id) if (8..12).contains(&id.len()) => match canonical_path(format!("/r/{sub}/s/{id}"), 3).await {
-					Ok(Some(path)) => Ok(redirect(&path)),
-					Ok(None) => error(req, "Post ID is invalid. It may point to a post on a community that has been banned.").await,
-					Err(e) => error(req, &e).await,
-				},
-
-				// Error message for unknown pages
-				_ => error(req, "Nothing here").await,
-			}
-		})
-	});
+	// Share links from the Reddit apps' Share button, for subreddit and profile posts (upstream #560).
+	// The server follows each one to its post with a HEAD to Reddit (post::share_redirect).
+	app.at("/r/:sub/s/:id").get(|r| post::share_redirect(r).boxed());
+	app.at("/u/:name/s/:id").get(|r| post::share_redirect(r).boxed());
+	app.at("/user/:name/s/:id").get(|r| post::share_redirect(r).boxed());
 
 	app.at("/:id").get(|req: Request<Body>| {
 		Box::pin(async move {
@@ -434,38 +418,4 @@ async fn main() {
 	if let Err(e) = server.await {
 		eprintln!("Server error: {e}");
 	}
-}
-
-pub async fn proxy_commit_info() -> Result<Response<Body>, String> {
-	Ok(
-		Response::builder()
-			.status(200)
-			.header("content-type", "application/atom+xml")
-			.body(Body::from(fetch_commit_info().await))
-			.unwrap_or_default(),
-	)
-}
-
-#[cached(time = 600)]
-async fn fetch_commit_info() -> String {
-	let url = "https://github.com/redlib-org/redlib/commits/main.atom";
-
-	CLIENT.get(url).send().await.expect("Failed to request GitHub").text().await.expect("Failed to read body")
-}
-
-pub async fn proxy_instances() -> Result<Response<Body>, String> {
-	Ok(
-		Response::builder()
-			.status(200)
-			.header("content-type", "application/json")
-			.body(Body::from(fetch_instances().await))
-			.unwrap_or_default(),
-	)
-}
-
-#[cached(time = 600)]
-async fn fetch_instances() -> String {
-	let url = "https://raw.githubusercontent.com/redlib-org/redlib-instances/refs/heads/main/instances.json";
-
-	CLIENT.get(url).send().await.expect("Failed to request GitHub").text().await.expect("Failed to read body")
 }
