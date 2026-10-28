@@ -1,6 +1,7 @@
 {
   "_comment": "scorecard ratchet: whether each repo-scoped check is wired (bin/scorecard.py --mode check|tighten|rebaseline); never edit by hand",
   "checks": {
+    "codex_review": true,
     "contract_probe": true,
     "gate_plan": true,
     "hooks": true,

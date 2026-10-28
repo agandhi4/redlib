@@ -292,21 +292,35 @@ async fn fetch_json(path: String, quarantine: bool) -> Result<Value, String> {
 }
 
 /// Send one GraphQL operation. Uncached; every caller goes through `gql()`. gql-fed answers a
-/// failed operation with 200 and an `errors` array (a retired persisted query reads
-/// "PersistedQueryNotFound"), which becomes the Err here.
+/// failed operation with 200 and an `errors` array, which becomes the Err here. It also times
+/// out single fields that way and answers the same operation on a resend (upstream #603), so an
+/// error is retried once. A retired persisted query ("PersistedQueryNotFound") never recovers,
+/// so it is not.
 async fn fetch_gql(body: Value) -> Result<Value, String> {
 	let operation = body["operationName"].as_str().unwrap_or("unnamed").to_string();
 	// Not a thread route, so a non-JSON 403 here rotates the token as it does for a listing.
 	let label = format!("gql:{operation}");
-	let response = fetch_reddit(&label, Budget::Gql, move || gql_post(&body)).await?;
-	match response["errors"].as_array().and_then(|errors| errors.first()) {
-		None => Ok(response),
-		Some(first) => {
-			let message: String = first["message"].as_str().map_or_else(|| first.to_string(), str::to_string).chars().take(200).collect();
+	let mut retried = false;
+	loop {
+		let request = body.clone();
+		let response = fetch_reddit(&label, Budget::Gql, move || gql_post(&request)).await?;
+		let Some(message) = gql_error(&response) else {
+			return Ok(response);
+		};
+		if retried || message.contains("PersistedQueryNotFound") {
 			warn!("[gql] {operation} failed: {message}");
-			Err(format!("Reddit GraphQL {operation} error: {message}"))
+			return Err(format!("Reddit GraphQL {operation} error: {message}"));
 		}
+		warn!("[gql] {operation} answered an error, retrying once: {message}");
+		retried = true;
 	}
+}
+
+/// The first `errors[].message` of a GraphQL response (at most 200 chars), or None when the
+/// operation succeeded.
+fn gql_error(response: &Value) -> Option<String> {
+	let first = response["errors"].as_array()?.first()?;
+	Some(first["message"].as_str().map_or_else(|| first.to_string(), str::to_string).chars().take(200).collect())
 }
 
 /// POST `body` to gql-fed with the same identity as every other Reddit request.
@@ -384,6 +398,16 @@ fn record_ratelimit(response: &WreqResponse, ratelimit: Option<&AtomicU16>, curr
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use serde_json::json;
+
+	#[test]
+	fn gql_error_reads_the_first_message() {
+		assert_eq!(gql_error(&json!({"data": {"postInfoById": null}})), None);
+		assert_eq!(gql_error(&json!({"errors": []})), None);
+		let timed_out = json!({"data": {}, "errors": [{"message": "Timeout"}, {"message": "later"}]});
+		assert_eq!(gql_error(&timed_out).as_deref(), Some("Timeout"));
+		assert_eq!(gql_error(&json!({"errors": [{"code": 7}]})).as_deref(), Some(r#"{"code":7}"#));
+	}
 
 	fn ratelimited_response() -> WreqResponse {
 		let response = http::Response::builder()

@@ -118,7 +118,7 @@ fn build_comment(comment: &Value, replies: Vec<Comment>, ctx: &CommentContext) -
 	// collapse stickied moderator comments.
 	let is_moderator_comment = data["distinguished"].as_str().unwrap_or_default() == "moderator";
 	let is_stickied = data["stickied"].as_bool().unwrap_or_default();
-	let collapsed = (is_moderator_comment && is_stickied) || is_filtered;
+	let collapsed = (is_moderator_comment && is_stickied) || is_filtered || data["collapsed"] == true;
 	let more_href = more_href(&kind, &id, parent_info[1], ctx);
 
 	Comment {

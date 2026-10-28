@@ -218,3 +218,10 @@ Consequence: vuln.app.high is 0 again. The 18 advisories OSV still lists carry n
 Why: devkit #235 pins jscpd once (devkit/metrics/tools, installed by devkit/bin/npm_tool.sh), so `tools/metrics/` was a second pin of the same 5.4.2 to keep in step. devkit #255 adds `make pr` (devkit/bin/pr_create.sh, origin only): a raw `gh pr create` here defaults to the public parent redlib-org/redlib, where a PR was opened by mistake on 2026-10-26.
 Decision: drop `tools/metrics/`, `make lock` and `make metrics-deps`, and the `dup` line's `--bin`; `.nvmrc` stays (the Node jscpd runs on). Add the template `pr:` target. Clone count unchanged: 15 (1.44 %) before and after.
 Consequence: open PRs with `make pr BODY_FILE=…`, never bare `gh pr create`. A jscpd bump is a devkit sync, not a repo PR.
+
+## 2026-10-28 — Upstream review covers open PRs (.upstream-pr-rev)
+
+**Why:** reviewing upstream commits alone missed every fix that waits in an open PR: the CMAF video and share-link bugs were live here, and the GraphQL comments route sat in #603 while this fork concluded comments needed a logged-in session.
+**Decision:** `make upstream-review` also lists open upstream PRs updated after `.upstream-pr-rev` (a UTC time); a review moves both marks. The first PR review ships as 0.43.2 (`docs/fork.md` "Reviews").
+**Consequence:** a PR that gets new commits after its review is listed again; the PR list needs an authenticated `gh`.
+

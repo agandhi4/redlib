@@ -89,6 +89,21 @@ fn front_page_sub(front_page: &str, subscribed: &str) -> String {
 	}
 }
 
+/// A listing's sort: the path's (`/r/<sub>/<sort>`, or `/<sort>` on the front page), else the
+/// `post_sort` preference (cookie, then `REDLIB_DEFAULT_POST_SORT`: reading the cookie alone
+/// ignored the instance default until settings were saved, upstream #521), else `hot`. Used by
+/// `community` and `subreddit_rss::rss`.
+pub fn listing_sort(req: &Request<Body>) -> String {
+	req.param("sort").or_else(|| req.param("id")).unwrap_or_else(|| {
+		let preferred = setting(req, "post_sort");
+		if preferred.is_empty() {
+			"hot".to_string()
+		} else {
+			preferred
+		}
+	})
+}
+
 pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 	// Build Reddit API path
 	let root = req.uri().path() == "/";
@@ -97,8 +112,7 @@ pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 	let subscribed = setting(&req, "subscriptions");
 	let front_page = setting(&req, "front_page");
 	let remove_default_feeds = setting(&req, "remove_default_feeds") == "on";
-	let post_sort = req.cookie("post_sort").map_or_else(|| "hot".to_string(), |c| c.value().to_string());
-	let sort = req.param("sort").unwrap_or_else(|| req.param("id").unwrap_or(post_sort));
+	let sort = listing_sort(&req);
 
 	let sub_name = req.param("sub").unwrap_or_else(|| front_page_sub(&front_page, &subscribed));
 
@@ -497,6 +511,14 @@ mod tests {
 
 	fn owned(items: &[&str]) -> Vec<String> {
 		items.iter().map(|s| (*s).to_string()).collect()
+	}
+
+	#[test]
+	fn listing_sort_falls_back_to_the_preference_then_hot() {
+		let with_cookie = Request::builder().uri("/r/rust").header("cookie", "post_sort=new").body(Body::empty()).unwrap();
+		assert_eq!(listing_sort(&with_cookie), "new");
+		let bare = Request::builder().uri("/r/rust").body(Body::empty()).unwrap();
+		assert_eq!(listing_sort(&bare), "hot");
 	}
 
 	#[test]
