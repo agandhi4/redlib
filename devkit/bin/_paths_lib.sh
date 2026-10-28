@@ -55,7 +55,7 @@ DEVKIT_TOOLING_BIN="local_gate.sh gate.sh remote_gate.sh _paths_lib.sh
   _makefile_lib.sh workflows_check.sh _workflows_lib.sh release_check.sh _dockerfile_lib.sh
   _gitattributes_lib.sh _trailer_lib.sh own_commit_check.py _dockerignore.py py_cognitive_lint.py changed_lint.py _changed_files.py
   devkit-sync.sh devkit-new.sh monthly_audit.sh dead_alert_audit.py ship_tag.sh scorecard.py agent_cost.py secrets_check.sh migration_check.py
-  gate_record.py pr_merge.sh merge_rules.sh pr_create.sh _gh_repo_lib.sh codex_review.py _merge_carry.sh decisions_merge.py gate_bite.py _repo_identity.py _renovate.py install_gh_shim.sh
+  gate_record.py pr_merge.sh merge_rules.sh pr_create.sh _gh_repo_lib.sh codex_review.py _codex_rules.sh _merge_carry.sh decisions_merge.py gate_bite.py _repo_identity.py _renovate.py install_gh_shim.sh
   dependency_merge.sh _dependency_pr.py vuln_watch.py install_dependency_merge.sh install_monthly_audit.sh _launchd_job_lib.sh job_launcher.sh
   ios_check.py ios_device.sh bats_assert_check.py"
 # What the image group exercises (ci-smoke/ci-image boot through them): tooling, but a change
@@ -100,8 +100,10 @@ _devkit_area() {
     docs/metrics/ratchet.json|docs/metrics/scorecard.json|scripts/ci/metrics.conf) DEVKIT_AREA=other ;;
     # The rule files of the two structure guards: ci-quick reads them, and so do the metrics
     # job's `layers` and `guards` collectors (a new `known` line moves a ratcheted key). Other,
-    # never tooling, so the METRICS group runs and faces the label.
-    scripts/ci/layers.conf|scripts/ci/guards.conf) DEVKIT_AREA=other ;;
+    # never tooling, so the METRICS group runs and faces the label. The shared guard rules
+    # every section runs (bin/guard_check.py "Shared rules") move the same key, so they are not
+    # devkit/lint/*'s tooling.
+    scripts/ci/layers.conf|scripts/ci/guards.conf|devkit/lint/guards.shared.conf) DEVKIT_AREA=other ;;
     # Fixtures under docs/ that tests read (locus): rule-fixtures by pytest and vitest,
     # sync-wire-fixtures by pytest. Above docs/* so they are not mistaken for prose.
     docs/rule-fixtures/*.md|docs/sync-wire-fixtures/*.md) DEVKIT_AREA=docs ;;

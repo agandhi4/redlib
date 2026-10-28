@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """What may hold a PR's merge on Codex: a review in progress, one that failed, never ran or
-saw an older head, or a Codex finding whose review thread is unresolved. pr_merge.sh decides
-which refuse (README "pr_merge.sh"; 2026-10-21, nine PRs merged with ~40 unanswered findings
+saw an older head, or a Codex finding whose review thread is unresolved. merge_rules.sh decides
+which refuse (_codex_rules.sh, its table; 2026-10-21, nine PRs merged with ~40 unanswered findings
 because the merge read only statuses).
 
-Usage (pr_merge.sh only):
+Usage (merge_rules.sh only):
   codex_review.py <owner/repo> <pr> <head sha> <running max minutes, 1-999999>
 
 Prints one tab-separated line per blocker and nothing else:
@@ -24,9 +24,9 @@ Prints one tab-separated line per blocker and nothing else:
                                                        when a usage-limit note followed it
   unresolved  <thread id>    <path:line>  <title>  <url>   a Codex thread nobody resolved
 Exit 0 none, 1 some, 2 gh failed or answered in a shape this does not know, a review status
-included: the merge fails closed. These are facts, not the verdict: `running` and `unresolved`
-always refuse, while `failed`, `hung`, `unreviewed` and `stale` refuse only in a repo whose plan
-opts in (GATE_CODEX_REVIEW=1), and a recorded fallback review may excuse them there (pr_merge.sh).
+included: the merge fails closed. These are facts, not the verdict (_codex_rules.sh): `running`
+and `unresolved` always refuse, while `failed`, `hung`, `unreviewed` and `stale` refuse only in a
+repo whose plan opts in (GATE_CODEX_REVIEW=1), and a recorded fallback review may excuse them there.
 `hung` is a `failed` by another road (devkit #204, 2026-10-22: "Running since 06:24Z" for 40+ min,
 re-pinged, running again with no progress; a running review used to block a merge forever). Its
 age is from the summary table's `<relative-time datetime=...>` on the review's row; a row with no

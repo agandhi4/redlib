@@ -1540,6 +1540,343 @@ def ts_call_arg_ban(file: TsFile, patterns: Sequence[CalleePattern], shapes: Seq
     return _keep_first(hits)
 
 
+# ---------------------------------------------------------------------------- log-secret
+
+# A logging call as written: a level method on a receiver named for a logger (`logger.info`,
+# `self.log.debug`, `logging.warning`, `console.warn`, `webLogger.error`,
+# `error_logger.exception`). A logger is seen by the name it is bound to, as call-arg-ban's are;
+# a repo's own helper (`logFailure(log, err, fields)`) joins through the rule's CALLEE list.
+LOGGER_CALLS = CalleePattern(
+    (
+        re.compile(
+            r"^_*(log|logger|logging|console|LOG|LOGGER)$|[a-z0-9](Log|Logger)$|_(log|logger|LOG|LOGGER)$"
+        ),
+        re.compile(r"^(debug|info|warning|warn|error|exception|critical|fatal|trace|log)$"),
+    ),
+    False,
+    "a logger",
+)
+_WORDS = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+# A name is secret by its LAST word: `refresh_token`, `apiKey`, `AUTHORIZATION`, `Set-Cookie`.
+# A name whose last word describes the secret (`token_count`, `tokenStore`, `token_url`,
+# `has_token`) holds no secret, which is most of what keeps the false positives down. `tokens`
+# is not here: in this fleet it counts LLM usage (`input_tokens`).
+_SECRET_WORDS = frozenset(
+    {"token", "secret", "secrets", "password", "passwords", "passwd", "passphrase", "credential",
+     "credentials", "cookie", "cookies", "authorization", "bearer", "jwt", "apikey", "sessionid"}
+)  # fmt: skip
+# Last words that are secret only after one of these: `api_key`, `sessionKey`, `auth_header`.
+# `session` alone is a database session; `key` alone a cache or dict key.
+_QUALIFIED = {
+    "key": frozenset({"api", "secret", "private", "access", "signing", "session", "encryption",
+                      "master"}),
+    "header": frozenset({"auth", "authorization", "cookie"}),
+}  # fmt: skip
+# A token that pages or syncs a listing is a cursor, not a credential (`nextPageToken`,
+# Google's `syncToken`).
+_CURSORS = frozenset({"page", "next", "continuation", "cursor", "sync", "pagination"})
+# A name that starts with one of these is a flag about the secret (`has_token`, `isApiKey`).
+_FLAGS = frozenset({"has", "is", "no", "missing", "should", "needs", "can", "use", "with"})
+# Calls whose result does not carry the text they are given: the length and truth of a value
+# (the brief's "len(x) and a boolean check"), a redaction or digest helper by name, a predicate
+# method on the value (`token.startswith("ghp_")`).
+_PY_HIDING = frozenset({"len", "bool", "type", "isinstance", "id", "callable"})
+_TS_HIDING = frozenset({"Boolean"})
+_HIDES = re.compile(r"(?i)mask|redact|fingerprint|digest|hash|sha\d|hmac")
+_PREDICATES = frozenset(
+    {"startswith", "endswith", "isdigit", "isalnum", "isalpha", "isascii", "isspace", "islower",
+     "isupper", "startsWith", "endsWith", "includes", "has", "test"}
+)  # fmt: skip
+# Lookups by a literal key, judged by the key: `headers.get("Authorization")`,
+# `os.getenv("API_KEY")`, `localStorage.getItem("token")`.
+_LOOKUPS = frozenset({"get", "pop", "getenv", "getlist", "getItem", "getAll"})
+# Words that start no value in a TS object's `KEY: VALUE` (literals, `this` alone, operators
+# spelled as words, the types of an arrow parameter's annotation).
+_TS_NOT_VALUES = frozenset(
+    {"null", "undefined", "true", "false", "this", "typeof", "void", "new", "await", "string",
+     "number", "boolean", "unknown", "any"}
+)  # fmt: skip
+
+
+def secret_name(name: str) -> bool:
+    """Whether NAME (an identifier, attribute, dict key or header) names a credential."""
+    words = [w.lower() for w in _WORDS.findall(name)]
+    if not words or (len(words) > 1 and words[0] in _FLAGS):
+        return False
+    last, before = words[-1], words[-2] if len(words) > 1 else ""
+    if last in _QUALIFIED:
+        return before in _QUALIFIED[last]
+    return last in _SECRET_WORDS and not (last == "token" and before in _CURSORS)
+
+
+def _str_const(node: ast.AST | None) -> str:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return ""
+
+
+def _py_hides(call: ast.Call) -> bool:
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id in _PY_HIDING or _HIDES.search(func.id) is not None
+    if isinstance(func, ast.Attribute):
+        return func.attr in _PREDICATES or _HIDES.search(func.attr) is not None
+    return False
+
+
+def _py_leaks(node: ast.expr, every_name: bool = False) -> Iterator[str]:
+    """The secret-named values NODE can evaluate to or format in, as the source spells them.
+    An attribute is judged by its own name (`creds.token` is the token, `token.expires_at` is
+    not), a subscript by its literal key or else its value (`token[:20]`), a call by its receiver
+    and arguments (`str(token)`, `token.strip()`). EVERY_NAME counts any bare name as secret:
+    the value of a secret-named key (`extra={"token": raw}`)."""
+    if isinstance(node, ast.Name):
+        if every_name or secret_name(node.id):
+            yield node.id
+    elif isinstance(node, ast.Attribute):
+        if secret_name(node.attr):
+            yield ast.unparse(node)
+    elif isinstance(node, ast.Subscript):
+        key = _str_const(node.slice)
+        if secret_name(key) if key else any(True for _ in _py_leaks(node.value, every_name)):
+            yield ast.unparse(node)
+    elif isinstance(node, ast.Call):
+        yield from _py_call_leaks(node, every_name)
+    elif isinstance(node, ast.Compare) or (
+        isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not)
+    ):
+        return
+    elif isinstance(node, ast.IfExp):
+        yield from _py_leaks(node.body, every_name)
+        yield from _py_leaks(node.orelse, every_name)
+    elif isinstance(node, ast.BoolOp):
+        # `token and "set"` is "set" or a falsy token; `token or "-"` is the token.
+        values = node.values[-1:] if isinstance(node.op, ast.And) else node.values
+        for value in values:
+            yield from _py_leaks(value, every_name)
+    elif isinstance(node, ast.Dict):
+        for key, value in zip(node.keys, node.values):
+            yield from _py_keyed(_str_const(key), value, every_name)
+    else:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.expr):
+                yield from _py_leaks(child, every_name)
+
+
+def _py_call_leaks(call: ast.Call, every_name: bool) -> Iterator[str]:
+    if _py_hides(call):
+        return
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        key = _str_const(call.args[0]) if func.attr in _LOOKUPS and call.args else ""
+        if secret_name(key):
+            yield ast.unparse(call)
+            return
+        yield from _py_leaks(func.value, every_name)
+    for arg in call.args:
+        yield from _py_leaks(arg, every_name)
+    for kw in call.keywords:
+        yield from _py_keyed(kw.arg or "", kw.value, every_name)
+
+
+def _py_keyed(key: str, value: ast.expr, every_name: bool) -> Iterator[str]:
+    """A dict entry or keyword argument: the leaks of its value, read with every name secret
+    when the key names one (`extra={"refresh_token": rt}`, structlog's `token=rt`)."""
+    if not secret_name(key):
+        yield from _py_leaks(value, every_name)
+        return
+    if next(_py_leaks(value, every_name=True), None) is not None:
+        yield f"{key}={ast.unparse(value)}"
+
+
+def _secret_hit(line: int, callee: str, found: Iterable[str]) -> Hit | None:
+    shown = list(dict.fromkeys(found))
+    if not shown:
+        return None
+    listed = ", ".join(shown)
+    return Hit(line, f"{callee}() logs {listed}; log its len() or a bool, never the value")
+
+
+def py_log_secret(file: PyFile, callees: Sequence[CalleePattern]) -> list[Hit]:
+    """A logging call (LOGGER_CALLS, or CALLEES as written) with an argument that holds a
+    secret-named value, a slice or a method result of one (`refresh_token[:20]`,
+    `token.strip()`), at any depth: an f-string part, a `%` operand, an `extra=` dict, a
+    keyword. `len(token)`, `bool(token)`, `token is None`, `not token`, a predicate method and a
+    redaction or digest helper by name hide the value. One hit per call, naming every value.
+    Not seen: a call that returns a secret (`get_token()`), a secret re-bound to a plain name, a
+    logger hanging off an expression (`logging.getLogger(x).info(`)."""
+    patterns = (LOGGER_CALLS, *callees)
+    hits: list[Hit] = []
+    for call in file.calls:
+        if not callee_matches(call.callee, patterns):
+            continue
+        node = call.node
+        found = itertools.chain(
+            (leak for arg in node.args for leak in _py_leaks(arg)),
+            (leak for kw in node.keywords for leak in _py_keyed(kw.arg or "", kw.value, False)),
+        )
+        hit = _secret_hit(call.line, call.callee or "", found)
+        if hit is not None:
+            hits.append(hit)
+    return _keep_first(hits)
+
+
+def _ts_tested(tokens: Sequence[Tok], start: int, k: int, after: int) -> bool:
+    """Whether the expression from tokens[k] to just before tokens[after] is only tested:
+    negated (`!t`, `!!t`), typeof'd, compared (`t != null`, `null === t`), a ternary's or `&&`'s
+    test, through any grouping parentheses around it (`!!(t)`, `(t) !== null`)."""
+    while k - 1 >= start and _p(tokens, k - 1, "(") and _p(tokens, after, ")"):
+        opener = tokens[k - 2] if k - 2 >= 0 else None
+        if opener is not None and (opener.kind != "punct" or opener.value in ")]"):
+            break  # a call's parentheses (`f(t)`, `g()(t)`): the value is its argument
+        k, after = k - 1, after + 1
+    before = tokens[k - 1] if k > start else None
+    if before is not None and (before.kind, before.value) in (("punct", "!"), ("id", "typeof")):
+        return True
+    if before is not None and before.kind == "punct" and before.value in "=<>":
+        # `=>` opens an arrow body: what it returns is a value
+        return not (before.value == ">" and k - 2 >= start and _p(tokens, k - 2, "="))
+    if after >= len(tokens) or tokens[after].kind != "punct":
+        return False
+    op, then = tokens[after].value, tokens[after + 1] if after + 1 < len(tokens) else None
+    if op in "<>":
+        return True
+    if op in "=!":
+        return _is(then, "punct", "=")
+    if op == "?":  # a ternary's test; `?.` and `??` carry the value on
+        return not (_is(then, "punct", ".") or _is(then, "punct", "?"))
+    return op == "&" and _is(then, "punct", "&")
+
+
+def _ts_call(file: TsFile, open_at: int, method: str, receiver: bool) -> tuple[bool, int]:
+    """(whether the call's result carries a secret, given what its receiver carries, the index
+    past its `)`) for the call whose `(` is at OPEN_AT: METHOD is its last name."""
+    tokens = file.tokens
+    close = _close(tokens, open_at)
+    hiding = method in (_PREDICATES | _TS_HIDING) or _HIDES.search(method) is not None
+    if hiding:
+        return False, close + 1
+    key = tokens[open_at + 1] if open_at + 1 < close else None
+    if method in _LOOKUPS and key is not None and key.kind == "str":
+        return secret_name(key.value), close + 1
+    return receiver or bool(_ts_leaks(file, open_at + 1, close)), close + 1
+
+
+def _ts_chain(file: TsFile, k: int, end: int, every_name: bool = False) -> tuple[str, int]:
+    """(its spelling when it carries a secret, else ""; the index past it) for the postfix
+    chain that starts at the name tokens[k]: `.name`, `?.name`, a call, an index, a non-null `!`.
+    A `.name` is judged by its own name, a call by its receiver and arguments, a literal index
+    by its key; EVERY_NAME counts the head name as secret (a secret-named key's value)."""
+    tokens = file.tokens
+    carries = every_name or secret_name(tokens[k].value)
+    last, i = k, k + 1
+    while i < end:
+        if _p(tokens, i, "!") and not _p(tokens, i + 1, "="):
+            i += 1
+            continue
+        if _p(tokens, i, "?") and _p(tokens, i + 1, "."):
+            i += 1
+            if not _id(tokens, i + 1):
+                i += 1  # `f?.(` and `a?.[`
+        if _p(tokens, i, ".") and _id(tokens, i + 1):
+            last, i = i + 1, i + 2
+            if not _p(tokens, i, "("):
+                carries = secret_name(tokens[last].value)
+                continue
+            carries, i = _ts_call(file, i, tokens[last].value, carries)
+            last = i - 1
+        elif _p(tokens, i, "("):
+            head_call = last == k
+            # A function's own name is no value: `fmt(token)` is judged by its arguments.
+            carries, i = _ts_call(file, i, tokens[last].value, carries and not head_call)
+            last = i - 1
+        elif _p(tokens, i, "["):
+            close = _close(tokens, i)
+            if close == i + 2 and tokens[i + 1].kind == "str":
+                carries = secret_name(tokens[i + 1].value)
+            last, i = close, close + 1
+        else:
+            break
+    if not carries:
+        return "", i
+    spelled = file.source[tokens[k].at : tokens[last].at + len(tokens[last].value)]
+    return spelled, i
+
+
+def _ts_arrow_params(tokens: Sequence[Tok], k: int) -> int:
+    """The index past the `=>` when tokens[k] starts an arrow's parameters (`t =>`, `(a, t:
+    T) =>`), else 0."""
+    if tokens[k].kind == "id":
+        last = k
+    elif _is(tokens[k], "punct", "("):
+        last = _close(tokens, k)
+    else:
+        return 0
+    return last + 3 if _p(tokens, last + 1, "=") and _p(tokens, last + 2, ">") else 0
+
+
+def _ts_leaks(file: TsFile, start: int, end: int) -> list[str]:
+    """The secret-carrying expressions in tokens[start:end], as the source spells them. An
+    object's `KEY: VALUE` whose key names a secret is judged by its value read with every name
+    secret (`{ refreshToken: rt }`); a template's `${...}` is code like any other (its text
+    yields no token)."""
+    tokens = file.tokens
+    found: list[str] = []
+    k = start
+    while k < end:
+        tok = tokens[k]
+        params = _ts_arrow_params(tokens, k)
+        if params:
+            k = params  # an arrow's parameters bind names; its body is the value
+            continue
+        keyed = (
+            tok.kind in ("id", "str")
+            and _p(tokens, k + 1, ":")
+            and k > start
+            and tokens[k - 1].kind == "punct"
+            and tokens[k - 1].value in "{,"
+        )
+        if keyed:
+            k += 2
+            value = tokens[k] if k < end else None
+            if not secret_name(tok.value) or value is None or value.kind != "id":
+                continue
+            if value.value in _TS_NOT_VALUES:
+                continue
+            spelled, after = _ts_chain(file, k, end, every_name=True)
+            if spelled and not _ts_tested(tokens, start, k, after):
+                found.append(f"{tok.value}: {spelled}")
+            k = after
+        elif tok.kind == "id":
+            spelled, after = _ts_chain(file, k, end)
+            if spelled and not _ts_tested(tokens, start, k, after):
+                found.append(spelled)
+            k = after
+        else:
+            k += 1
+    return found
+
+
+def ts_log_secret(file: TsFile, callees: Sequence[CalleePattern]) -> list[Hit]:
+    """py_log_secret for TS: a logging call (LOGGER_CALLS or CALLEES, as calls_in spells the
+    callee) with an argument that carries a secret-named value, a slice or a method result of
+    one (`token.slice(0, 20)`, `${refreshToken}`), an object entry (`{ token }`, `{ token: rt
+    }`) or a lookup (`headers.get("authorization")`). `token.length`, `Boolean(token)`, `!token`,
+    `token != null`, `token ? "set" : "unset"`, a predicate method and a redaction or digest
+    helper by name hide it. Not seen: a call that returns a secret (`getToken()`), a spread
+    (`...session`), a secret re-bound to a plain name, a logger hanging off an expression."""
+    patterns = (LOGGER_CALLS, *callees)
+    hits: list[Hit] = []
+    for call in file.calls:
+        if not callee_matches(call.callee, patterns):
+            continue
+        open_at, close = call.args
+        hit = _secret_hit(call.line, call.callee, _ts_leaks(file, open_at + 1, close))
+        if hit is not None:
+            hits.append(hit)
+    return _keep_first(hits)
+
+
 # ------------------------------------------------------------------------------- compose
 
 

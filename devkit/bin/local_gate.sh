@@ -111,7 +111,7 @@
 #   docs, deps and metrics, 3 for Docker (db, image, smoke, e2e), 4 for native (ios, swift), 2
 #   for anything else (a test tier). Waiters queue in order of their gate's start, so a running
 #   gate's next job goes ahead of a newer gate's first; while it waits a job prints, at once and
-#   every 30 s,
+#   every 30 s (each heartbeat ending ` (waited <n>s)`),
 #     GATE waiting for capacity: <repo>#<pr> <job> needs <c> of <cap>, <u> in use (<holder> <c>,
 #       ...)[; queued behind <repo>#<pr> <job>, ...]
 #   and its PASS|FAIL line then carries `; queued <n>s` inside the parentheses. A holder whose pid
@@ -122,7 +122,7 @@
 #   hold it for older vendored copies; this file ignores it).
 #   Two gates of ONE PR never overlap: before its first job a gate locks
 #   $STATE/pr-<pr>.lock, printing `GATE waiting for another gate of PR #<pr> (pid <pid> since
-#   <utc>)` at once and every 30 s, since both would share refs/gate/pr-<pr>, the worktree and the
+#   <utc>)` at once and every 30 s (heartbeats end ` (waited <n>s)`), since both would share refs/gate/pr-<pr>, the worktree and the
 #   run numbers under logs/<pr>/ (2026-10-21).
 #
 # Load: GATE_LOAD_MAX (default unset: no check; a number, decimals allowed). Before its run
@@ -183,21 +183,24 @@ usage() { echo "usage: $0 <pr-number> [--no-post] [--expect-head <sha>]"; }
 PR=""
 POST=1
 EXPECT_HEAD=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --no-post) POST=0 ;;
-    --expect-head)
-      [[ "${2:-}" =~ ^[0-9a-f]{40}$ ]] \
-        || { echo "local_gate: --expect-head needs a full 40-hex commit SHA (got '${2:-}')" >&2; exit 2; }
-      EXPECT_HEAD=$2
-      shift ;;
-    -h|--help) usage; exit 0 ;;
-    ''|*[!0-9]*) usage >&2; exit 2 ;;
-    *) PR=$1 ;;
-  esac
-  shift
-done
-[ -n "$PR" ] || { usage >&2; exit 2; }
+parse_args() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-post) POST=0 ;;
+      --expect-head)
+        [[ "${2:-}" =~ ^[0-9a-f]{40}$ ]] \
+          || { echo "local_gate: --expect-head needs a full 40-hex commit SHA (got '${2:-}')" >&2; exit 2; }
+        EXPECT_HEAD=$2
+        shift ;;
+      -h|--help) usage; exit 0 ;;
+      ''|*[!0-9]*) usage >&2; exit 2 ;;
+      *) PR=$1 ;;
+    esac
+    shift
+  done
+  [ -n "$PR" ] || { usage >&2; exit 2; }
+}
+parse_args "$@"
 GATE_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 readonly GATE_STARTED
 # Awake from here to exit, the capacity waits included: a sleeping box stalls every queued gate too
@@ -217,29 +220,29 @@ devkit_stay_awake
 gate_env_load local_gate "$GATE_LOCAL_KEYS" "$GATE_REMOTE_KEYS"
 # shellcheck source=bin/_load_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_load_lib.sh"
+# require_setting <VAR> <value> <ERE> <what it must be>: junk is a usage error naming the variable.
+require_setting() {
+  [[ "$2" =~ $3 ]] || { echo "local_gate: $1 must be $4 (got '$2')" >&2; exit 2; }
+}
 # minutes_to_secs <VAR> <minutes>: whole seconds; a positive fraction never rounds to 0 (which
-# means "off"). Junk is a usage error naming the variable.
+# means "off"). Run in $( ): the caller exits on its status 2.
 minutes_to_secs() {
-  [[ "$2" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
-    || { echo "local_gate: $1 must be a number of minutes (got '$2')" >&2; return 2; }
+  require_setting "$1" "$2" '^[0-9]+(\.[0-9]+)?$' 'a number of minutes'
   awk -v m="$2" 'BEGIN { s = int(m * 60 + 0.5); print (m > 0 && s < 1) ? 1 : s }'
 }
 readonly CLEANUP_SECS=${GATE_CLEANUP_SECONDS:-120}
-[[ "$CLEANUP_SECS" =~ ^[1-9][0-9]*$ ]] \
-  || { echo "local_gate: GATE_CLEANUP_SECONDS must be a whole number of seconds >= 1 (got '$CLEANUP_SECS')" >&2; exit 2; }
+require_setting GATE_CLEANUP_SECONDS "$CLEANUP_SECS" '^[1-9][0-9]*$' 'a whole number of seconds >= 1'
 # How often job_went_silent and stop_job look at a running job. A finished job is noticed within
 # one poll, so a whole second cost every job up to 1 s: gate_contract.bats ran ~200 jobs, most of
 # its 264 s wall at 58 s CPU (2026-10-19). Fractional sleep is BSD's and GNU's alike.
 readonly WATCH_POLL_SECS=0.2
 readonly SILENT_SECS=${GATE_SILENCE_SECONDS:-300}
-[[ "$SILENT_SECS" =~ ^[0-9]+$ ]] \
-  || { echo "local_gate: GATE_SILENCE_SECONDS must be a whole number of seconds, 0 to disable (got '$SILENT_SECS')" >&2; exit 2; }
+require_setting GATE_SILENCE_SECONDS "$SILENT_SECS" '^[0-9]+$' 'a whole number of seconds, 0 to disable'
 JOB_BUDGET_SECS=$(minutes_to_secs GATE_JOB_BUDGET_MINUTES "${GATE_JOB_BUDGET_MINUTES:-5}") || exit 2
 GATE_BUDGET_SECS=$(minutes_to_secs GATE_BUDGET_MINUTES "${GATE_BUDGET_MINUTES:-10}") || exit 2
 readonly JOB_BUDGET_SECS GATE_BUDGET_SECS
 readonly BUDGET_ENFORCE=${GATE_BUDGET_ENFORCE:-1}
-[[ "$BUDGET_ENFORCE" =~ ^[01]$ ]] \
-  || { echo "local_gate: GATE_BUDGET_ENFORCE must be 0 or 1 (got '$BUDGET_ENFORCE')" >&2; exit 2; }
+require_setting GATE_BUDGET_ENFORCE "$BUDGET_ENFORCE" '^[01]$' '0 or 1'
 # Machine-wide, shared with every repo's gate and hand-run tier on this box (closet's included):
 # parallel full suites on one machine cause load-induced test timeouts (header, "Concurrency").
 # shellcheck source=bin/_slot_lib.sh
@@ -247,20 +250,16 @@ readonly BUDGET_ENFORCE=${GATE_BUDGET_ENFORCE:-1}
 slot_pool_init local_gate
 readonly SLOT_DIR SLOT_CAPACITY
 readonly LOAD_MAX=${GATE_LOAD_MAX:-}
-[ -z "$LOAD_MAX" ] || [[ "$LOAD_MAX" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
-  || { echo "local_gate: GATE_LOAD_MAX must be a number (got '$LOAD_MAX')" >&2; exit 2; }
+[ -z "$LOAD_MAX" ] || require_setting GATE_LOAD_MAX "$LOAD_MAX" '^[0-9]+(\.[0-9]+)?$' 'a number'
 readonly LOAD_WAIT_MINUTES=${GATE_LOAD_WAIT_MINUTES:-30}
 LOAD_WAIT_SECS=$(minutes_to_secs GATE_LOAD_WAIT_MINUTES "$LOAD_WAIT_MINUTES") || exit 2
 readonly LOAD_WAIT_SECS
 readonly LOAD_POLL_SECS=${GATE_LOAD_POLL_SECONDS:-60}
-[[ "$LOAD_POLL_SECS" =~ ^[1-9][0-9]*$ ]] \
-  || { echo "local_gate: GATE_LOAD_POLL_SECONDS must be an integer >= 1 (got '$LOAD_POLL_SECS')" >&2; exit 2; }
+require_setting GATE_LOAD_POLL_SECONDS "$LOAD_POLL_SECS" '^[1-9][0-9]*$' 'an integer >= 1'
 readonly HEAD_WAIT_SECS=${GATE_HEAD_WAIT_SECONDS:-60}
-[[ "$HEAD_WAIT_SECS" =~ ^[0-9]+$ ]] \
-  || { echo "local_gate: GATE_HEAD_WAIT_SECONDS must be an integer >= 0 (got '$HEAD_WAIT_SECS')" >&2; exit 2; }
+require_setting GATE_HEAD_WAIT_SECONDS "$HEAD_WAIT_SECS" '^[0-9]+$' 'an integer >= 0'
 readonly HEAD_POLL_SECS=${GATE_HEAD_POLL_SECONDS:-5}
-[[ "$HEAD_POLL_SECS" =~ ^[1-9][0-9]*$ ]] \
-  || { echo "local_gate: GATE_HEAD_POLL_SECONDS must be an integer >= 1 (got '$HEAD_POLL_SECS')" >&2; exit 2; }
+require_setting GATE_HEAD_POLL_SECONDS "$HEAD_POLL_SECS" '^[1-9][0-9]*$' 'an integer >= 1'
 
 ROOT=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel) || exit 2
 # Absolute: the EXIT trap runs it, after the plan, which may have changed directory.
@@ -282,15 +281,22 @@ GATE_ALLOW_FORKS=0   # set here, not read from the environment: only the plan ma
 . "$(dirname "${BASH_SOURCE[0]}")/_paths_lib.sh"
 # shellcheck source=bin/_timeout_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_timeout_lib.sh"
+# shellcheck source=bin/_gitattributes_lib.sh  # merge_drivers_heal, before the merge
+. "$(dirname "${BASH_SOURCE[0]}")/_gitattributes_lib.sh"
 GATE_CODE_PATHS=  # the plan's alone, never the environment's (_paths_lib.sh header)
 GATE_JOB_COSTS=   # the plan's alone too: an exported one would re-cost every repo's jobs
 # shellcheck source=/dev/null  # the repo's plan; its contract is in the header
 . "$PLAN"
 slot_costs_check local_gate
-for required in GATE_SLUG GATE_STATE_NAME; do
-  [ -n "${!required:-}" ] || { echo "local_gate: $PLAN must set $required" >&2; exit 2; }
-done
-declare -F gate_plan >/dev/null || { echo "local_gate: $PLAN must define gate_plan()" >&2; exit 2; }
+# plan_contract_check: the plan sets and defines what the skeleton reads (header, plan contract).
+plan_contract_check() {
+  local required
+  for required in GATE_SLUG GATE_STATE_NAME; do
+    [ -n "${!required:-}" ] || { echo "local_gate: $PLAN must set $required" >&2; exit 2; }
+  done
+  declare -F gate_plan >/dev/null || { echo "local_gate: $PLAN must define gate_plan()" >&2; exit 2; }
+}
+plan_contract_check
 declare -F gate_cleanup >/dev/null || gate_cleanup() { :; }
 
 readonly SLUG=$GATE_SLUG
@@ -329,10 +335,12 @@ fail_unposted() {
 # a gh error or empty answer counts as a fork. No status is posted: there is no trusted head.
 # (The missing-pull-ref fallback asks isCrossRepository again for a different reason: whether
 # the branch tip can stand in for the pull ref even when forks are allowed.)
-if [ "$GATE_ALLOW_FORKS" != 1 ] \
-    && [ "$(gh pr view "$PR" --repo "$SLUG" --json isCrossRepository --jq .isCrossRepository 2>/dev/null)" != false ]; then
-  fail_unposted fork "PR #$PR is from a fork; set GATE_ALLOW_FORKS=1 in the plan to gate forks deliberately"
-fi
+refuse_forks() {
+  [ "$GATE_ALLOW_FORKS" != 1 ] || return 0
+  [ "$(gh pr view "$PR" --repo "$SLUG" --json isCrossRepository --jq .isCrossRepository 2>/dev/null)" = false ] \
+    || fail_unposted fork "PR #$PR is from a fork; set GATE_ALLOW_FORKS=1 in the plan to gate forks deliberately"
+}
+refuse_forks
 
 # The jobs must run as they would from a clean shell (or an Actions runner): `make gate`
 # would otherwise leak its command-line variables into every nested make via MAKEFLAGS.
@@ -635,22 +643,26 @@ open_run() {
 
 # ---- fetch, worktree, merge ----------------------------------------------------------------
 
-# `+` because a force-pushed PR head is not a fast-forward of a ref a killed run left behind.
-if ! fetch_main "$ROOT" "+pull/$PR/head:$GATE_REF"; then
+# fetch_pr_head: the PR's head into $GATE_REF, or a FAIL with no status posted.
+fetch_pr_head() {
+  # `+` because a force-pushed PR head is not a fast-forward of a ref a killed run left behind.
+  fetch_main "$ROOT" "+pull/$PR/head:$GATE_REF" && return 0
   # GitHub sometimes never creates refs/pull/<n>/head (finplat #527). A same-repo PR's head is
   # still the branch tip, but only gate it if that tip IS the PR's headRefOid: never gate
   # another commit.
-  PR_INFO=$(gh pr view "$PR" --repo "$SLUG" --json headRefName,headRefOid,isCrossRepository \
+  local pr_info pr_cross pr_branch pr_oid
+  pr_info=$(gh pr view "$PR" --repo "$SLUG" --json headRefName,headRefOid,isCrossRepository \
     --jq '[.isCrossRepository, .headRefName, .headRefOid] | @tsv' 2>/dev/null)
-  IFS=$'\t' read -r PR_CROSS PR_BRANCH PR_OID <<<"$PR_INFO"
-  if [ "$PR_CROSS" != false ] || [ -z "$PR_BRANCH" ] || [ -z "$PR_OID" ] \
-      || ! fetch_main "$ROOT" "+refs/heads/$PR_BRANCH:$GATE_REF" \
-      || [ "$(git -C "$ROOT" rev-parse "$GATE_REF")" != "$PR_OID" ]; then
+  IFS=$'\t' read -r pr_cross pr_branch pr_oid <<<"$pr_info"
+  if [ "$pr_cross" != false ] || [ -z "$pr_branch" ] || [ -z "$pr_oid" ] \
+      || ! fetch_main "$ROOT" "+refs/heads/$pr_branch:$GATE_REF" \
+      || [ "$(git -C "$ROOT" rev-parse "$GATE_REF")" != "$pr_oid" ]; then
     open_run nohead
     fail_unposted fetch
   fi
-  note "pull/$PR/head missing; fetched branch $PR_BRANCH @ $PR_OID"
-fi
+  note "pull/$PR/head missing; fetched branch $pr_branch @ $pr_oid"
+}
+fetch_pr_head
 HEAD_SHA=$(git -C "$ROOT" rev-parse "$GATE_REF")
 open_run "${HEAD_SHA:0:7}"
 if [ -n "$EXPECT_HEAD" ] && [ "$HEAD_SHA" != "$EXPECT_HEAD" ]; then
@@ -661,17 +673,22 @@ echo "GATE pr=$PR head=$HEAD_SHA main=$MAIN_SHA"
 post_status pending "Local gate running on main ${MAIN_SHA:0:7}"
 STATUS_OPEN=1
 
-git -C "$ROOT" worktree remove --force "$WT" >/dev/null 2>&1
-if ! git -C "$ROOT" worktree add -q --detach "$WT" "$MAIN_SHA" >"$LOGDIR/worktree.log" 2>&1; then
-  fail_step worktree "log: $LOGDIR/worktree.log"
-  verdict FAIL "Local gate could not create its worktree"
-fi
-if ! git -C "$WT" -c user.name=gate -c user.email=gate@local \
-    merge -q --no-edit "$HEAD_SHA" >"$LOGDIR/merge.log" 2>&1; then
-  fail_step merge "conflicts with main; log: $LOGDIR/merge.log"
-  verdict FAIL "Conflicts with main ${MAIN_SHA:0:7}"
-fi
-
+# merged_worktree: $WT at main with the PR head merged in, or a FAIL verdict.
+merged_worktree() {
+  git -C "$ROOT" worktree remove --force "$WT" >/dev/null 2>&1
+  if ! git -C "$ROOT" worktree add -q --detach "$WT" "$MAIN_SHA" >"$LOGDIR/worktree.log" 2>&1; then
+    fail_step worktree "log: $LOGDIR/worktree.log"
+    verdict FAIL "Local gate could not create its worktree"
+  fi
+  # The merge reads main's .gitattributes: a clone whose decisions driver was never set (no hook
+  # ever ran in it) would text-merge docs/decisions.md, and two appends conflict.
+  merge_drivers_heal "$ROOT" "$(dirname "${BASH_SOURCE[0]}")" local_gate || true
+  if ! git -C "$WT" -c user.name=gate -c user.email=gate@local \
+      merge -q --no-edit "$HEAD_SHA" >"$LOGDIR/merge.log" 2>&1; then
+    fail_step merge "conflicts with main; log: $LOGDIR/merge.log"
+    verdict FAIL "Conflicts with main ${MAIN_SHA:0:7}"
+  fi
+}
 # Toolchains come from the MERGED tree, not the invoking checkout: the declaration (.nvmrc,
 # rust-toolchain.toml) describes the code under test, so a PR that bumps it is gated on its own
 # version. (Gate policy, by contrast, is read from $ROOT: see the plan contract.) The Mac's Node
@@ -679,17 +696,21 @@ fi
 # the cached, checksum-verified node_toolchain.sh/rust_toolchain.sh installs first on PATH. An
 # environment the gate cannot provide is a FAIL verdict, never a silent fallback (and never a
 # dangling `pending` status).
-if ! toolchain_path "$WT"; then
-  fail_step toolchain "$TOOLCHAIN_ERROR"
-  verdict FAIL "Gate box cannot provide the declared $TOOLCHAIN_FAILED"
-fi
-# A tool the merged tree declares is required here too (a PR's first uv.lock): the preflight read
-# $ROOT's, and toolchain_path never requires one, since hooks and CI run without uv.
-if ! devkit_preflight -- "$WT"; then
-  fail_step toolchain "$DEVKIT_PREFLIGHT_ERROR"
-  verdict FAIL "Gate box cannot provide a tool the merged tree declares"
-fi
-[ -n "$TOOLCHAIN_NOTES" ] && note "$TOOLCHAIN_NOTES"
+merged_toolchain() {
+  if ! toolchain_path "$WT"; then
+    fail_step toolchain "$TOOLCHAIN_ERROR"
+    verdict FAIL "Gate box cannot provide the declared $TOOLCHAIN_FAILED"
+  fi
+  # A tool the merged tree declares is required here too (a PR's first uv.lock): the preflight read
+  # $ROOT's, and toolchain_path never requires one, since hooks and CI run without uv.
+  if ! devkit_preflight -- "$WT"; then
+    fail_step toolchain "$DEVKIT_PREFLIGHT_ERROR"
+    verdict FAIL "Gate box cannot provide a tool the merged tree declares"
+  fi
+  [ -z "$TOOLCHAIN_NOTES" ] || note "$TOOLCHAIN_NOTES"
+}
+merged_worktree
+merged_toolchain
 
 CHANGED=$(git -C "$WT" diff --name-only "$MAIN_SHA" HEAD)
 devkit_gate_areas "$CHANGED"
@@ -698,19 +719,26 @@ echo "GATE areas: ${GATE_AREAS:-none}"
 # ---- the repo decides what runs --------------------------------------------------------------
 gate_plan
 
-TOTAL_SECS=$((SECONDS - GATE_T0 - QUEUED_SECS))
-[ "$QUEUED_SECS" = 0 ] || note "jobs queued ${QUEUED_SECS}s for capacity in all; not counted in any budget"
-whole_budget
-check_budget total "$TOTAL_SECS" "$WHOLE_BUDGET_SECS" "$WHOLE_BUDGET_NOTE"
-write_gate_metrics "$TOTAL_SECS"
-if [ -n "$OVERBUDGET" ] && [ "$BUDGET_ENFORCE" = 0 ]; then
-  note "over budget, not enforced (GATE_BUDGET_ENFORCE=0): $OVERBUDGET"
-fi
+# close_budgets: the whole gate's seconds (TOTAL_SECS, which the outcome record reads), judged
+# against its budget and written to gate.json.
+close_budgets() {
+  TOTAL_SECS=$((SECONDS - GATE_T0 - QUEUED_SECS))
+  [ "$QUEUED_SECS" = 0 ] || note "jobs queued ${QUEUED_SECS}s for capacity in all; not counted in any budget"
+  whole_budget
+  check_budget total "$TOTAL_SECS" "$WHOLE_BUDGET_SECS" "$WHOLE_BUDGET_NOTE"
+  write_gate_metrics "$TOTAL_SECS"
+  if [ -n "$OVERBUDGET" ] && [ "$BUDGET_ENFORCE" = 0 ]; then
+    note "over budget, not enforced (GATE_BUDGET_ENFORCE=0): $OVERBUDGET"
+  fi
+}
+close_budgets
 
-if [ "$FAILED" = 0 ]; then
-  verdict PASS "Passed on main ${MAIN_SHA:0:7}"
-fi
-DESCRIPTION=""
-[ -z "$FAILED_JOBS" ] || DESCRIPTION="Failed: $FAILED_JOBS. "
-[ -z "$OVERBUDGET" ] || [ "$BUDGET_ENFORCE" = 0 ] || DESCRIPTION="${DESCRIPTION}Over budget: $OVERBUDGET. "
-verdict FAIL "${DESCRIPTION}Logs: $LOGDIR"
+# final_verdict: PASS when no job failed, else FAIL naming the failed and over-budget jobs.
+final_verdict() {
+  [ "$FAILED" != 0 ] || verdict PASS "Passed on main ${MAIN_SHA:0:7}"
+  local description=""
+  [ -z "$FAILED_JOBS" ] || description="Failed: $FAILED_JOBS. "
+  [ -z "$OVERBUDGET" ] || [ "$BUDGET_ENFORCE" = 0 ] || description="${description}Over budget: $OVERBUDGET. "
+  verdict FAIL "${description}Logs: $LOGDIR"
+}
+final_verdict

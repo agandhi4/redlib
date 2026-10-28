@@ -22,7 +22,8 @@ runs before the gate, so it must show what the gate will refuse (finplat #660 le
 regression only from a gate run).
 
 Report-only keys (`vuln.*`, `meta.*`, `coupling.<scope>.fan_in_max`, `duplication.<scope>.jscpd_percent`,
-`size.<scope>.max_lines` and `size.<scope>.over_600`; is_report_only), plus any key its collector
+`size.<scope>.max_lines`, `size.<scope>.over_600`, `images.<scope>.refs` and
+`images.<scope>.unpinned`; is_report_only), plus any key its collector
 declares report-only (a top-level `"report_only": [<its keys>]` list in its output, carried into
 the snapshot by `merge`: ts.mjs declares a Next build's `bundle.<scope>.kb_total`, while a vite
 build's stays gated; Snapshot.is_report_only): collected and printed, never gated, even when a
@@ -187,6 +188,7 @@ DOMAIN_DIRECTIONS = {
     "statements": "lower",
     "size": "lower",
     "vuln": "lower",
+    "images": "lower",
     "allowlist": "lower",
     "lint": "lower",
     "meta": "lower",
@@ -205,11 +207,15 @@ TIER_SOURCE_PREFIX = "tier-"
 # a new advisory, not a code change; fan-in of a hub is architecture, not drift; a duplicated
 # share rises when unduplicated lines are deleted; a file's length alone never justifies a split.
 # `meta` describes the measurement (files a collector's --exclude left out), not the code.
+# Image refs grow with each service; unpinned images are the compose-pinned-image guard's, whose
+# per-service exceptions (the fleet's `:latest` deploy pointers) a count cannot hold.
 REPORT_ONLY_DOMAINS = frozenset({"vuln", "meta"})
 REPORT_ONLY_STATS = frozenset(  # (domain, last key segment)
     {
         ("coupling", "fan_in_max"),
         ("duplication", "jscpd_percent"),
+        ("images", "refs"),
+        ("images", "unpinned"),
         ("size", "max_lines"),
         ("size", "over_600"),
     }

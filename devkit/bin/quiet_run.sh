@@ -12,6 +12,11 @@
 #   Fail:  "✗ <label> (<n>s)", then the last QUIET_TAIL (default 40) ANSI-stripped lines between
 #          markers naming the kept log; exits with the command's code.
 #   QUIET_VERBOSE=1 streams the output instead of capturing it; the status line still follows.
+#   Notices: a captured step gets fd 6 on this script's stdout, named by DEVKIT_NOTICE_FD=6, for
+#   the lines a person must see while it runs: bin/_slot_lib.sh's waiting lines (a pre-push tier
+#   queued for admission sat silent ~7 min, rollcall #96), at once and every 30 s. A step
+#   already inside one (a recipe that runs quiet_run.sh under a hook's) keeps the outer fd 6, so
+#   its notices still reach the outermost output, not the outer step's log.
 #
 # Every call gets its own log from mktemp, removed on pass and kept on fail, so a hook can call
 # it any number of times with no shared state. A sourced call sets QUIET_FAILED_LOG to the kept
@@ -41,7 +46,12 @@ run_step() {
   local tmp=${TMPDIR:-/tmp}
   log=$(mktemp "${tmp%/}/devkit-quiet.XXXXXX") || return 1
   rc=0
-  "$@" >"$log" 2>&1 || rc=$?
+  if [ "${DEVKIT_NOTICE_FD:-}" = 6 ] && { true >&6; } 2>/dev/null; then
+    "$@" >"$log" 2>&1 || rc=$?
+  else
+    # 6>&1 before the log redirections: fd 6 is this function's stdout, not the log (header, Notices).
+    DEVKIT_NOTICE_FD=6 "$@" 6>&1 >"$log" 2>&1 || rc=$?
+  fi
   dur=$(( $(date +%s) - start ))
 
   if [ "$rc" -eq 0 ]; then

@@ -100,6 +100,10 @@
 # and gh's default repo in this clone is origin (gh_default_heal, one line when it sets it, a
 # WARNING when git cannot). Why (2026-10-26): in redlib, a fork, a bare `gh pr create` opened
 # its PR on the public parent. Healed, not failed: it is clone config no commit carries.
+#
+# Also healed, likewise: this clone's merge drivers for the paths .gitattributes gives them
+# (merge_drivers_heal, bin/_gitattributes_lib.sh), so a clone no hook has run in yet still
+# merges docs/decisions.md and docs/metrics/*.json with them on a local rebase.
 set -euo pipefail
 STAGED=0
 case "${1:-}" in
@@ -117,8 +121,30 @@ esac
 . "$(dirname "${BASH_SOURCE[0]}")/_gate_env.sh"
 # shellcheck source=bin/_gh_repo_lib.sh  # origin_slug, slug_same, gh_default_heal
 . "$(dirname "${BASH_SOURCE[0]}")/_gh_repo_lib.sh"
+# shellcheck source=bin/_gitattributes_lib.sh  # merge_drivers_heal
+. "$(dirname "${BASH_SOURCE[0]}")/_gitattributes_lib.sh"
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
+HERE=$(dirname "${BASH_SOURCE[0]}")
+warn() { echo "devkit-check: WARNING: $*" >&2; }
+# warn_each <prefix> <suffix>: one warning per non-empty stdin line, between the two.
+warn_each() {
+  local line
+  while IFS= read -r line; do
+    [ -z "$line" ] || warn "$1$line$2"
+  done
+}
+# What --staged changes (header): the index, else the working tree. The vendored tree, its rev
+# and the .swift-format copies are the index's either way (check_vendored_tree).
+tracked_text() {
+  if [ "$STAGED" = 1 ]; then git show ":$1" 2>/dev/null || true; else cat "$1" 2>/dev/null || true; fi
+}
+tracked_exists() {
+  if [ "$STAGED" = 1 ]; then git cat-file -e ":$1" 2>/dev/null; else [ -f "$1" ]; fi
+}
+# Assignments only: a comment naming a retired variable is history, not a setting.
+plan_src=$(tracked_text scripts/ci/gate_plan.sh)
+
 # The vendored tree, .devkit-rev and the .swift-format copies: both sides come from the INDEX,
 # not HEAD or the working copy, with or without --staged (devkit-sync stages all of them). In CI the index equals HEAD; in
 # the pre-commit hook it is exactly what is about to be committed. Comparing HEAD made the
@@ -126,48 +152,52 @@ cd "$ROOT"
 # let a staged local edit under devkit/ through. Reading .devkit-rev from disk let an unstaged
 # edit to it vouch for a staged devkit/ tree it would never be committed with. Unstaged edits
 # are the hooks' business.
-rev=$(git show :.devkit-rev 2>/dev/null) || {
-  echo "devkit-check: .devkit-rev missing from the index; run make devkit-sync" >&2
-  exit 1
-}
-read -r _commit expected <<<"$rev"
-actual=$(git write-tree --prefix=devkit/ 2>/dev/null) || {
-  echo "devkit-check: cannot read devkit/ from the index (missing or unmerged); run make devkit-sync" >&2
-  exit 1
-}
-if [ "$actual" != "$expected" ]; then
-  echo "devkit-check: devkit/ (tree ${actual:0:7}) differs from the vendored ${expected:0:7}." >&2
-  echo "  Change it upstream in agandhi4/devkit, then run: make devkit-sync" >&2
-  exit 1
-fi
-if manifest=$(git show :devkit/VENDOR_PATHS 2>/dev/null); then
-  slim=$(vendor_filter_tree "$actual" "$manifest") || exit 1
-  if [ "$slim" != "$actual" ]; then
-    echo "devkit-check: devkit/ holds paths outside devkit/VENDOR_PATHS (vendored whole by an older devkit-sync)." >&2
-    echo "  Run: make devkit-sync   (again, if you just ran it: the new script is now in place)" >&2
+check_vendored_tree() {
+  local rev expected actual manifest slim
+  rev=$(git show :.devkit-rev 2>/dev/null) || {
+    echo "devkit-check: .devkit-rev missing from the index; run make devkit-sync" >&2
+    exit 1
+  }
+  read -r _commit expected <<<"$rev"
+  actual=$(git write-tree --prefix=devkit/ 2>/dev/null) || {
+    echo "devkit-check: cannot read devkit/ from the index (missing or unmerged); run make devkit-sync" >&2
+    exit 1
+  }
+  if [ "$actual" != "$expected" ]; then
+    echo "devkit-check: devkit/ (tree ${actual:0:7}) differs from the vendored ${expected:0:7}." >&2
+    echo "  Change it upstream in agandhi4/devkit, then run: make devkit-sync" >&2
     exit 1
   fi
-fi
+  if manifest=$(git show :devkit/VENDOR_PATHS 2>/dev/null); then
+    slim=$(vendor_filter_tree "$actual" "$manifest") || exit 1
+    if [ "$slim" != "$actual" ]; then
+      echo "devkit-check: devkit/ holds paths outside devkit/VENDOR_PATHS (vendored whole by an older devkit-sync)." >&2
+      echo "  Run: make devkit-sync   (again, if you just ran it: the new script is now in place)" >&2
+      exit 1
+    fi
+  fi
+}
 # swift-format has no `extends`, so a repo's .swift-format (root or nested, e.g. ios/) is a copy of
 # devkit/lint/swift-format.json and this is what keeps the copies one base. Index blobs, like the
 # tree check: equal blob ids are equal bytes.
-base_blob=
-copies=0
-while IFS= read -r copy; do
-  [ -n "$copy" ] || continue
-  if [ -z "$base_blob" ]; then
-    base_blob=$(git rev-parse -q --verify ":devkit/lint/swift-format.json" 2>/dev/null) || {
-      echo "devkit-check: $copy exists but devkit/lint/swift-format.json does not; run make devkit-sync" >&2
-      exit 1
-    }
-  fi
-  if [ "$(git rev-parse ":$copy")" != "$base_blob" ]; then
-    echo "devkit-check: $copy differs from devkit/lint/swift-format.json (swift-format has no extends; the repo file is a copy)." >&2
-    echo "  Restore it: cp devkit/lint/swift-format.json $copy   A rule change goes upstream in agandhi4/devkit." >&2
-    copies=$((copies + 1))
-  fi
-done <<<"$(swift_format_copies)"
-[ "$copies" -eq 0 ] || exit 1
+check_swift_format() {
+  local base_blob="" copies=0 copy
+  while IFS= read -r copy; do
+    [ -n "$copy" ] || continue
+    if [ -z "$base_blob" ]; then
+      base_blob=$(git rev-parse -q --verify ":devkit/lint/swift-format.json" 2>/dev/null) || {
+        echo "devkit-check: $copy exists but devkit/lint/swift-format.json does not; run make devkit-sync" >&2
+        exit 1
+      }
+    fi
+    if [ "$(git rev-parse ":$copy")" != "$base_blob" ]; then
+      echo "devkit-check: $copy differs from devkit/lint/swift-format.json (swift-format has no extends; the repo file is a copy)." >&2
+      echo "  Restore it: cp devkit/lint/swift-format.json $copy   A rule change goes upstream in agandhi4/devkit." >&2
+      copies=$((copies + 1))
+    fi
+  done <<<"$(swift_format_copies)"
+  [ "$copies" -eq 0 ] || exit 1
+}
 # plan_literal_setting <plan, comments stripped> <NAME> <value ERE> <the form, for the message>:
 # exit 1 unless every NAME assignment is the one literal line a reader that never sources the
 # plan sees: GATE_CODEX_REVIEW and GATE_CODEX_RUNNING_MAX_MIN (gate_plan_literal, pr_merge.sh) and
@@ -194,15 +224,24 @@ codex_review_setting() {
   fi
   exit 1
 }
-# Assignments only: a comment naming a retired variable is history, not a setting.
-if [ "$STAGED" = 1 ]; then
-  plan_src=$(git show :scripts/ci/gate_plan.sh 2>/dev/null) || plan_src=""
-else
-  plan_src=$(cat scripts/ci/gate_plan.sh 2>/dev/null) || plan_src=""
-fi
-if [ -n "$plan_src" ]; then
+# plan_image_excludes <plan, comments stripped>: the header's GATE_IMAGE_EXCLUDE_PATHS warning.
+plan_image_excludes() {
+  local exclude_re="^[[:space:]]*GATE_IMAGE_EXCLUDE_PATHS=('([^']*)'|([^[:space:]'\"]+))" line exclude redundant
+  while IFS= read -r line; do
+    [[ "$line" =~ $exclude_re ]] || continue
+    exclude=${BASH_REMATCH[2]}${BASH_REMATCH[3]}
+    if redundant=$(git ls-files | "$HERE/python.sh" -I "$HERE/_dockerignore.py" redundant . "$exclude"); then
+      warn_each "GATE_IMAGE_EXCLUDE_PATHS '" "' is already excluded by .dockerignore, which the gate reads itself; drop it from the ERE" <<<"$redundant"
+    else
+      warn "could not hold GATE_IMAGE_EXCLUDE_PATHS to .dockerignore (above)"
+    fi
+    break
+  done <<<"$1"
+}
+check_plan() {
+  [ -n "$plan_src" ] || return 0
+  local plan retired_set=0 var
   plan=$(awk '{ sub(/#.*/, "") } 1' <<<"$plan_src")
-  retired_set=0
   for var in $DEVKIT_RETIRED_PLAN_VARS; do
     if grep -qE "(^|[^A-Za-z0-9_])$var=" <<<"$plan"; then
       echo "devkit-check: scripts/ci/gate_plan.sh sets $var; $DEVKIT_RETIRED_PLAN_ADVICE" >&2
@@ -220,96 +259,77 @@ if [ -n "$plan_src" ]; then
     'GATE_CODEX_RUNNING_MAX_MIN=<whole minutes, 1-999999>, unquoted (45)'
   plan_literal_setting "$plan" GATE_CODE_PATHS '[A-Za-z0-9._/-]+(,[A-Za-z0-9._/-]+)*' \
     'GATE_CODE_PATHS=<prefix>[,<prefix>...], unquoted (plugins/,templates/)'
-  exclude_re="^[[:space:]]*GATE_IMAGE_EXCLUDE_PATHS=('([^']*)'|([^[:space:]'\"]+))"
-  while IFS= read -r line; do
-    [[ "$line" =~ $exclude_re ]] || continue
-    exclude=${BASH_REMATCH[2]}${BASH_REMATCH[3]}
-    if redundant=$(git ls-files | "$(dirname "${BASH_SOURCE[0]}")/python.sh" -I "$(dirname "${BASH_SOURCE[0]}")/_dockerignore.py" redundant . "$exclude"); then
-      while IFS= read -r alt; do
-        [ -n "$alt" ] && echo "devkit-check: WARNING: GATE_IMAGE_EXCLUDE_PATHS '$alt' is already excluded by .dockerignore, which the gate reads itself; drop it from the ERE" >&2
-      done <<<"$redundant"
-    else
-      echo "devkit-check: WARNING: could not hold GATE_IMAGE_EXCLUDE_PATHS to .dockerignore (above)" >&2
-    fi
-    break
-  done <<<"$plan"
-fi
-if origin=$(origin_slug .); then
-  gh_default_heal . devkit-check || echo "devkit-check: WARNING: cannot make origin gh's default repo (git above)" >&2
+  plan_image_excludes "$plan"
+}
+check_clone_config() {
+  local origin plan_slug
+  merge_drivers_heal . "$HERE" devkit-check || warn "cannot set a merge driver's config (git above)"
+  origin=$(origin_slug .) || return 0
+  gh_default_heal . devkit-check || warn "cannot make origin gh's default repo (git above)"
   plan_slug=$(gate_plan_literal <(printf '%s\n' "$plan_src") GATE_SLUG)
   if [ -n "$plan_slug" ] && ! slug_same "$plan_slug" "$origin"; then
     echo "devkit-check: scripts/ci/gate_plan.sh: GATE_SLUG=$plan_slug is not origin's repo ($origin); the gate and make merge act on GATE_SLUG, so set it to origin's" >&2
     exit 1
   fi
-fi
+}
 # baseline_file <path> <the command that creates it> <why>: the header's warn-then-fail rule. The
 # index under --staged, else the working tree, as the plan is read.
 readonly BASELINE_FAILS_FROM=2026-11-01
 baseline_missing=0
 baseline_file() {
-  if [ "$STAGED" = 1 ]; then git cat-file -e ":$1" 2>/dev/null && return 0; else [ -f "$1" ] && return 0; fi
+  tracked_exists "$1" && return 0
   if [[ "${DEVKIT_CHECK_TODAY:-$(date +%F)}" < "$BASELINE_FAILS_FROM" ]]; then
-    echo "devkit-check: WARNING: no $1 ($3); create it with \`$2\` and commit it (fails from $BASELINE_FAILS_FROM)" >&2
+    warn "no $1 ($3); create it with \`$2\` and commit it (fails from $BASELINE_FAILS_FROM)"
   else
     echo "devkit-check: no $1 ($3); create it with \`$2\` and commit it" >&2
     baseline_missing=1
   fi
 }
-baseline_file docs/metrics/scorecard.json 'devkit/bin/python.sh -I devkit/bin/scorecard.py . --mode rebaseline' \
-  "the WIRED ratchet's record, which devkit new writes; ci-metrics holds no check without it"
-if { [ "$STAGED" = 1 ] && git cat-file -e :scripts/ci/metrics.conf 2>/dev/null; } \
-  || { [ "$STAGED" = 0 ] && [ -f scripts/ci/metrics.conf ]; }; then
-  baseline_file docs/metrics/ratchet.json 'make metrics-rebaseline' \
-    "the bounds scripts/ci/metrics.conf's collectors are held to; ci-metrics cannot run without it"
-fi
-[ "$baseline_missing" = 0 ] || exit 1
-if git ls-files --error-unmatch .dockerignore >/dev/null 2>&1; then
+check_baselines() {
+  baseline_file docs/metrics/scorecard.json 'devkit/bin/python.sh -I devkit/bin/scorecard.py . --mode rebaseline' \
+    "the WIRED ratchet's record, which devkit new writes; ci-metrics holds no check without it"
+  if tracked_exists scripts/ci/metrics.conf; then
+    baseline_file docs/metrics/ratchet.json 'make metrics-rebaseline' \
+      "the bounds scripts/ci/metrics.conf's collectors are held to; ci-metrics cannot run without it"
+  fi
+  [ "$baseline_missing" = 0 ] || exit 1
+}
+check_tsbuildinfo() {
+  git ls-files --error-unmatch .dockerignore >/dev/null 2>&1 || return 0
+  local probes seen
   # One probe per tsconfig: where `tsc -b` writes its tsbuildinfo by default, named after the
   # config (tsconfig.build.json -> tsconfig.build.tsbuildinfo), so an ignore line naming only
   # tsconfig.tsbuildinfo still warns (Codex, orbit #116).
   probes=$(git ls-files -- 'tsconfig*.json' '**/tsconfig*.json' \
     | awk '{ sub(/\.json$/, ".tsbuildinfo"); print }' | sort -u)
-  if [ -n "$probes" ]; then
-    if seen=$("$(dirname "${BASH_SOURCE[0]}")/python.sh" -I "$(dirname "${BASH_SOURCE[0]}")/_dockerignore.py" keep . <<<"$probes"); then
-      [ -z "$seen" ] || echo "devkit-check: WARNING: .dockerignore lets the image build see $(head -n 1 <<<"$seen"): a stale tsbuildinfo makes tsc -b skip the image's type-check (locus #145); add: **/*.tsbuildinfo" >&2
-    else
-      echo "devkit-check: WARNING: could not hold .dockerignore to **/*.tsbuildinfo (above)" >&2
-    fi
+  [ -n "$probes" ] || return 0
+  if seen=$("$HERE/python.sh" -I "$HERE/_dockerignore.py" keep . <<<"$probes"); then
+    [ -z "$seen" ] || warn ".dockerignore lets the image build see $(head -n 1 <<<"$seen"): a stale tsbuildinfo makes tsc -b skip the image's type-check (locus #145); add: **/*.tsbuildinfo"
+  else
+    warn "could not hold .dockerignore to **/*.tsbuildinfo (above)"
   fi
-fi
-while IFS= read -r raw; do
-  [ -z "$raw" ] || echo "devkit-check: WARNING: ${raw%%: *}: docker runs unbounded (no daemon probe, no per-call timeout); use devkit/bin/docker_bounded.sh: ${raw#*: }" >&2
-done <<<"$(makefile_raw_docker)"
-while IFS= read -r raw; do
-  [ -n "$raw" ] || continue
-  kind=${raw#*: }; value=${kind#* }; kind=${kind%% *}
-  what="throwaway Postgres $kind"
-  [ "$kind" != container ] || { what="docker run container name"; kind=name; }
-  echo "devkit-check: WARNING: ${raw%%: *}: $what $value is fixed, so every worktree shares it and concurrent lanes break each other; derive it: \$(shell devkit/bin/throwaway_pg.sh $kind <base name>)" >&2
-done <<<"$(makefile_fixed_pg)"
-mk_files=()
-while IFS= read -r f; do mk_files+=("$f"); done < <(makefile_files)
-if [ "${#mk_files[@]}" -gt 0 ] \
-  && ! grep -qE '^SHELL[[:space:]]*:?=[[:space:]]*devkit/bin/toolchain_shell\.sh[[:space:]]*$' "${mk_files[@]}"; then
-  [ -z "$(git ls-files .nvmrc rust-toolchain.toml rust-toolchain)" ] \
-    || echo "devkit-check: WARNING: Makefile: a hand-run make uses PATH's node/cargo, not the repo's pins; add: SHELL := devkit/bin/toolchain_shell.sh" >&2
+}
+check_makefile_recipes() {
+  local raw kind value what f mk_files=()
   while IFS= read -r raw; do
-    [ -z "$raw" ] || echo "devkit-check: WARNING: ${raw%%: *}: a bare python3 is PATH's (Xcode's 3.9 under launchd), not devkit's >= 3.11; add: SHELL := devkit/bin/toolchain_shell.sh (or call devkit/bin/python.sh): ${raw#*: }" >&2
+    [ -z "$raw" ] || warn "${raw%%: *}: docker runs unbounded (no daemon probe, no per-call timeout); use devkit/bin/docker_bounded.sh: ${raw#*: }"
+  done <<<"$(makefile_raw_docker)"
+  while IFS= read -r raw; do
+    [ -n "$raw" ] || continue
+    kind=${raw#*: }; value=${kind#* }; kind=${kind%% *}
+    what="throwaway Postgres $kind"
+    [ "$kind" != container ] || { what="docker run container name"; kind=name; }
+    warn "${raw%%: *}: $what $value is fixed, so every worktree shares it and concurrent lanes break each other; derive it: \$(shell devkit/bin/throwaway_pg.sh $kind <base name>)"
+  done <<<"$(makefile_fixed_pg)"
+  while IFS= read -r f; do mk_files+=("$f"); done < <(makefile_files)
+  [ "${#mk_files[@]}" -gt 0 ] || return 0
+  grep -qE '^SHELL[[:space:]]*:?=[[:space:]]*devkit/bin/toolchain_shell\.sh[[:space:]]*$' "${mk_files[@]}" && return 0
+  [ -z "$(git ls-files .nvmrc rust-toolchain.toml rust-toolchain)" ] \
+    || warn "Makefile: a hand-run make uses PATH's node/cargo, not the repo's pins; add: SHELL := devkit/bin/toolchain_shell.sh"
+  while IFS= read -r raw; do
+    [ -z "$raw" ] || warn "${raw%%: *}: a bare python3 is PATH's (Xcode's 3.9 under launchd), not devkit's >= 3.11; add: SHELL := devkit/bin/toolchain_shell.sh (or call devkit/bin/python.sh): ${raw#*: }"
   done <<<"$(makefile_bare_python)"
-fi
-targets=$(makefile_targets)
-if [[ "$targets" == *" gate "* && "$targets" != *" merge "* ]]; then
-  # shellcheck disable=SC2016  # $(PR) is make's variable, printed literally
-  echo 'devkit-check: WARNING: the Makefile has a gate target but no merge target; add: merge: ; devkit/bin/pr_merge.sh "$(PR)"' >&2
-fi
-if [[ "$targets" == *" gate "* && "$targets" != *" pr "* ]]; then
-  echo "devkit-check: WARNING: the Makefile has a gate target but no pr target; add: pr: ; devkit/bin/pr_create.sh (it opens the PR on origin, never a fork's parent)" >&2
-fi
-if [ "$STAGED" = 1 ]; then
-  agents_src=$(git show :AGENTS.md 2>/dev/null) || agents_src=""
-else
-  agents_src=$(cat AGENTS.md 2>/dev/null) || agents_src=""
-fi
+}
 # workflow_gh_lines <gh pr subcommand>: the line numbers of the Workflow section's lines that
 # instruct `gh pr <subcommand>`, from stdin.
 workflow_gh_lines() {
@@ -324,20 +344,29 @@ workflow_gh_lines() {
       if (l ~ ("(^|[^a-z])(run|then)[ \t]+`?" cmd) && l !~ ("(never|not|n.t)[ \t]+(run|then)[ \t]+`?" cmd)) print NR
     }'
 }
-while IFS= read -r line; do
-  [ -z "$line" ] || echo "devkit-check: WARNING: AGENTS.md:$line: the Workflow section merges with gh pr merge; say make merge PR=<n> (it refuses a head without a local-gate success)" >&2
-done <<<"$(workflow_gh_lines merge <<<"$agents_src")"
-while IFS= read -r line; do
-  [ -z "$line" ] || echo "devkit-check: WARNING: AGENTS.md:$line: the Workflow section opens PRs with gh pr create; say make pr BODY_FILE=<file> (gh's default in a fork is its parent)" >&2
-done <<<"$(workflow_gh_lines create <<<"$agents_src")"
-renovate_args=(audit)
-[ "$STAGED" = 0 ] || renovate_args+=(--staged)
-while IFS= read -r issue; do
-  [ -z "$issue" ] || echo "devkit-check: WARNING: $issue (README \"Renovate\": every Renovate PR waits for make merge)" >&2
-done <<<"$("$(dirname "${BASH_SOURCE[0]}")/python.sh" -I "$(dirname "${BASH_SOURCE[0]}")/_renovate.py" "${renovate_args[@]}")"
-while IFS= read -r issue; do
-  [ -z "$issue" ] || echo "devkit-check: WARNING: $issue (devkit/bin/bats_assert_check.py --fix)" >&2
-done <<<"$("$(dirname "${BASH_SOURCE[0]}")/python.sh" -I "$(dirname "${BASH_SOURCE[0]}")/bats_assert_check.py" --root .)"
+check_merge_path() {
+  local targets agents_src
+  targets=$(makefile_targets)
+  if [[ "$targets" == *" gate "* && "$targets" != *" merge "* ]]; then
+    # shellcheck disable=SC2016  # $(PR) is make's variable, printed literally
+    warn 'the Makefile has a gate target but no merge target; add: merge: ; devkit/bin/pr_merge.sh "$(PR)"'
+  fi
+  if [[ "$targets" == *" gate "* && "$targets" != *" pr "* ]]; then
+    warn "the Makefile has a gate target but no pr target; add: pr: ; devkit/bin/pr_create.sh (it opens the PR on origin, never a fork's parent)"
+  fi
+  agents_src=$(tracked_text AGENTS.md)
+  warn_each "AGENTS.md:" ": the Workflow section merges with gh pr merge; say make merge PR=<n> (it refuses a head without a local-gate success)" \
+    <<<"$(workflow_gh_lines merge <<<"$agents_src")"
+  warn_each "AGENTS.md:" ": the Workflow section opens PRs with gh pr create; say make pr BODY_FILE=<file> (gh's default in a fork is its parent)" \
+    <<<"$(workflow_gh_lines create <<<"$agents_src")"
+}
+check_audits() {
+  local renovate_args=(audit)
+  [ "$STAGED" = 0 ] || renovate_args+=(--staged)
+  warn_each "" " (README \"Renovate\": every Renovate PR waits for make merge)" \
+    <<<"$("$HERE/python.sh" -I "$HERE/_renovate.py" "${renovate_args[@]}")"
+  warn_each "" " (devkit/bin/bats_assert_check.py --fix)" <<<"$("$HERE/python.sh" -I "$HERE/bats_assert_check.py" --root .)"
+}
 top=$(pwd -P)
 # tailwind_unscoped: "<css>:<line>\t<dir>" for each place a tracked stylesheet (outside devkit/)
 # has Tailwind v4 scan devkit/, <dir> being where that scan starts: an `@import "tailwindcss"`
@@ -394,19 +423,37 @@ tailwind_unscoped() {
     done < <(grep -nE "^[[:space:]]*@source[[:space:]]+[\"']" "$css" || true)
   done < <(git ls-files -- '*.css' ':!:devkit/')
 }
-while IFS=$'\t' read -r place dir; do
-  [ -n "$place" ] || continue
-  case "$dir" in "$top") dir="the repo root" ;; "$top/"*) dir=${dir#"$top/"}/ ;; esac
-  echo "devkit-check: WARNING: $place: Tailwind v4's scan from $dir covers devkit/ (an unscoped @import \"tailwindcss\" scans the package that builds it; a source() or @source path, what it names), and a word in its comments becomes a CSS class (rollcall #81: .shadow); scope it to the app's sources: @import \"tailwindcss\" source(\"<dir>\")" >&2
-done <<<"$(tailwind_unscoped)"
-grep_args=(-lwF --all-match)
-[ "$STAGED" = 0 ] || grep_args+=(--cached)
-while read -r module name state since migration; do
-  [ "$state" = deprecated ] || continue
-  while IFS= read -r file; do
-    [ -n "$file" ] || continue
-    _devkit_area "$file"
-    [ "$DEVKIT_AREA" = docs ] || echo "devkit-check: WARNING: $file: $name (devkit/lint/$module) is deprecated since $since; $migration" >&2
-  done <<<"$(git grep "${grep_args[@]}" -e "$name" -e "devkit/lint/$module" -- ':!devkit/' || true)"
-done <<<"$(git show :devkit/lint/exports.txt 2>/dev/null | grep -v '^#' || true)"
+check_tailwind() {
+  local place dir
+  while IFS=$'\t' read -r place dir; do
+    [ -n "$place" ] || continue
+    case "$dir" in "$top") dir="the repo root" ;; "$top/"*) dir=${dir#"$top/"}/ ;; esac
+    warn "$place: Tailwind v4's scan from $dir covers devkit/ (an unscoped @import \"tailwindcss\" scans the package that builds it; a source() or @source path, what it names), and a word in its comments becomes a CSS class (rollcall #81: .shadow); scope it to the app's sources: @import \"tailwindcss\" source(\"<dir>\")"
+  done <<<"$(tailwind_unscoped)"
+}
+check_deprecated_exports() {
+  local grep_args=(-lwF --all-match) module name state since migration file
+  [ "$STAGED" = 0 ] || grep_args+=(--cached)
+  while read -r module name state since migration; do
+    [ "$state" = deprecated ] || continue
+    while IFS= read -r file; do
+      [ -n "$file" ] || continue
+      _devkit_area "$file"
+      [ "$DEVKIT_AREA" = docs ] || warn "$file: $name (devkit/lint/$module) is deprecated since $since; $migration"
+    done <<<"$(git grep "${grep_args[@]}" -e "$name" -e "devkit/lint/$module" -- ':!devkit/' || true)"
+  done <<<"$(git show :devkit/lint/exports.txt 2>/dev/null | grep -v '^#' || true)"
+}
+
+# The header's checks, in its order; a failing one exits 1 with its message, a warning prints.
+check_vendored_tree
+check_swift_format
+check_plan
+check_clone_config
+check_baselines
+check_tsbuildinfo
+check_makefile_recipes
+check_merge_path
+check_audits
+check_tailwind
+check_deprecated_exports
 echo "devkit-check: ok (${_commit:0:7})"

@@ -17,9 +17,17 @@
 # them at ×1.0 (load at or under the 10 cores both samples); devkit #226's unit ran 293 s against 240 beside kitchen #15 and 174 s alone. Each run
 # then gets the budget of its slot share; a run alone (1 slot held) keeps its exact budget, so a
 # real slowdown still fails there, and beside a neighbour past 2x.
+# Cores (devkit decisions 2026-10-27): "cores" above is capacity in performance-core equivalents,
+# P + E × DEVKIT_ECORE_RATIO, on a box whose sysctl names two perf levels (Apple silicon); else
+# the online core count (Linux, Intel). Why: this M4 is 4 P + 6 E; at load 8-10 a tier's shards
+# land on E-cores and ran ~1.7x slower at ×1.0 against hw.ncpu's 10 (devkit #240's unit: 304 s
+# vs 240 at load 7.9). The ratio is measured, not guessed: ECORE_RATIO_DEFAULT below.
 #
 #   devkit_loadavg                 "<1m> <5m>", or nothing when the load cannot be read
-#   devkit_ncpu                    the online core count, or nothing
+#   devkit_ncpu                    the online core count, or nothing: a count of things (the
+#                                  admission pool's default size), never a load divisor
+#   devkit_cpu_capacity            the load divisor: performance-core equivalents, one decimal
+#                                  when fractional ("7.6"), or nothing
 #   devkit_load_scale <budget-s> [<slots held>]
 #                                  sets LOAD_SCALE ("1" when unscaled or unreadable),
 #                                  LOAD_BUDGET (whole seconds) and LOAD_NOTE ("" when unscaled,
@@ -32,8 +40,10 @@
 #                                  the slots counting at the smaller of the two counts, its
 #                                  LOAD_NOTE naming both samples (tier_guard.sh, local_gate.sh
 #                                  jobs; a hook's ledger note keeps the start sample)
-# Test hooks, environment only: DEVKIT_LOADAVG_CMD (a command printing "<1m> <5m> ...") and
-# DEVKIT_NCPU (a core count).
+# Test hooks, environment only: DEVKIT_LOADAVG_CMD (a command printing "<1m> <5m> ..."),
+# DEVKIT_NCPU (a core count; set, it is also the capacity, a box of equal cores) and
+# DEVKIT_SYSCTL_CMD (a command run as `<cmd> <key>` in place of `sysctl -n <key>`).
+# DEVKIT_ECORE_RATIO (environment) overrides the measured E/P throughput ratio, for another chip.
 
 devkit_loadavg() {
   if [ -n "${DEVKIT_LOADAVG_CMD:-}" ]; then
@@ -48,8 +58,39 @@ devkit_loadavg() {
 devkit_ncpu() {
   local n=${DEVKIT_NCPU:-}
   [ -n "$n" ] || n=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || n=""
-  [ -n "$n" ] || n=$(sysctl -n hw.ncpu 2>/dev/null) || n=""
+  [ -n "$n" ] || n=$(_devkit_sysctl hw.ncpu) || n=""
   [[ "$n" =~ ^[1-9][0-9]*$ ]] && echo "$n"
+}
+
+_devkit_sysctl() { # <key>
+  if [ -n "${DEVKIT_SYSCTL_CMD:-}" ]; then
+    bash -c "$DEVKIT_SYSCTL_CMD \"\$1\"" _ "$1"
+  else
+    sysctl -n "$1"
+  fi 2>/dev/null
+}
+
+# What each efficiency core adds, as a share of a performance core, on this M4 (4 P + 6 E) for a
+# tier's own work. Measured 2026-10-27 holding the whole admission pool, box 94% idle: ten
+# concurrent copies of two bats files against four (the 4 P-cores the solo shards use) gave
+# 5.1-5.6 P-core equivalents, 3 rounds, median 5.35, so (5.35 - 4) / 6 = 0.22. A pure-CPU awk
+# loop gives 0.5: the gap is fork/exec contention, and the tiers are fork-heavy shell, pytest
+# and node. DEVKIT_ECORE_RATIO overrides it (another chip, or a CPU-bound fleet's tiers).
+readonly ECORE_RATIO_DEFAULT=0.22
+
+devkit_cpu_capacity() {
+  local p="" e="" r=${DEVKIT_ECORE_RATIO:-$ECORE_RATIO_DEFAULT} ratio_re='^(0?\.[0-9]*[1-9][0-9]*|1(\.0*)?)$'
+  if [ -z "${DEVKIT_NCPU:-}" ]; then
+    p=$(_devkit_sysctl hw.perflevel0.logicalcpu) e=$(_devkit_sysctl hw.perflevel1.logicalcpu)
+  fi
+  if ! [[ "$p" =~ ^[1-9][0-9]*$ && "$e" =~ ^[0-9]+$ ]]; then
+    devkit_ncpu
+  elif ! [[ "$r" =~ $ratio_re ]]; then
+    echo "load: DEVKIT_ECORE_RATIO must be a decimal in (0, 1] (got '$r'); dividing by the core count" >&2
+    devkit_ncpu
+  else
+    awk -v p="$p" -v e="$e" -v r="$r" 'BEGIN { c = sprintf("%.1f", p + e * r); sub(/\.0$/, "", c); print c }'
+  fi
 }
 
 # _devkit_stretch <budget> <1m load> <ncpu> [<slots held>]: "<scale> <stretched budget>", or
@@ -74,7 +115,7 @@ devkit_load_scale() {
   LOAD_SCALE=1 LOAD_BUDGET=$budget LOAD_NOTE="" LOAD_LEDGER="" LOAD_BASE=$budget
   LOAD_HELD_START=${2:-1} LOAD_HELD=${2:-1}
   read -r LOAD_START _ <<<"$(devkit_loadavg)"
-  LOAD_NCPU=$(devkit_ncpu)
+  LOAD_NCPU=$(devkit_cpu_capacity)
   out=$(_devkit_stretch "$budget" "$LOAD_START" "$LOAD_NCPU" "$LOAD_HELD")
   [ -n "$out" ] || return 0
   read -r LOAD_SCALE LOAD_BUDGET <<<"$out"

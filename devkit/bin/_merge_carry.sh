@@ -4,7 +4,7 @@
 # "Carry"). Pure git on a clone's objects; pushing and the statuses are merge_rules.sh's.
 #
 # Why: docs/decisions.md is append-only and nearly every PR appends to it, so any two open PRs
-# conflict there on GitHub, whose merge ignores the union driver the gate's local merge uses
+# conflict there on GitHub, whose merge ignores the merge driver the gate's local merge uses
 # (bin/_gitattributes_lib.sh). devkit #234 was re-gated three times and closet #434/#435 both
 # rebased for a conflict no gate job could judge differently. A merge whose every other path is
 # the gated tree's needs no new gate: the gate already tested that code, so the merge resolves
@@ -12,15 +12,15 @@
 #
 # The test is on trees, never on what a commit message or the PR says: CARRY_PATH is the only
 # path whose content may differ from the gated merge's, every conflict GitHub's merge would hit
-# must be in it, and both sides of it may only append entries (decisions_merge.py, which also
-# writes the blank line and the date order the union driver loses).
+# must be in it, and both sides of it may only append entries (decisions_merge.py, the log's
+# merge driver too, so a local rebase and a carry merge it alike).
 # Requires git 2.40 (`merge-tree --write-tree`, `--attr-source`).
 # Sets CARRY_* globals for its caller to read:
 # shellcheck disable=SC2034
 
 CARRY_PATH=docs/decisions.md
 # git's well-known empty tree: as the attribute source it gives every path no attributes, so
-# merge-tree merges as GitHub does, with no union driver, whatever this clone's .gitattributes.
+# merge-tree merges as GitHub does, with no merge driver, whatever this clone's .gitattributes.
 CARRY_NO_ATTRS=4b825dc642cb6eb9a060e54bf8d69288fbee4904
 CARRY_BIN=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
@@ -126,4 +126,32 @@ carry_commit() {
   printf 'Merge main %s into PR #%s: only %s differs from the gated tree\n\nmake merge carried the gate of %s (bin/_merge_carry.sh): every other path is the tree\nthat gate tested, and both sides only appended entries to %s.\n\n%s\n' \
     "${4:0:12}" "$5" "$CARRY_PATH" "${3:0:12}" "$CARRY_PATH" "$(devkit_commit_trailer)" \
     | git -C "$1" commit-tree "$2" -p "$3" -p "$4" -F -
+}
+
+# A review carries the same way: a head that differs from a reviewed commit only by merges of
+# main (GitHub's update-branch, or carry_commit above) changes none of the PR's own lines, so
+# Codex's review of that commit, or its fallback record, is a review of the head (merge_rules.sh
+# carry_review). claude-kit's merge_driver.sh re-posted the record itself after update-branch,
+# with a suffix no merge parses.
+CARRY_REVIEW_DEPTH=20
+
+# main_merge_parents <root> <head> <main now>: the commits whose review carries to <head>,
+# nearest first. Walks first parents while the commit is a two-parent merge whose second parent
+# is on <main now> and whose tree is GitHub's merge of its parents, a resolved CARRY_PATH the
+# only difference allowed (a hand edit in a merge is a change nobody reviewed); prints each
+# first parent. Prints none when <head> is no such merge; 1 when git fails.
+main_merge_parents() {
+  local root=$1 commit=$2 main=$3 n=0 merge first second extra changed
+  while [ "$n" -lt "$CARRY_REVIEW_DEPTH" ]; do
+    merge=$(git -C "$root" rev-list --no-walk --parents "$commit") || return 1
+    read -r _ first second extra <<<"$merge"
+    [ -n "$second" ] && [ -z "$extra" ] || return 0
+    git -C "$root" merge-base --is-ancestor "$second" "$main" || return 0
+    carry_merge "$root" "$first" "$second" || return 1
+    changed=$(git -C "$root" diff-tree -r --no-renames --name-only "$CARRY_MERGED" "$commit^{tree}") || return 1
+    changed=$(printf '%s\n%s\n' "$changed" "$(cut -f2 <<<"$CARRY_CONFLICTS")" | grep -vxF "$CARRY_PATH" | grep .)
+    [ -z "$changed" ] || return 0
+    echo "$first"
+    commit=$first n=$((n + 1))
+  done
 }
