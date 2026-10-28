@@ -14,14 +14,19 @@ agent more than it catches is overhead, not standardization.
   use `${a[@]+"${a[@]}"}`. No `readarray`, no `declare -A`, no GNU-only `sed -i` without `''`.
 - `shellcheck -s bash` (0.11) clean; `bats tests/` green before any push. CI runs both. On a
   Mac, bats runs under /bin/bash 3.2, where a false `[[ … ]]` or `(( … ))` mid-test fails
-  nothing (and `! cmd` or `[ a ] && [ b ]` never do, on any bash): every such assertion ends
-  `|| false` straight after the test, unless it is its function's last line. ci-lint holds it
+  nothing (and `! cmd` or a test before `&&`, as in `[ a ] && [ b ]` or `grep -q a f && grep -q
+  b f`, never does, on any bash): every such assertion ends `|| false` straight after the
+  test, unless it is its function's last line. ci-lint holds it
   (`bin/bats_assert_check.py`, a line-level form, not a parser: grow its grammar, never a
   lexer; `--fix` appends the handler).
 - A bats file's git fixture (bare origin, clones, commits, fakes) is built once in `setup_file`
   and copied per test (`tests/fixture_template.bash`): built per test it was a fifth of the unit
   tier's CPU. Every `tests/*.bats` is in `tests/shard_costs.tsv`, at its share: `tests/shards.sh`
-  fails the run otherwise (`make shard-costs`, on a quiet box).
+  fails the run otherwise (`make shard-costs`, on a quiet box). A share is judged only on an
+  uncontended run (no pool units held by others, the load less the run's own running shards
+  within capacity, at every file boundary; one `shards: drift …` line says which it was);
+  beside other work drift is a `shards: note:`, never a failure. A test steps a polling loop by
+  hand (a tick command, a faked `sleep`), never by sleeping and counting lines.
 
 ## Architecture
 Scripts in `bin/` and the shared metrics collectors in `metrics/`, vendored by consumers (the

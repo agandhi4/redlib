@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run devkit's python3 (bin/_toolchain_lib.sh: >= 3.11, found without trusting PATH) with these
 # arguments, for callers that are not bash: a Makefile (`PYTHON := bin/python.sh`) and the
-# metrics merge driver git runs (bin/_gitattributes_lib.sh).
+# merge drivers git runs (bin/_gitattributes_lib.sh).
 # Usage: devkit/bin/python.sh [python args...]
 # Exit: python's own status, or 2 when this box has no qualifying python3 (the reason on stderr).
 set -uo pipefail

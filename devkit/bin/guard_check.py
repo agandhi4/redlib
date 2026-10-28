@@ -34,6 +34,11 @@ the section's root, and a glob also names a directory the file is under.
   logger-name PREFIX [except GLOB...]           python: every logger is PREFIX or PREFIX.<x>,
                                                 nothing logs on the root logger
   outbound-timeout [except GLOB...]             python: every outbound HTTP call has a timeout
+  log-secret  [CALLEE[,CALLEE]] [except GLOB...]
+                                                no logging call (a level method on a logger-named
+                                                receiver, or CALLEEs as call-arg-ban matches them)
+                                                is passed a secret-named value or a slice of one
+                                                (bin/_guard_rules.py py_log_secret); shared
   utc-today   [except GLOB...]                  python: no date.today(), datetime.utcnow(), or
                                                 datetime.now() without a tz
   single-writer ATTR GLOB...                    python: only files under the globs write .ATTR,
@@ -93,9 +98,16 @@ the section's root, and a glob also names a directory the file is under.
   known       PATH RULE-ID COUNT REASON         COUNT violations of the rule in PATH are debt
                                                 being paid down: shrink-only
 
+Shared rules: `lint/guards.shared.conf` (devkit's, rule lines only, no sections) runs in every
+section of its kinds' langs, so a rule the whole fleet needs reaches every repo at its next
+devkit-sync with no conf edit. A section overrides a shared rule by declaring one of the same id
+(`log-secret logFailure except src/lib/redact.ts`), and holds its debt in `known` lines as for
+its own; its lines and messages name the shared file.
+
 Any rule line may start with `@NAME`, its id; otherwise the id is its kind and its subject:
 the first argument of only-import/only-call/ban-call/call-arg-ban/logger-name/single-writer/
-only-text (whose PATTERN with a space has no id but its @NAME), none for own-transaction,
+only-text (whose PATTERN with a space has no id but its @NAME), none for own-transaction and
+log-secret (whose CALLEEs extend the rule, so a section's line overrides the shared one),
 the module of ban-import, the second argument of scoped-exports/calls-one-of/decorated-with
 (`ban-import:sqlalchemy:select`, `only-call:fetch`, `outbound-timeout`). `known` lines and
 the output name rules by id, so two rules of one kind and subject need a name. `except` names the sanctioned sites inside a ban (design, kept); a
@@ -183,11 +195,12 @@ import argparse
 import ast
 import importlib.util
 import json
+import os
 import posixpath
 import re
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import ModuleType
 
@@ -290,6 +303,9 @@ KINDS = {
     ),
     "logger-name": Kind("logger-name PREFIX [except GLOB...]", PY_ONLY, False, (1, 1)),
     "outbound-timeout": Kind("outbound-timeout [except GLOB...]", PY_ONLY, False, (0, 0)),
+    "log-secret": Kind(
+        "log-secret [CALLEE[,CALLEE]] [except GLOB...]", tree.LANGS, False, (0, 1), forbids=True
+    ),
     "utc-today": Kind("utc-today [except GLOB...]", PY_ONLY, False, (0, 0)),
     "single-writer": Kind(
         "single-writer ATTR|TABLE[.FIELD] GLOB[:FUNCTION,FUNCTION]...",
@@ -363,6 +379,8 @@ COMPOSE_RULES = {
 }
 # The kinds whose first argument is the one GLOB they judge and whose second is the subject.
 GLOB_FIRST = ("scoped-exports", "calls-one-of", "decorated-with")
+# The rules every section of their langs runs (header, "Shared rules").
+SHARED_CONF = tree.DEVKIT / "lint" / "guards.shared.conf"
 
 
 # ------------------------------------------------------------------------------------ conf
@@ -398,10 +416,15 @@ class Rule:
     shapes: tuple[rules.ArgShape, ...] = ()  # call-arg-ban
     callees: tuple[rules.CalleePattern, ...] = ()  # call-arg-ban: targets, compiled
     texts: tuple[rules.TextPattern, ...] = ()  # only-text: its one PATTERN, compiled
+    origin: str = ""  # the conf the line is in, when not the repo's (a shared rule)
 
     @property
     def spec(self) -> Kind:
         return KINDS[self.kind]
+
+    def at(self, conf: Path) -> str:
+        """`<conf>:<line>` of the rule's line, for the messages."""
+        return f"{self.origin or conf}:{self.line}"
 
     @property
     def unit(self) -> str:
@@ -444,20 +467,52 @@ class Section(tree.SourceTree):
 
 def parse_conf(path: Path) -> list[Section]:
     sections = tree.parse_sections(path, Section, _directive)
+    shared = shared_rules(SHARED_CONF)
     for section in sections:
+        own = {rule.id for rule in section.rules}
+        section.rules.extend(r for r in shared.get(section.lang, ()) if r.id not in own)
         _validate(section, path)
     return sections
 
 
+def shared_rules(path: Path) -> dict[str, list[Rule]]:
+    """lang -> the rules of the shared conf that every section of the lang runs."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfError(f"cannot read the shared rules {path}: {exc.strerror}") from exc
+    shown = os.path.relpath(path) if path.is_relative_to(Path.cwd()) else str(path)
+    found: dict[str, list[Rule]] = {}
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        where = f"{shown}:{lineno}"
+        tokens = tree.conf_words(raw, where)
+        if not tokens:
+            continue
+        name, tokens = _rule_name(tokens, where)
+        if tokens[0] not in KINDS:
+            raise ConfError(f"{where}: the shared conf holds rule lines only, not {tokens[0]!r}")
+        for lang in KINDS[tokens[0]].langs:
+            rule = _rule(tokens[0], name, tokens[1:], where, lineno, lang)
+            if any(r.id == rule.id for r in found.get(lang, ())):
+                raise ConfError(f"{where}: duplicate shared rule {rule.id}")
+            found.setdefault(lang, []).append(replace(rule, origin=shown))
+    return found
+
+
+def _rule_name(tokens: list[str], where: str) -> tuple[str, list[str]]:
+    """A rule line's leading `@NAME` (or ""), and the words after it."""
+    if not tokens[0].startswith("@"):
+        return "", tokens
+    name = tokens[0][1:]
+    if RULE_NAME.fullmatch(name) is None:
+        raise ConfError(f"{where}: a rule name is `@NAME`, NAME [A-Za-z][A-Za-z0-9_.-]*")
+    if len(tokens) < 2 or tokens[1] not in KINDS:
+        raise ConfError(f"{where}: `@{name}` names the rule that follows it on its line")
+    return name, tokens[1:]
+
+
 def _directive(section: Section, tokens: list[str], where: str, lineno: int) -> None:
-    name = ""
-    if tokens[0].startswith("@"):
-        name = tokens[0][1:]
-        if RULE_NAME.fullmatch(name) is None:
-            raise ConfError(f"{where}: a rule name is `@NAME`, NAME [A-Za-z][A-Za-z0-9_.-]*")
-        tokens = tokens[1:]
-        if not tokens or tokens[0] not in KINDS:
-            raise ConfError(f"{where}: `@{name}` names the rule that follows it on its line")
+    name, tokens = _rule_name(tokens, where)
     word, args = tokens[0], tokens[1:]
     if word == "known":
         section.known.append(_known(args, where, lineno, section))
@@ -567,7 +622,15 @@ class _Subject:
     globs: tuple[str, ...]
     targets: tuple[str, ...]
     names: frozenset[str] = frozenset()  # ban-import's banned names
-    callees: tuple[rules.CalleePattern, ...] = ()  # call-arg-ban's
+    callees: tuple[rules.CalleePattern, ...] = ()  # call-arg-ban's and log-secret's
+
+
+def _callees(text: str, where: str) -> tuple[tuple[str, ...], tuple[rules.CalleePattern, ...]]:
+    targets = _split(text, where, text)
+    try:
+        return targets, tuple(rules.callee_pattern(pattern) for pattern in targets)
+    except ValueError as exc:
+        raise ConfError(f"{where}: {exc}") from exc
 
 
 def _subject(kind: str, main: list[str], name: str, lang: str, where: str) -> _Subject:
@@ -575,12 +638,13 @@ def _subject(kind: str, main: list[str], name: str, lang: str, where: str) -> _S
         module, names = _ban_subject(main[-1], lang, where)
         return _Subject(main[-1], tuple(main[:-1]), (module,), names)
     if kind == "call-arg-ban":
-        targets = _split(main[0], where, main[0])
-        try:
-            callees = tuple(rules.callee_pattern(pattern) for pattern in targets)
-        except ValueError as exc:
-            raise ConfError(f"{where}: {exc}") from exc
+        targets, callees = _callees(main[0], where)
         return _Subject(main[0], tuple(main[2:]), targets, callees=callees)
+    if kind == "log-secret":
+        # No subject: the CALLEEs extend the built-in loggers, and the id stays the kind's so
+        # that a section's line overrides the shared one.
+        targets, callees = _callees(main[0], where) if main else ((), ())
+        return _Subject("", (), targets, callees=callees)
     if kind in GLOB_FIRST:
         targets = _split(main[1], where, main[1])
         for target in targets:
@@ -862,6 +926,9 @@ def fires(
         "call-arg-ban": lambda: (
             rules.py_call_arg_ban if section.lang == "python" else rules.ts_call_arg_ban
         )(parsed, rule.callees, rule.shapes),
+        "log-secret": lambda: (
+            rules.py_log_secret if section.lang == "python" else rules.ts_log_secret
+        )(parsed, rule.callees),
     }
     return rules.Judged(semantic[kind]())
 
@@ -923,11 +990,13 @@ def _judge(rule: Rule, section: Section, files: list[str], parsed: dict, conf: P
     listed = {k.path: k for k in section.known if k.rule == rule.id}
     inert = ""
     if not scoped:
-        inert = f"no files match {' '.join(rule.globs)}"
+        inert = "the section has no files"
+        if rule.globs:
+            inert = f"no files match {' '.join(rule.globs)}"
     elif rule.spec.units and units == 0:
         inert = f"no {rule.unit} under {' '.join(rule.globs)}"
     if inert:
-        result.inert.append(f"{conf}:{rule.line}: {rule.id}: inert: {inert}")
+        result.inert.append(f"{rule.at(conf)}: {rule.id}: inert: {inert}")
         _stale_known(rule, listed, violations, conf, result)
         return
     tail = _sanctioned_by(rule)
@@ -939,7 +1008,7 @@ def _judge(rule: Rule, section: Section, files: list[str], parsed: dict, conf: P
         for hit in hits:
             result.problems.append(
                 f"{section.display}/{rel}:{hit.line}: {rule.id}: {hit.what}{tail}{over} "
-                f"({conf}:{rule.line})"
+                f"({rule.at(conf)})"
             )
         result.failed.add(rule.id)
     for site in rule.sites:
@@ -949,7 +1018,7 @@ def _judge(rule: Rule, section: Section, files: list[str], parsed: dict, conf: P
         verb = rule.spec.named.format(names=", ".join(gone)) if gone else rule.spec.stale
         fix = ", ".join(gone) if gone and len(gone) < len(site.names) else "the glob"
         result.problems.append(
-            f"{conf}:{rule.line}: {rule.id}: nothing under {site.glob} {verb} any more, so "
+            f"{rule.at(conf)}: {rule.id}: nothing under {site.glob} {verb} any more, so "
             f"the exception is stale; delete {fix} from the rule"
         )
         result.failed.add(rule.id)
@@ -980,7 +1049,7 @@ def check_section(section: Section, repo: Path, conf: Path) -> Result:
         for glob in (*rule.globs, *(s.glob for s in rule.excepts)):
             if glob not in hit and not any(tree.matches(f, glob) for f in files):
                 raise ConfError(
-                    f"{conf}:{rule.line}: {rule.id}: {glob} matches no scanned file of "
+                    f"{rule.at(conf)}: {rule.id}: {glob} matches no scanned file of "
                     f"[{section.name}], so the rule checks nothing; fix the glob or delete it"
                 )
     parsed = {rel: read(section, root, rel) for rel in files}  # every file parses, used or not

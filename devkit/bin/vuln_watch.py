@@ -48,7 +48,7 @@ COLLECTOR = Path(__file__).resolve().parent.parent / "metrics" / "vuln.py"
 MARKER = "<!-- devkit-vuln-watch -->"
 LABEL = "security"
 ALERT = ("CRITICAL", "HIGH")
-LOCK_FLAGS = ("--uv", "--npm-lock", "--pnpm-lock", "--cargo-lock")
+LOCK_FLAGS = ("--uv", "--npm-lock", "--pnpm-lock", "--cargo-lock", "--swift")
 SHELL_OPERATORS = ("&&", "||", ";", "|", ">", "<")
 CLOSE_COMMENT = "Main locks no critical or high advisory any more (devkit's nightly vuln watch)."
 COLLECTOR_TIMEOUT = 600  # seconds; OSV answers a fleet repo's batch in a few
@@ -146,6 +146,8 @@ def bump_command(package: dict, lock: list[str]) -> str:
     name, fixed = package["name"], package["fixed"]
     if fixed is None:
         return "none (no fixed version published)"
+    if kind == "swift":
+        return swift_bump(name, fixed, Path(path))
     where = Path(path) if kind == "uv" else Path(path).parent
     cmd = {
         "uv": f"uv lock --upgrade-package {name}=={fixed}",
@@ -154,6 +156,21 @@ def bump_command(package: dict, lock: list[str]) -> str:
         "cargo": f"cargo update -p {name} --precise {fixed}",
     }[kind]
     return cmd if str(where) == "." else f"cd {where} && {cmd}"
+
+
+def swift_bump(name: str, fixed: str, source: Path) -> str:
+    """The edit for a Swift pin, by the file vuln.py read it from (metrics/_swiftpm.py): a
+    manifest's exact pin is edited; a SwiftPM package's resolved pin is updated within its
+    range; an Xcode project's resolved file has no per-package command line."""
+    if source.name == "project.yml":
+        return f"set exactVersion: {fixed} for {name} in {source}"
+    if source.name == "Package.swift":
+        return f'set exact: "{fixed}" for {name} in {source}'
+    if source.parent.name == "swiftpm":
+        return f"update {name} to {fixed} in Xcode (File > Packages > Update to Latest Versions)"
+    identity = name.rsplit("/", 1)[-1].lower()  # SwiftPM's identity: the URL's last component
+    cmd = f"swift package update {identity}"
+    return cmd if str(source.parent) == "." else f"cd {source.parent} && {cmd}"
 
 
 def issue_title(found: dict[str, Advisory]) -> str:
