@@ -26,7 +26,7 @@ TOOL=$1
 PINS=$(cd "$(dirname "${BASH_SOURCE[0]}")/../metrics/tools" && pwd) || die "no metrics/tools beside bin/"
 for f in package.json package-lock.json; do [ -f "$PINS/$f" ] || die "$PINS/$f is missing"; done
 grep -Eq "^[[:space:]]*\"$TOOL\"[[:space:]]*:" "$PINS/package.json" \
-  || die "no pin for '$TOOL' in $PINS/package.json (its devDependencies are the pinned tools)"
+  || die "no pin for '$TOOL' in $PINS/package.json (its dependencies are the pinned tools)"
 
 if command -v sha256sum >/dev/null; then SHA256=sha256sum; else SHA256="shasum -a 256"; fi
 LOCK_SHA=$($SHA256 "$PINS/package-lock.json" | cut -c1-12)

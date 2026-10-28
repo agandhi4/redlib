@@ -7,13 +7,17 @@ the test's last command. Three assertion shapes trip neither when they fail mid-
     runs on) exempts both compound commands from errexit. bash 5 in CI fails them, so the same
     test passes locally and fails, or never ran its check, depending on the host.
   - `! cmd`: a negated pipeline never trips errexit, in any bash (POSIX).
-  - `[ a ] && [ b ]`: a failing command before `&&` never trips errexit, in any bash.
+  - `[ a ] && [ b ]`: a failing command before `&&` never trips errexit, in any bash. So
+    `grep -q a f && grep -q b f` passes when a is missing, and `cd x && [ a ] && [ b ]` when a
+    fails (devkit-ch found four grep chains in new_contract.bats that had never checked their
+    first file).
 devkit #205 shipped two assertions that had never held (found by #212), #196 a third.
 
 The rule is a canonical form, read line by line, not a bash parser (#216 and #219 tried one; each
 Codex round found the next construct it misread). A statement is a line plus the lines it runs
 on into (a line ending in `&&`, `||`, `|` or a backslash). One that STARTS with `[[`, `((`, `! `,
-or `[ ... ] && <test>` must either
+or `<test> && <test>` (a test being `[ ]`, `test`, `grep -q` or `cmp -s`; after a leading
+`cmd && ` too, not after a `(`: a subshell's status does trip errexit) must either
   1. end with a failing handler: `|| H` or `|| { ...; H; }` (also as `|| {`, lines, `}`), where H
      is `false` (bats-core's idiom; prefer it), `return [n]`, `exit [n]`, `skip`, `fail` or
      `flunk`, with nothing before it but the tests: for `[[ ]]`/`(( ))`, tests joined by `&&`,
@@ -83,6 +87,16 @@ ONLY_TESTS = re.compile(r"(?:\s|&&|\|\||!)*$")
 # the "comment" is an operand's text, which would hide the `|| echo` (#223 Codex).
 QUOTELESS_COMMENT = re.compile(r"\s+#[^'\"]*$")
 FIX = "end it with `|| false`"
+WHOLE_QUOTE = re.compile(r"\"[^\"]*\"|'[^']*'")
+
+
+# A command whose status is its check: `[ ]`/`test`, a quiet grep, a silent cmp.
+_TEST = r"(?:\[\s|test\s|grep\s+-[A-Za-z]*q|cmp\s+-s\s)"
+# What may run before a test in the same `&&` list: no pipe, `;` or comment (each ends the list),
+# and quotes only whole, so a quoted script (`s='cd x && [ a ] && [ b ]'`) is no list (#257 Codex).
+_PREFIX = r"(?:[^;|#'\"]|\"[^\"]*\"|'[^']*')*?"
+# A prefix that is a subshell (whose status does trip errexit) or a condition is not one.
+_NOT_CONDITION = r"(?!\(|(?:if|elif|while|until)\s)"
 
 
 class Shape(NamedTuple):
@@ -103,8 +117,11 @@ SHAPES = (
     # `! a | b` is one negated pipeline; in `! a && [ b ] | cat` the pipe is the later test's.
     Shape(re.compile(r"!\s"), "`! cmd` never trips errexit",
           rf"\|\||{BACKGROUND}|&&.*\||{MAY_COMMENT.pattern}"),
-    Shape(re.compile(r"(?:\[|test)\s.*&&\s*(?:\[|test\s|!\s|\(\()"),
-          "a failing `[ ]` before `&&` never trips errexit",
+    # Test then test, so `[ -s f ] && break` (a conditional) is not judged; a prefix
+    # `cd x && ` hides the first test's failure as much as the test itself, but an `if`/`while`
+    # prefix makes it the condition (#257 Codex).
+    Shape(re.compile(rf"(?:{_NOT_CONDITION}{_PREFIX}&&\s*)?{_TEST}.*&&\s*(?:{_TEST}|\[\[|!\s|\(\()"),
+          "a failing test before `&&` never trips errexit",
           rf"\||{BACKGROUND}|{MAY_COMMENT.pattern}"),
 )
 
@@ -180,7 +197,9 @@ def _status_is_the_tests(shape: Shape, test: str) -> bool:
     """Whether <test> (a statement up to its handler, or all of it) returns its tests' status."""
     if shape.masks is None:
         return ONLY_TESTS.match(TESTS.sub(" ", test)) is not None
-    return not re.search(shape.masks, test)
+    # A whole quoted argument is an operand: the `|` of `grep -q 'a|b' f` pipes nothing (#257
+    # Codex). A quote left open is _handled's to fail.
+    return not re.search(shape.masks, WHOLE_QUOTE.sub('""', test))
 
 
 def _handled(shape: Shape, text: str) -> bool:
@@ -201,7 +220,7 @@ def _semicolon(shape: Shape, text: str) -> bool:
     if shape.masks is None:
         return SEMICOLON.match(text) is not None
     handler = HANDLER.search(text)
-    return ";" in (text[:handler.start()] if handler else text)
+    return ";" in WHOLE_QUOTE.sub('""', text[:handler.start()] if handler else text)
 
 
 def _verdict(shape: Shape, text: str, closes_function: bool) -> str | None:

@@ -1,8 +1,8 @@
 {
   "name": "devkit-metrics-tools",
   "private": true,
-  "description": "The npm tools devkit's collectors run for every repo (jscpd for metrics/jscpd.mjs); bin/npm_tool.sh installs this lockfile once per machine. Renovate updates it here, in devkit; a consumer's vendored copy is devkit-sync's (renovate/default.json disables devkit/**).",
-  "devDependencies": {
+  "description": "The npm tools devkit's collectors run for every repo (jscpd for metrics/jscpd.mjs); bin/npm_tool.sh installs this lockfile once per machine. Renovate updates it here, in devkit; a consumer's vendored copy is devkit-sync's (renovate/default.json disables devkit/**). `dependencies`, not devDependencies: these tools are what devkit ships to every machine, so metrics/vuln.py counts them as devkit's production set (scripts/ci/metrics.conf vuln-tools).",
+  "dependencies": {
     "jscpd": "5.4.2"
   }
 }

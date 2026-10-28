@@ -116,9 +116,9 @@
 # all eight instalite PRs #37-#46 failed their first gate on unlocked coverage gains and bundle
 # growth that a 20 s local run shows. The ledger row is `metrics-quick`, always ok.
 #
-# Merge driver: every hook first runs metrics_driver_heal (bin/_gitattributes_lib.sh), so a clone
-# whose merge.devkit-metrics.driver is unset or not the vendored command gets it, with one line,
-# at its next commit; it never blocks. A failed step whose output reads as a missing module or
+# Merge drivers: every hook first runs merge_drivers_heal (bin/_gitattributes_lib.sh), so a clone
+# whose merge.devkit-metrics or merge.devkit-decisions driver is unset or not the vendored command
+# gets it, with one line, at its next commit; it never blocks. A failed step whose output reads as a missing module or
 # command, in a worktree with a tracked lockfile and no node_modules beside it, adds a line
 # naming that and `run npm ci (or make install) in this worktree` under the blocked line
 # (_hook_missing_node_modules).
@@ -140,7 +140,7 @@
 . "$(dirname "${BASH_SOURCE[0]}")/_trailer_lib.sh"
 # shellcheck source=bin/_vendor_paths.sh  # base_copies, for a vendoring-only commit
 . "$(dirname "${BASH_SOURCE[0]}")/_vendor_paths.sh"
-# shellcheck source=bin/_gitattributes_lib.sh  # metrics_driver_heal, run by every hook
+# shellcheck source=bin/_gitattributes_lib.sh  # merge_drivers_heal, run by every hook
 . "$(dirname "${BASH_SOURCE[0]}")/_gitattributes_lib.sh"
 # shellcheck source=bin/_makefile_lib.sh  # makefile_targets, for the docs-check fallback
 . "$(dirname "${BASH_SOURCE[0]}")/_makefile_lib.sh"
@@ -156,7 +156,7 @@ run_hook_steps() {
   COMMIT_MSG_STEPS=(trailer)
   root=$(git rev-parse --show-toplevel) || return 1
   # Never blocks: a clone whose config cannot be written still merges, only as text.
-  metrics_driver_heal "$root" "$(dirname "${BASH_SOURCE[0]}")" "$hook" || true
+  merge_drivers_heal "$root" "$(dirname "${BASH_SOURCE[0]}")" "$hook" || true
 
   if [ "$hook" = pre-push ]; then
     push_input=$(cat)

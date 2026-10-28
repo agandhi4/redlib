@@ -32,7 +32,8 @@ Keys (docs/metrics-keys.md), each behind its flag; `<scope>` is `--scope`:
                                                   a script's dispatch lives there. A `case` is
                                                   one branch however many arms, so an argument
                                                   parser does not read as complex. Not counted:
-                                                  `&&`/`||` inside `(( ))`/`$(( ))`.
+                                                  `&&`/`||` inside `(( ))`/`$(( ))`, and guards
+                                                  (below).
   --dead        dead.<scope>.unused               functions defined in the set whose name
                                                   appears nowhere in the set's code outside
                                                   their own body (comments blanked; strings,
@@ -42,7 +43,12 @@ Keys (docs/metrics-keys.md), each behind its flag; `<scope>` is `--scope`:
                                                   a name built at run time (`cmd_$1`).
                                                   The plan hooks bin/local_gate.sh calls
                                                   (gate_plan, gate_plan_extra, gate_cleanup)
-                                                  are entry points, never dead.
+                                                  are entry points, never dead, and so is each
+                                                  `--entry NAME` (repeatable), the repo's
+                                                  declaration in metrics.conf of a function
+                                                  whose callers are outside the set (another
+                                                  repo, a generated copy, the tests); one that
+                                                  names no function in the set is exit 2.
   --cycles      coupling.<scope>.cycles           files that source each other: strongly
                                                   connected components of the `source` graph
                                                   (more than one file, or a file sourcing
@@ -50,6 +56,16 @@ Keys (docs/metrics-keys.md), each behind its flag; `<scope>` is `--scope`:
   --fan         coupling.<scope>.fan_in_max       over the same graph, python.py's definition:
                 coupling.<scope>.fan_out_max      how many files source a file, how many it
                                                   sources (fan_in_max is report-only)
+
+Guards (--complexity, decisions.md 2026-10-27): a branch whose taken side leaves and which has
+no other side is not counted, so a flat list of refusals reads as the straight line it is. Two
+spellings, scored alike: an and-or list ending `&& X`/`|| X`, and an `if` with no `elif`/`else`,
+where X (or the if body, or a `{ }` right side) ends with `exit`, `return`, `continue`, `break`
+or a call to a function of the set whose body ends in `exit` (`die`, `usage() { die …; }`; the
+name resolves in the guard's file first, and every definition must exit). Still counted: a
+guard whose side goes on (`|| fail "…"` that sets rc=1, `|| x && y`, `|| exit &`), one whose
+side ends in a nested compound (`fi`, `}`), and `exec` (`exec 3>&1` returns). A die defined
+outside the set (a vendored library) is not known, so its guards count.
 
 The `source` graph: files are nodes; `source X` or `. X` in command position is an edge to the
 measured file X names. X is resolved lexically, never run. A `# shellcheck source=<path>` on the
@@ -114,8 +130,25 @@ MAIN = "<main>"
 # The functions a repo defines for devkit to call (bin/local_gate.sh's plan contract): alive
 # though nothing in the repo names them.
 ENTRY_POINTS = frozenset({"gate_plan", "gate_plan_extra", "gate_cleanup"})
+# A guard's taken side ends in one of these, or in a function whose body ends in `exit`. Not
+# `exec`: `exec 3>&1` returns.
+GUARD_EXITS = frozenset({"exit", "return", "continue", "break"})
+# After these an and-or list goes on, so the command before them is no guard's last.
+CHAINS = frozenset({"&&", "||", "|", "|&", "&"})
+# A command before or after these runs in a child process: its exit leaves only the child.
+ASIDE = frozenset({"|", "|&", "&"})
+# After these the list goes on: the next command runs on a condition or in a child.
+CONTINUED = frozenset({"&&", "||", "|", "|&"})
+# Words before a command that leave it the command (assignments too, `X=y cmd`).
+PREFIXES = frozenset({"!", "time"})
 
-BRANCH_WORDS = frozenset({"if", "elif", "case", "for", "while", "until"})
+# Words that are never a body's tail: the reserved words that only open a part of a compound
+# command, and the closers, which make themselves the enclosing body's tail when they pop.
+NOT_TAILS = frozenset({"then", "else", "elif", "do", "!", "time", "fi", "}", "esac"})
+
+BRANCH_WORDS = frozenset({"case", "for", "while", "until"})  # and if/elif, in IF_WORDS
+IF_WORDS = frozenset({"if", "then", "elif", "else", "fi"})
+
 # Reserved words after which the next word is again a command.
 COMMAND_WORDS = frozenset({"then", "else", "do", "!", "time", "if", "elif", "while", "until"})
 # A function name as bash accepts it in practice; also how a use is recognised in the code.
@@ -128,6 +161,8 @@ WORD_END = frozenset(" \t\n;&|()<>")
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^]]*\])?\+?=")
 STDIN_REDIRECTS = frozenset({"<", "<<", "<<-", "<<<", "<&", "<>"})
 OUTPUT_REDIRECTS = frozenset({">", ">>", ">|", ">&", "&>", "&>>"})
+# The redirects whose next word is their target (a heredoc's delimiter is read with its body).
+TARGETED = (STDIN_REDIRECTS | OUTPUT_REDIRECTS) - {"<<", "<<-"}
 UNIT_FLAG = re.compile(r"-[a-zA-Z]*u.*")  # read -u <fd>, or -ru3
 SSH_ARG_FLAGS = frozenset("BbcDEeFIiJLlmOoPpQRSWw")  # ssh options that take a value
 STDIN_CHECK = "stdin-in-read-loop"
@@ -149,13 +184,20 @@ class Function:
     line: int
     start: int  # offset of the name: the body span [start, end) holds the definition
     end: int = -1
-    branches: int = 0
+    branches: int = 0  # every decision point; complexity() discounts the guards
+    guards: list[str] = field(default_factory=list)  # each guard's last command word
+    tail: str = ""  # the body's last unconditional command word ("" for a subshell body)
+    returns: bool = False  # a `return` anywhere in the body: it may come back before its tail
+
 
 
 @dataclass
 class Frame:
-    kind: str  # brace, paren, case; fn-brace / fn-paren close a function
-    state: str = ""  # a case's head | pattern | body
+    kind: str  # brace, paren, case, if; fn-brace / fn-paren close a function
+    state: str = ""  # a case's head | pattern | body; an if's cond | body | else
+    tail: str = ""  # the last command word directly inside; "" when it is conditional or a child's
+
+    guard: bool = False  # a `{ }` that is the right side of `&&`/`||`
 
 
 @dataclass
@@ -192,6 +234,12 @@ class Context:
     sourcing: bool = False  # `source`/`.` read: the next word is the file it sources
     command: Command | None = None  # the simple command being read
     assigned: bool = False  # an assignment word opened this command: the next word is its name
+    guard: str | None = None  # an and-or right side's last word, until its list is known to end
+    # The command being read runs on a condition or in a child (after &&, ||, |), so it is no
+    # tail. Held over prefixes (`a && X=y exit`, `a && ! exit`) until the list ends.
+    conditional: bool = False
+    # Right after `&&`/`||`: the next command is the list's right side. Held over prefixes.
+    operand: bool = False
 
     def case(self) -> Frame | None:
         return self.frames[-1] if self.frames and self.frames[-1].kind == "case" else None
@@ -239,8 +287,10 @@ class Scanner:
             chars[a:b] = " " * (b - a)
         return Scanned(self.shown, "".join(chars), [*self.functions, self.main], self.sources, self.stdin_readers)
 
-    def branch(self) -> None:
-        (self.open[-1] if self.open else self.main).branches += 1
+    def unit(self) -> Function:
+        """The innermost function open here, else the file's top level."""
+        return self.open[-1] if self.open else self.main
+
 
     def peek(self, k: int = 0) -> str:
         return self.s[self.i + k] if self.i + k < self.n else ""
@@ -271,6 +321,9 @@ class Scanner:
                 self.end_command(ctx)
                 self.newline()
                 ctx.cmd = True
+                if ctx.last not in CONTINUED:  # `a ||⏎ b`: the list goes on over the newline
+                    ctx.conditional = ctx.operand = False
+
             elif c == "#":  # only at a token boundary: a word consumes its own `#`
                 start = self.i
                 while self.i < self.n and self.peek() != "\n":
@@ -287,6 +340,9 @@ class Scanner:
             elif c in "|&;()<>":
                 op = next(o for o in OPERATORS if self.s.startswith(o, self.i))
                 self.i += len(op)
+                if op in TARGETED and not ctx.dbl:
+                    self.redirect_target(ctx, op)
+                    continue
                 if self.operator(ctx, op, closer):
                     return
                 ctx.last = op
@@ -304,16 +360,26 @@ class Scanner:
 
     def operator(self, ctx: Context, op: str, closer: str | None) -> bool:
         """Apply one operator; True when it is the `)` that ends this code_until."""
+        if op in CHAINS:
+            ctx.guard = None  # `a || b && c`, `a || b | c`, `a || b &`: b is no guard's last
+        if op in ASIDE and ctx.frames:
+            ctx.frames[-1].tail = ""  # `exit 1 &`, `exit 1 | cat`: the exit is a child's
+        ctx.operand = op in ("&&", "||")
+        if op in CONTINUED:
+            ctx.conditional = True
+        elif op in (";", "&", ";;", ";&", ";;&"):
+            ctx.conditional = False
         if op in STDIN_REDIRECTS:
             self.redirect(ctx, op)
         elif op not in OUTPUT_REDIRECTS:
             self.end_command(ctx)
+
         case = ctx.case()
         if case is not None and case.state == "pattern" and not ctx.dbl and op in ("(", "|", ")"):
             if op == ")":  # a pattern's optional leading paren and its alternation are no-ops
                 case.state, ctx.cmd = "body", True
         elif op in ("&&", "||"):
-            self.branch()
+            self.unit().branches += 1
             ctx.cmd = True
         elif ctx.dbl and op in ("(", ")", "<", ">"):
             pass  # grouping and string comparison inside [[ ]]
@@ -327,7 +393,7 @@ class Scanner:
             ctx.cmd = True
         elif op == ")":
             if ctx.frames and ctx.frames[-1].kind in ("paren", "fn-paren"):
-                self.pop(ctx)
+                self.pop(ctx, op)
             elif not ctx.frames and closer == ")":
                 return True
             else:
@@ -340,6 +406,14 @@ class Scanner:
             ctx.cmd = True
         return False
 
+    def redirect_target(self, ctx: Context, op: str) -> None:
+        """A redirect and its target word, which is never a command word: `a || >&2 die x`
+        keeps die the right side's command. The parse state is left as it was."""
+        if op in STDIN_REDIRECTS:
+            self.redirect(ctx, op)
+        self.skip_blanks()
+        self.word()
+
     def on_word(self, ctx: Context, word: str, start: int, line: int) -> None:
         case = ctx.case()
         if ctx.dbl:
@@ -348,8 +422,7 @@ class Scanner:
             if case.state == "head" and word == "in":
                 case.state = "pattern"
             elif case.state == "pattern" and word == "esac":
-                ctx.frames.pop()
-                ctx.cmd = False
+                self.pop(ctx, word)
         elif ctx.sourcing and not ctx.cmd:
             self.sources.append(Source(word, line))
             ctx.sourcing = False
@@ -366,12 +439,16 @@ class Scanner:
     def command_word(self, ctx: Context, word: str, start: int, line: int) -> None:
         """A word in command position: a reserved word, a function definition or a command."""
         ctx.sourcing = False  # a `.` with no argument before the next command sources nothing
+        operand = ctx.operand
+        if word not in NOT_TAILS and ctx.frames:
+            ctx.frames[-1].tail = "" if ctx.conditional else word
         if ASSIGNMENT.match(word) and ctx.pending_fn is None:
             ctx.assigned = True  # `IFS= read …`: the command is the next word
             return
+        if word not in PREFIXES:
+            ctx.operand = False
         if ctx.assigned:  # bash reads no reserved word after an assignment: `a=1 if` runs `if`
-            ctx.cmd = False
-            self.begin_command(ctx, word, line)
+            self.simple_command(ctx, word, line, operand=operand)
             return
         self.track_loop(word)
         if word == "function":
@@ -380,8 +457,10 @@ class Scanner:
             name = self.word()
             self.empty_parens()
             ctx.pending_fn = Function(name, name_line, name_start)
+        elif word in IF_WORDS:
+            self.if_word(ctx, word, line)
         elif word in BRANCH_WORDS:
-            self.branch()
+            self.unit().branches += 1
             if word == "case":
                 ctx.frames.append(Frame("case", "head"))
             ctx.cmd = word not in ("case", "for")
@@ -389,13 +468,13 @@ class Scanner:
             pass
         elif word == "{":
             self.push(ctx, "brace")
+            ctx.frames[-1].guard = operand
         elif word == "}":
             if not ctx.frames or ctx.frames[-1].kind not in ("brace", "fn-brace"):
                 raise self.fail("unbalanced `}`", line)
-            self.pop(ctx)
+            self.pop(ctx, word)
         elif word == "esac" and ctx.case() is not None:
-            ctx.frames.pop()
-            ctx.cmd = False
+            self.pop(ctx, word)
         elif word == "[[":
             ctx.dbl, ctx.cmd = True, False
         elif word in ("source", "."):
@@ -403,8 +482,39 @@ class Scanner:
         elif self.empty_parens():
             ctx.pending_fn = Function(word, line, start)
         else:
-            ctx.cmd = False
-            self.begin_command(ctx, word, line)
+            self.simple_command(ctx, word, line, operand=operand)
+
+    def simple_command(self, ctx: Context, word: str, line: int, *, operand: bool) -> None:
+        """`word` is the command of a simple command; an and-or right side's is a guard's."""
+        ctx.cmd = False
+        if operand:
+            ctx.guard = word
+        if word == "return":
+            self.unit().returns = True
+        self.begin_command(ctx, word, line)
+
+    def if_word(self, ctx: Context, word: str, line: int) -> None:
+        """`if` opens a frame (cond, then body after `then`); `fi` closes it, a guard's when the
+        body was its only side; `elif` and `else` add a side, so it is no guard."""
+        if word == "if":
+            self.unit().branches += 1
+            ctx.frames.append(Frame("if", "cond"))
+            return
+        if not ctx.frames or ctx.frames[-1].kind != "if":
+            raise self.fail(f"`{word}` outside an if", line)
+        frame = ctx.frames[-1]
+        if word == "fi":
+            if frame.state == "body" and frame.tail:
+                self.unit().guards.append(frame.tail)
+            self.pop(ctx, word)
+        elif word == "then" and frame.state == "cond":
+            frame.state = "body"
+        elif word == "elif":
+            frame.state = "else"
+            self.unit().branches += 1
+        else:  # `else`, or the `then` after an elif
+            frame.state = "else"
+
 
     # -- stdin-in-read-loop -------------------------------------------------------------
 
@@ -443,6 +553,9 @@ class Scanner:
         command.redirected = True
 
     def end_command(self, ctx: Context) -> None:
+        if ctx.guard is not None:  # the and-or list ended with the guard's side
+            self.unit().guards.append(ctx.guard)
+            ctx.guard = None
         command, ctx.command, ctx.assigned = ctx.command, None, False
         if command is None:
             return
@@ -456,15 +569,25 @@ class Scanner:
     def push(self, ctx: Context, kind: str) -> None:
         """Open a `{`/`(` frame; a pending definition's opens the function's body."""
         ctx.frames.append(Frame(kind))
+        ctx.conditional = False  # inside, a command is unconditional relative to the frame
+
         if ctx.pending_fn is not None:
             self.functions.append(ctx.pending_fn)
             self.open.append(ctx.pending_fn)
             ctx.pending_fn = None
         ctx.cmd = True
 
-    def pop(self, ctx: Context) -> None:
-        if ctx.frames.pop().kind.startswith("fn-"):
-            self.open.pop().end = self.i
+    def pop(self, ctx: Context, closer: str) -> None:
+        """Close the innermost frame; `closer` becomes the enclosing frame's tail."""
+        frame = ctx.frames.pop()
+        if frame.kind.startswith("fn-"):
+            fn = self.open.pop()
+            fn.end = self.i
+            fn.tail = frame.tail if frame.kind == "fn-brace" else ""  # a subshell's exit returns
+        if frame.guard and frame.tail:
+            ctx.guard = frame.tail
+        if ctx.frames:
+            ctx.frames[-1].tail = closer
         ctx.cmd = False
 
     def empty_parens(self) -> bool:
@@ -669,23 +792,73 @@ def scan_files(root: Path, files: list[Path]) -> list[Scanned]:
 # ------------------------------------------------------------------------------ keys
 
 
+class Leaves:
+    """Which guard words leave: GUARD_EXITS, or a call to a function whose body ends in `exit`
+    (directly or through another such function: `usage() { die …; }`) and holds no `return`
+    (metrics_collect's `refuse_missing` returns when nothing is missing).
+
+
+    A name resolves to its definitions in the guard's own file, else to every definition in the
+    set, and leaves only when all of them do: `fail() { …; rc=1; }` and `die() { …; exit 2; }`
+    share names across devkit's scripts. Least fixed point, so mutual recursion never leaves.
+    """
+
+    def __init__(self, scanned: list[Scanned]) -> None:
+        self.tails: list[tuple[str, str]] = []  # (file, tail) per definition
+        self.local: dict[str, dict[str, list[int]]] = {s.shown: {} for s in scanned}
+        self.anywhere: dict[str, list[int]] = {}
+        for s in scanned:
+            for f in s.units:
+                if f.name != MAIN:
+                    self.local[s.shown].setdefault(f.name, []).append(len(self.tails))
+                    self.anywhere.setdefault(f.name, []).append(len(self.tails))
+                    # A body that may return before its tail never leaves for sure.
+                    self.tails.append((s.shown, "" if f.returns else f.tail))
+        self.exits = [False] * len(self.tails)
+        changed = True
+        while changed:
+            changed = False
+            for i, (path, tail) in enumerate(self.tails):
+                if not self.exits[i] and (tail == "exit" or self.calls_exit(tail, path)):
+                    self.exits[i] = changed = True
+
+    def calls_exit(self, word: str, path: str) -> bool:
+        ids = self.local[path].get(word) or self.anywhere.get(word, [])
+        return bool(ids) and all(self.exits[i] for i in ids)
+
+    def __call__(self, word: str, path: str) -> bool:
+        return word in GUARD_EXITS or self.calls_exit(word, path)
+
+
+def counted_branches(scanned: list[Scanned]) -> list[tuple[Function, str, int]]:
+    """(unit, path, its branches less its guards) for every unit (module docstring: Guards)."""
+    leaves = Leaves(scanned)
+    return [
+        (f, s.shown, f.branches - sum(leaves(word, s.shown) for word in f.guards))
+        for s in scanned for f in s.units
+    ]  # fmt: skip
+
+
 def complexity(scanned: list[Scanned], scope: str) -> Collected:
-    units = [(f, s.shown) for s in scanned for f in s.units]
+    units = counted_branches(scanned)
     over = sorted(
-        ((f, path) for f, path in units if f.branches > BRANCHES_THRESHOLD),
-        key=lambda p: (-p[0].branches, p[1], p[0].line),
+
+        (u for u in units if u[2] > BRANCHES_THRESHOLD), key=lambda u: (-u[2], u[1], u[0].line)
     )
     key = f"complexity.{scope}.branches_over_{BRANCHES_THRESHOLD}"
     return Collected(
-        keys={f"complexity.{scope}.branches_max": max((f.branches for f, _ in units), default=0),
+        keys={f"complexity.{scope}.branches_max": max((n for _, _, n in units), default=0),
               key: len(over)},
-        findings={key: [f"{path}:{f.line} {f.name} branches={f.branches}" for f, path in over]},
+        findings={key: [f"{path}:{f.line} {f.name} branches={n}" for f, path, n in over]},
     )  # fmt: skip
 
 
-def dead(scanned: list[Scanned], scope: str) -> Collected:
+def dead(scanned: list[Scanned], scope: str, entries: frozenset[str]) -> Collected:
     """A function is used when its name appears in the set's code outside its own body."""
     defined = {f.name for s in scanned for f in s.units if f.name != MAIN}
+    stale = sorted(entries - defined)
+    if stale:
+        raise CollectorError(f"--entry {' '.join(stale)}: no function of that name in the set")
     uses: dict[str, list[tuple[str, int]]] = {name: [] for name in defined}
     for s in scanned:
         for m in NAME.finditer(s.code):
@@ -694,7 +867,7 @@ def dead(scanned: list[Scanned], scope: str) -> Collected:
     unused = []
     for s in scanned:
         for f in s.units:
-            if f.name == MAIN or f.name in ENTRY_POINTS:
+            if f.name == MAIN or f.name in ENTRY_POINTS or f.name in entries:
                 continue
             outside = [u for u in uses[f.name] if u[0] != s.shown or not f.start <= u[1] < f.end]
             if not outside:
@@ -822,6 +995,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--shellcheck", action="store_true", help="shellcheck errors and warnings")
     parser.add_argument("--complexity", action="store_true", help="branches per function")
     parser.add_argument("--dead", action="store_true", help="functions nothing calls")
+    parser.add_argument("--entry", action="append", default=[], metavar="NAME",
+                        help="with --dead: a function called from outside the set")  # fmt: skip
+
     parser.add_argument("--cycles", action="store_true", help="files that source each other")
     parser.add_argument("--fan", action="store_true", help="how many files a file sources, and is sourced by")
     parser.add_argument(
@@ -840,10 +1016,16 @@ def collect(args: argparse.Namespace) -> Collected:
         raise CollectorError(f"--scope {args.scope!r} must match [A-Za-z0-9_-]+")
     if not (args.shellcheck or args.complexity or args.dead or args.cycles or args.fan):
         raise CollectorError("nothing to collect: pass --shellcheck, --complexity, --dead, --cycles or --fan")
+    if args.entry and not args.dead:
+        raise CollectorError("--entry declares an entry point for --dead; pass --dead too")
     files = source_files(root, args.src or list(DEFAULT_SRC), args.exclude)
     parts: list[Collected] = []
     scanned = scan_files(root, files)
-    parts += [m(scanned, args.scope) for w, m in ((args.complexity, complexity), (args.dead, dead)) if w]
+    if args.complexity:
+        parts.append(complexity(scanned, args.scope))
+    if args.dead:
+        parts.append(dead(scanned, args.scope, frozenset(args.entry)))
+
     if args.cycles or args.fan:
         parts.append(coupling(root, scanned, files, args.scope, cycles=args.cycles, fan=args.fan))
     if args.shellcheck:

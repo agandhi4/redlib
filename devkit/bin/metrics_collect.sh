@@ -155,35 +155,38 @@ usage() {
 }
 die() { echo "metrics_collect: $*" >&2; exit 2; }
 
-[ $# -ge 1 ] || usage
-SUB=$1
-shift
-case " $SUBCOMMANDS " in *" $SUB "*) ;; *) usage ;; esac
-CONF=scripts/ci/metrics.conf
-BOUNDS=docs/metrics/ratchet.json
-OUT=build/metrics.json
-# Inside the merged hop the outer call's --conf/--bounds/--out arrive as env (tighten_on_merge):
-# the repo's metrics-tighten recipe passes no flags of its own, so make cannot carry them.
-if [ "$SUB" = tighten ] && [ -n "${METRICS_TIGHTEN_MERGED:-}" ]; then
-  CONF=${METRICS_TIGHTEN_CONF:-$CONF}
-  BOUNDS=${METRICS_TIGHTEN_BOUNDS:-$BOUNDS}
-  OUT=${METRICS_TIGHTEN_OUT:-$OUT}
-fi
-# --fresh, or TIGHTEN_RUN_TIERS=fresh (the spelling a make target passes): rerun every tier input.
-FRESH=0
-[ "${TIGHTEN_RUN_TIERS:-0}" != fresh ] || FRESH=1
-QUICK=0
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --fresh) FRESH=1 ;;
-    --quick) QUICK=1 ;;
-    --conf) [ $# -ge 2 ] || usage; CONF=$2; shift ;;
-    --bounds) [ $# -ge 2 ] || usage; BOUNDS=$2; shift ;;
-    --out) [ $# -ge 2 ] || usage; OUT=$2; shift ;;
-    *) usage ;;
-  esac
+# parse_args "$@": SUB, CONF, BOUNDS, OUT, FRESH and QUICK.
+parse_args() {
+  [ $# -ge 1 ] || usage
+  SUB=$1
   shift
-done
+  case " $SUBCOMMANDS " in *" $SUB "*) ;; *) usage ;; esac
+  CONF=scripts/ci/metrics.conf
+  BOUNDS=docs/metrics/ratchet.json
+  OUT=build/metrics.json
+  # Inside the merged hop the outer call's --conf/--bounds/--out arrive as env (tighten_on_merge):
+  # the repo's metrics-tighten recipe passes no flags of its own, so make cannot carry them.
+  if [ "$SUB" = tighten ] && [ -n "${METRICS_TIGHTEN_MERGED:-}" ]; then
+    CONF=${METRICS_TIGHTEN_CONF:-$CONF}
+    BOUNDS=${METRICS_TIGHTEN_BOUNDS:-$BOUNDS}
+    OUT=${METRICS_TIGHTEN_OUT:-$OUT}
+  fi
+  # --fresh, or TIGHTEN_RUN_TIERS=fresh (the spelling a make target passes): rerun every tier input.
+  FRESH=0
+  [ "${TIGHTEN_RUN_TIERS:-0}" != fresh ] || FRESH=1
+  QUICK=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --fresh) FRESH=1 ;;
+      --quick) QUICK=1 ;;
+      --conf) [ $# -ge 2 ] || usage; CONF=$2; shift ;;
+      --bounds) [ $# -ge 2 ] || usage; BOUNDS=$2; shift ;;
+      --out) [ $# -ge 2 ] || usage; OUT=$2; shift ;;
+      *) usage ;;
+    esac
+    shift
+  done
+}
 # quick_args: --quick is check's, outside the gate, and never reruns a tier (it skips the
 # tier's collectors instead), so FRESH goes back to 0.
 quick_args() {
@@ -191,18 +194,21 @@ quick_args() {
   [ -z "${GATE_AREAS+x}" ] || die "--quick runs outside the gate only"
   FRESH=0
 }
-[ "$QUICK" = 0 ] || quick_args
-[ -f "$CONF" ] || die "no collectors file at $CONF (format: devkit/bin/metrics_collect.sh header)"
-# A whole rebaseline with no bounds file is first adoption: metrics_ratchet.py starts it from no
-# bounds and writes the file only when it succeeds (a failed run leaves none to commit), so
-# `make metrics-rebaseline` is the one command that creates it (devkit-check names it for a
-# hand-built repo). Every other mode needs the file.
-case "$SUB" in
-  snapshot) ;;
-  rebaseline) [ -n "${KEYS:-}" ] || [ -f "$BOUNDS" ] || first_adoption=1 ;;
-esac
-[ "$SUB" = snapshot ] || [ -n "${first_adoption:-}" ] || [ -f "$BOUNDS" ] \
-  || die "no bounds file at $BOUNDS (make metrics-rebaseline creates it)"
+# require_inputs: the conf, and the bounds every mode but snapshot and first adoption reads.
+require_inputs() {
+  local first_adoption=""
+  [ -f "$CONF" ] || die "no collectors file at $CONF (format: devkit/bin/metrics_collect.sh header)"
+  # A whole rebaseline with no bounds file is first adoption: metrics_ratchet.py starts it from no
+  # bounds and writes the file only when it succeeds (a failed run leaves none to commit), so
+  # `make metrics-rebaseline` is the one command that creates it (devkit-check names it for a
+  # hand-built repo). Every other mode needs the file.
+  case "$SUB" in
+    snapshot) ;;
+    rebaseline) [ -n "${KEYS:-}" ] || [ -f "$BOUNDS" ] || first_adoption=1 ;;
+  esac
+  [ "$SUB" = snapshot ] || [ -n "$first_adoption" ] || [ -f "$BOUNDS" ] \
+    || die "no bounds file at $BOUNDS (make metrics-rebaseline creates it)"
+}
 
 # ---- tighten on the merged tree (header: Merged tree) ---------------------------------------------
 # merge_needed: true when tighten must measure a merge, setting MERGE_MAIN and MERGE_HEAD (only
@@ -300,11 +306,6 @@ tighten_on_merge() {
   [ "$rc" -gt 1 ] || copy_back "$wt"
   exit "$rc"
 }
-! merge_needed || tighten_on_merge
-
-# ---- parse the conf: every line before anything runs ---------------------------------------
-metrics_conf_parse "$CONF"
-
 # ---- decide: RUN or SKIP per collector ---------------------------------------------------------
 # gate_job_ran <job>: true when gate.json records the job's seconds (the gate wrote it).
 gate_job_ran() { [ -f "$GATE_JSON" ] && grep -q "\"gate.$1.seconds\"" "$GATE_JSON"; }
@@ -331,19 +332,21 @@ skip_reason() {
 }
 RUN=()      # 1|0 per collector, by index
 SKIPPED=()  # names, for merge --skipped
-i=0
-while [ "$i" -lt "${#NAMES[@]}" ]; do
-  why=$(run_reason "${COLLECTOR_AREAS[$i]}")
-  if [ -n "$why" ]; then
-    RUN+=(1)
-    echo "metrics ${NAMES[$i]} RUN ($why)"
-  else
-    RUN+=(0)
-    SKIPPED+=("${NAMES[$i]}")
-    echo "metrics ${NAMES[$i]} SKIP ($(skip_reason "${COLLECTOR_AREAS[$i]}"))"
-  fi
-  i=$((i + 1))
-done
+decide_collectors() {
+  local i=0 why
+  while [ "$i" -lt "${#NAMES[@]}" ]; do
+    why=$(run_reason "${COLLECTOR_AREAS[$i]}")
+    if [ -n "$why" ]; then
+      RUN+=(1)
+      echo "metrics ${NAMES[$i]} RUN ($why)"
+    else
+      RUN+=(0)
+      SKIPPED+=("${NAMES[$i]}")
+      echo "metrics ${NAMES[$i]} SKIP ($(skip_reason "${COLLECTOR_AREAS[$i]}"))"
+    fi
+    i=$((i + 1))
+  done
+}
 
 # ---- tier inputs (header: Tier inputs) -------------------------------------------------------------
 # plan_job_target <job>: the make target of the plan's gate job <job>, or nothing. The plan is
@@ -479,54 +482,69 @@ quick_skip_unbuilt() {
   done <<<"$MISSING$STALE"
   MISSING="" STALE="" RERUN=""
 }
-# shellcheck disable=SC2031  # plan_job_target's subshell sets its own GATE_AREAS; this is the gate's
-if [ -z "${GATE_AREAS+x}" ]; then
+# rerun_tiers: under TIGHTEN_RUN_TIERS=1 or --fresh, make the RERUN targets, then judge again.
+rerun_tiers() {
+  local why=TIGHTEN_RUN_TIERS=1 f name dir _target
+  [ "$FRESH" = 0 ] || why=--fresh
+  while IFS=$'\t' read -r f name dir _target; do
+    [ -z "$f" ] || echo "metrics tiers STALE $f ($name; $([ "$FRESH" = 1 ] && echo "--fresh" || echo "older than the newest tracked change under $dir"))"
+  done <<<"$STALE"
+  echo "metrics tiers RUN ($why): make $RERUN"
+  # KEYS= : a `make metrics-rebaseline KEYS=<key>` hands KEYS to every sub-make through
+  # MAKEFLAGS, so a test that runs a scaffold's own rebaseline inherited it and refused a key
+  # that repo lacks (devkit #262: 19 new_contract/metrics failures). The tiers only measure.
+  # shellcheck disable=SC2086  # RERUN is a word list of make targets
+  make --no-print-directory $RERUN KEYS= || die "make $RERUN failed; the inputs above are still missing or stale"
+  FRESH=0
+  tier_input_state
+}
+# refuse_missing: exit 2 naming each MISSING input and what writes it; nothing when none is.
+refuse_missing() {
+  [ -n "$MISSING" ] || return 0
+  local f name _dir target rerun=metrics-$SUB
+  echo "metrics_collect: $SUB needs files the test tiers write; missing here:" >&2
+  while IFS=$'\t' read -r f name _dir target; do
+    [ -n "$f" ] || continue
+    if [ -n "$target" ]; then
+      echo "  $f  ($name; make $target)" >&2
+    elif [ "${name#tier-}" != "$name" ]; then
+      echo "  $f  ($name: $BOUNDS holds its floor, and no Makefile rule runs tier_guard.sh ${name#tier-})" >&2
+    else
+      echo "  $f  ($name; no gate job in scripts/ci/gate_plan.sh writes it: give the collector a job:<name> area)" >&2
+    fi
+  done <<<"$MISSING"
+  [ "$SUB" != check ] || rerun=ci-metrics
+  [ -z "$RERUN" ] || echo "  run: make $RERUN   (or TIGHTEN_RUN_TIERS=1 make $rerun to run them first)" >&2
+  exit 2
+}
+# prepare_tier_inputs (outside the gate only: the gate ran the tiers this run reads): the
+# inputs the running collectors and floor tiers need, rerun or refused (header: Tier inputs).
+prepare_tier_inputs() {
+  # shellcheck disable=SC2031  # plan_job_target's subshell sets its own GATE_AREAS; this is the gate's
+  [ -z "${GATE_AREAS+x}" ] || return 0
   FLOOR_TIERS=$(floor_tiers) || exit 2
   tier_input_state
   [ "$QUICK" = 0 ] || quick_skip_unbuilt
-  if [ -n "$RERUN" ] && { [ "$FRESH" = 1 ] || [ "${TIGHTEN_RUN_TIERS:-0}" = 1 ]; }; then
-    why=TIGHTEN_RUN_TIERS=1
-    [ "$FRESH" = 0 ] || why=--fresh
-    while IFS=$'\t' read -r f name dir _target; do
-      [ -z "$f" ] || echo "metrics tiers STALE $f ($name; $([ "$FRESH" = 1 ] && echo "--fresh" || echo "older than the newest tracked change under $dir"))"
-    done <<<"$STALE"
-    echo "metrics tiers RUN ($why): make $RERUN"
-    # shellcheck disable=SC2086  # RERUN is a word list of make targets
-    make --no-print-directory $RERUN || die "make $RERUN failed; the inputs above are still missing or stale"
-    FRESH=0
-    tier_input_state
-  fi
+  if [ -n "$RERUN" ] && { [ "$FRESH" = 1 ] || [ "${TIGHTEN_RUN_TIERS:-0}" = 1 ]; }; then rerun_tiers; fi
   report_stale
-  if [ -n "$MISSING" ]; then
-    echo "metrics_collect: $SUB needs files the test tiers write; missing here:" >&2
-    while IFS=$'\t' read -r f name _dir target; do
-      [ -n "$f" ] || continue
-      if [ -n "$target" ]; then
-        echo "  $f  ($name; make $target)" >&2
-      elif [ "${name#tier-}" != "$name" ]; then
-        echo "  $f  ($name: $BOUNDS holds its floor, and no Makefile rule runs tier_guard.sh ${name#tier-})" >&2
-      else
-        echo "  $f  ($name; no gate job in scripts/ci/gate_plan.sh writes it: give the collector a job:<name> area)" >&2
-      fi
-    done <<<"$MISSING"
-    rerun=metrics-$SUB
-    [ "$SUB" != check ] || rerun=ci-metrics
-    [ -z "$RERUN" ] || echo "  run: make $RERUN   (or TIGHTEN_RUN_TIERS=1 make $rerun to run them first)" >&2
-    exit 2
-  fi
-fi
+  refuse_missing
+}
 
 # ---- run ------------------------------------------------------------------------------------------
 # shellcheck source=bin/toolchain_path.sh
 . "$HERE/toolchain_path.sh"
-# Also resolves and exports DEVKIT_PYTHON (devkit_python), which the ratchet and scorecard calls
-# below run on, so a direct run needs no parent to have set it (floor_tiers resolved it already
-# when the bounds hold a floor).
-toolchain_path . || die "$TOOLCHAIN_ERROR"
-mkdir -p "$COLLECT_DIR" || die "cannot create $COLLECT_DIR"
-for name in ${NAMES[@]+"${NAMES[@]}"}; do
-  rm -f "$COLLECT_DIR/$name.json" "$COLLECT_DIR/$name.log" "$COLLECT_DIR/$name.findings.txt"
-done
+# prepare_run: the toolchain on PATH and each collector's previous output gone. Also resolves
+# and exports DEVKIT_PYTHON (devkit_python), which the ratchet and scorecard calls below run on,
+# so a direct run needs no parent to have set it (floor_tiers resolved it already when the
+# bounds hold a floor).
+prepare_run() {
+  local name
+  toolchain_path . || die "$TOOLCHAIN_ERROR"
+  mkdir -p "$COLLECT_DIR" || die "cannot create $COLLECT_DIR"
+  for name in ${NAMES[@]+"${NAMES[@]}"}; do
+    rm -f "$COLLECT_DIR/$name.json" "$COLLECT_DIR/$name.log" "$COLLECT_DIR/$name.findings.txt"
+  done
+}
 # print_findings: the last line of every run from here on (EXIT trap: the ratchet's `exit 1`
 # included), naming the findings files this run wrote.
 # shellcheck disable=SC2329  # invoked by the EXIT trap
@@ -535,7 +553,6 @@ print_findings() {
   for f in "$COLLECT_DIR"/*.findings.txt; do [ -f "$f" ] && files+=("$f"); done
   [ ${#files[@]} -eq 0 ] || echo "findings: ${files[*]}"
 }
-trap print_findings EXIT
 # A collector's "a tool it runs is not installed" (metrics/*: MissingToolError). The gate fails on it
 # like any collector failure; --quick, a preview in a worktree that may predate its install,
 # skips it naming the fix.
@@ -549,61 +566,64 @@ missing_tool_reason() {
   if [ -f Makefile ] && grep -qE '^metrics-deps:' Makefile; then why="$why; make metrics-deps installs it"; fi
   printf '%s' "$why"
 }
-t0=$SECONDS
-ran=0
-i=0
-while [ "$i" -lt "${#NAMES[@]}" ]; do
-  if [ "${RUN[$i]}" = 1 ]; then
-    name=${NAMES[$i]}
-    log=$COLLECT_DIR/$name.log
-    out=$COLLECT_DIR/$name.json
-    command=${COMMANDS[$i]}
-    if [[ " $command " =~ $LIST_OUT_COLLECTOR ]] && [[ "$command" != *--list-out* ]]; then
-      command="$command --list-out $COLLECT_DIR/$name.findings.txt"
-    fi
-    bash -c "$command" </dev/null >"$log" 2>&1
-    rc=$?
-    if [ "$rc" -eq "$EXIT_MISSING_TOOL" ] && [ "$QUICK" = 1 ]; then
-      SKIPPED+=("$name")
-      echo "metrics $name SKIP (--quick, tool missing: $(missing_tool_reason "$log"))"
-      i=$((i + 1))
-      continue
-    fi
-    if [ "$rc" -ne 0 ]; then
-      echo "metrics $name FAIL (exit $rc; log: $log)"
-      tail -n 40 "$log"
-      exit 2
-    fi
-    if [ ! -f "$out" ]; then
-      echo "metrics $name FAIL (exit 0 but wrote no $out; log: $log)"
-      tail -n 40 "$log"
-      exit 2
-    fi
-    ran=$((ran + 1))
+# run_collector <i>: run collector <i>, which must exit 0 and write its <name>.json, else exit 2;
+# 1 when --quick skipped it for a missing tool (added to SKIPPED).
+run_collector() {
+  local name=${NAMES[$1]} command=${COMMANDS[$1]} log out rc
+  log=$COLLECT_DIR/$name.log
+  out=$COLLECT_DIR/$name.json
+  if [[ " $command " =~ $LIST_OUT_COLLECTOR ]] && [[ "$command" != *--list-out* ]]; then
+    command="$command --list-out $COLLECT_DIR/$name.findings.txt"
   fi
-  i=$((i + 1))
-done
-echo "metrics collected $ran of ${#NAMES[@]} collector(s) in $((SECONDS - t0))s (skipped ${#SKIPPED[@]})"
+  bash -c "$command" </dev/null >"$log" 2>&1
+  rc=$?
+  if [ "$rc" -eq "$EXIT_MISSING_TOOL" ] && [ "$QUICK" = 1 ]; then
+    SKIPPED+=("$name")
+    echo "metrics $name SKIP (--quick, tool missing: $(missing_tool_reason "$log"))"
+    return 1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "metrics $name FAIL (exit $rc; log: $log)"
+    tail -n 40 "$log"
+    exit 2
+  fi
+  if [ ! -f "$out" ]; then
+    echo "metrics $name FAIL (exit 0 but wrote no $out; log: $log)"
+    tail -n 40 "$log"
+    exit 2
+  fi
+}
+run_collectors() {
+  local t0=$SECONDS ran=0 i=0
+  while [ "$i" -lt "${#NAMES[@]}" ]; do
+    if [ "${RUN[$i]}" = 1 ] && run_collector "$i"; then ran=$((ran + 1)); fi
+    i=$((i + 1))
+  done
+  echo "metrics collected $ran of ${#NAMES[@]} collector(s) in $((SECONDS - t0))s (skipped ${#SKIPPED[@]})"
+}
 
 # ---- merge, then the ratchet ----------------------------------------------------------------------
-INPUTS=()
-for f in "$COLLECT_DIR"/*.json; do
-  [ -f "$f" ] && INPUTS+=("$f")
-done
-MERGE_ARGS=()
-for name in ${SKIPPED[@]+"${SKIPPED[@]}"}; do MERGE_ARGS+=(--skipped "$name"); done
-"$DEVKIT_PYTHON" -I "$RATCHET" merge --out "$OUT" ${MERGE_ARGS[@]+"${MERGE_ARGS[@]}"} \
-  -- ${INPUTS[@]+"${INPUTS[@]}"} || exit $?
-[ "$SUB" != snapshot ] || exit 0
-
-RATCHET_ARGS=("$SUB" --snapshot "$OUT" --bounds "$BOUNDS")
-if [ "$SUB" = check ] && [ "${METRICS_REBASELINE:-0}" = 1 ]; then RATCHET_ARGS+=(--rebaseline-ok); fi
+# merge_snapshot: every collector's and tier's JSON into OUT, the skipped collectors named.
+merge_snapshot() {
+  local inputs=() merge_args=() f name
+  for f in "$COLLECT_DIR"/*.json; do
+    [ -f "$f" ] && inputs+=("$f")
+  done
+  for name in ${SKIPPED[@]+"${SKIPPED[@]}"}; do merge_args+=(--skipped "$name"); done
+  "$DEVKIT_PYTHON" -I "$RATCHET" merge --out "$OUT" ${merge_args[@]+"${merge_args[@]}"} \
+    -- ${inputs[@]+"${inputs[@]}"} || exit $?
+}
+# ratchet_args: RATCHET_ARGS for SUB, and KEYED=1 for a rebaseline of named KEYS.
 KEYED=0
-if [ "$SUB" = rebaseline ] && [ -n "${KEYS:-}" ]; then KEYED=1; RATCHET_ARGS+=(--keys "$KEYS"); fi
-if [ "$SUB" = tighten ] && [ "${SEED:-0}" = 1 ]; then RATCHET_ARGS+=(--seed); fi
-# The modes an author commits from also refresh the committed report-only copy beside the
-# bounds; check (the gate) never writes a tracked file.
-case "$SUB" in tighten|rebaseline) RATCHET_ARGS+=(--report-only "$(dirname "$BOUNDS")/report-only.json") ;; esac
+ratchet_args() {
+  RATCHET_ARGS=("$SUB" --snapshot "$OUT" --bounds "$BOUNDS")
+  if [ "$SUB" = check ] && [ "${METRICS_REBASELINE:-0}" = 1 ]; then RATCHET_ARGS+=(--rebaseline-ok); fi
+  if [ "$SUB" = rebaseline ] && [ -n "${KEYS:-}" ]; then KEYED=1; RATCHET_ARGS+=(--keys "$KEYS"); fi
+  if [ "$SUB" = tighten ] && [ "${SEED:-0}" = 1 ]; then RATCHET_ARGS+=(--seed); fi
+  # The modes an author commits from also refresh the committed report-only copy beside the
+  # bounds; check (the gate) never writes a tracked file.
+  case "$SUB" in tighten|rebaseline) RATCHET_ARGS+=(--report-only "$(dirname "$BOUNDS")/report-only.json") ;; esac
+}
 # quick_ratchet: --quick's ratchet, its lines then the pre-push hint; exits with the ratchet's code.
 quick_ratchet() {
   local out rc=0
@@ -612,6 +632,40 @@ quick_ratchet() {
   ! grep -q ' BETTER — run make metrics-tighten' <<<"$out" || echo "BETTER: run make metrics-tighten before push"
   exit "$rc"
 }
+# The scorecard ratchet (bin/scorecard.py --mode): opt-in by committing docs/metrics/scorecard.json
+# (`scorecard.py . --mode rebaseline` once). Same subcommand, same label semantics, after the
+# metric bounds so its evidence lines read the snapshot this job just merged.
+# check also runs when only main has the file: deleting it lowers every track, which needs the label.
+run_scorecard() {
+  local sc_mode=$SUB sc_args
+  SCORECARD_BOUNDS=${SCORECARD_BOUNDS:-docs/metrics/scorecard.json}
+  [ -f "$SCORECARD_BOUNDS" ] \
+    || { [ "$SUB" = check ] && git cat-file -e "origin/main:$SCORECARD_BOUNDS" 2>/dev/null; } || return 0
+  [ "$KEYED" = 0 ] || sc_mode=check
+  sc_args=(. --mode "$sc_mode" --bounds-file "$SCORECARD_BOUNDS")
+  if [ "$sc_mode" = check ] && { [ "${METRICS_REBASELINE:-0}" = 1 ] || [ "$KEYED" = 1 ]; }; then
+    sc_args+=(--rebaseline-ok)
+  fi
+  "$DEVKIT_PYTHON" -I "$HERE/scorecard.py" "${sc_args[@]}" | grep -E '^(scorecard-ratchet(-bound)?:?|scorecard|metrics-rebaseline:) ' || exit "${PIPESTATUS[0]}"
+  if [ "$SUB" = rebaseline ] && [ "$KEYED" = 0 ]; then
+    echo "metrics_collect: WARNING: $SCORECARD_BOUNDS was rewritten too (every check to today's state); to loosen only named bounds, restore both files and run \`make metrics-rebaseline KEYS=<key>[,<key>]\`" >&2
+  fi
+}
+
+# ---- the run, in the header's order -----------------------------------------------------------
+parse_args "$@"
+[ "$QUICK" = 0 ] || quick_args
+require_inputs
+! merge_needed || tighten_on_merge
+metrics_conf_parse "$CONF"  # every line before anything runs
+decide_collectors
+prepare_tier_inputs
+prepare_run
+trap print_findings EXIT
+run_collectors
+merge_snapshot
+[ "$SUB" != snapshot ] || exit 0
+ratchet_args
 [ "$QUICK" = 0 ] || quick_ratchet
 "$DEVKIT_PYTHON" -I "$RATCHET" "${RATCHET_ARGS[@]}"
 ratchet_rc=$?
@@ -620,23 +674,5 @@ ratchet_rc=$?
 if [ "$ratchet_rc" -ne 0 ] && { [ "$SUB" != tighten ] || [ "$ratchet_rc" -ne 1 ]; }; then
   exit "$ratchet_rc"
 fi
-
-# The scorecard ratchet (bin/scorecard.py --mode): opt-in by committing docs/metrics/scorecard.json
-# (`scorecard.py . --mode rebaseline` once). Same subcommand, same label semantics, after the
-# metric bounds so its evidence lines read the snapshot this job just merged.
-# check also runs when only main has the file: deleting it lowers every track, which needs the label.
-SCORECARD_BOUNDS=${SCORECARD_BOUNDS:-docs/metrics/scorecard.json}
-if [ -f "$SCORECARD_BOUNDS" ] \
-  || { [ "$SUB" = check ] && git cat-file -e "origin/main:$SCORECARD_BOUNDS" 2>/dev/null; }; then
-  SC_MODE=$SUB
-  [ "$KEYED" = 0 ] || SC_MODE=check
-  SC_ARGS=(. --mode "$SC_MODE" --bounds-file "$SCORECARD_BOUNDS")
-  if [ "$SC_MODE" = check ] && { [ "${METRICS_REBASELINE:-0}" = 1 ] || [ "$KEYED" = 1 ]; }; then
-    SC_ARGS+=(--rebaseline-ok)
-  fi
-  "$DEVKIT_PYTHON" -I "$HERE/scorecard.py" "${SC_ARGS[@]}" | grep -E '^(scorecard-ratchet(-bound)?:?|scorecard|metrics-rebaseline:) ' || exit "${PIPESTATUS[0]}"
-  if [ "$SUB" = rebaseline ] && [ "$KEYED" = 0 ]; then
-    echo "metrics_collect: WARNING: $SCORECARD_BOUNDS was rewritten too (every check to today's state); to loosen only named bounds, restore both files and run \`make metrics-rebaseline KEYS=<key>[,<key>]\`" >&2
-  fi
-fi
+run_scorecard
 exit "$ratchet_rc"

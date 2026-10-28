@@ -573,8 +573,18 @@ def wired_ratchet(repo: Repo, stack: set[str]) -> None:
             if st
             else "no statements.* keys; wire metrics/statements.py + the suite's statement fixture",
         )
+        # A budget is a maximum over one-row worlds, blind to an N+1 (statements.py, Scaling);
+        # no per_row key means no scaling test is wired, never that nothing grows.
+        scaled = [k for k in st if k.endswith(".per_row")]
+        repo.add(
+            "ratchet.statements_scaling",
+            True if scaled else None,
+            f"{len(scaled)} route(s) measured per row" if scaled else "no statements.*.per_row key",
+            mechanism="a scaling test recording <METHOD>:/<route>@<rows> samples (statements.py)",
+        )
     else:
         repo.na("ratchet.statements", "no database tier")
+        repo.na("ratchet.statements_scaling", "no database tier")
     if has_frontend(repo):
         bundle = sorted(k for k in repo.metrics if k.startswith("bundle."))
         gated = [k for k in bundle if not repo.is_report_only(k)]
@@ -596,7 +606,8 @@ def wired_ratchet(repo: Repo, stack: set[str]) -> None:
     if not locks and "compose" not in stack:
         repo.na("ratchet.vuln", "no lockfile and no compose file")
         return
-    vuln = [k for k in repo.metrics if k.startswith("vuln.")]
+    # vuln.py --compose writes images.* (its pin counts), the measurement a compose file has.
+    vuln = [k for k in repo.metrics if k.startswith(("vuln.", "images."))]
     # vuln.py's own count of what it queried: every scope at 0 is a dev-only lockfile, nothing to
     # expose. A snapshot from before the key existed lacks it and reads as measured.
     packages = [repo.metrics[k] for k in vuln if k.endswith(".packages")]
@@ -609,7 +620,7 @@ def wired_ratchet(repo: Repo, stack: set[str]) -> None:
         repo.add(
             "ratchet.vuln",
             bool(vuln),
-            f"{len(vuln)} vuln.* key(s) (report-only)"
+            f"{len(vuln)} vuln.*/images.* key(s)"
             if vuln
             else "no vuln.* keys; wire metrics/vuln.py (--compose for image tags), "
                  f"then `make metrics-tighten` commits {REPORT_ONLY_FILE}",
@@ -1154,7 +1165,49 @@ def wired_listed(repo: Repo, state_home: Path, devkit: Path = DEVKIT) -> None:
         listed,
         f"listed in {source}"
         if listed
-        else f"not in {source} (devkit new adds it; add the entry by hand for an older repo)",
+        # The exact entry, so the fix is one line in a devkit PR: a fleet survey found kitchen
+        # missing (2026-10-27), after claude-kit (#248); devkit new adds it only for a new repo.
+        else f'not in {source}: add `"{repo.name}": {{}}` to its "repos", sorted, in a devkit PR '
+        "(devkit new adds it for a new repo; an older repo needs it by hand)",
+        scope="fleet",
+    )
+
+
+def wired_auto_merge(repo: Repo, state_home: Path, devkit: Path = DEVKIT) -> None:
+    """GitHub auto-merge merges on GitHub's own conditions, around `make merge` (unresolved Codex
+    threads, a stale gate: claude-kit #25), so repos.json sets it false and this reads what GitHub
+    reports. Only a listed repo is asked: repos.json names its owner and casing, and an unlisted
+    one is repos_json's failure."""
+    fleet, source = fleet_repos(devkit, state_home)
+    if fleet is None:
+        repo.add(
+            "auto_merge",
+            None,
+            source,
+            scope="fleet",
+            mechanism=f"a devkit checkout or gh api access to {DEVKIT_SLUG}",
+        )
+        return
+    owner, names = fleet
+    key = next((n for n in names if n.lower() == repo.name), None)
+    if key is None:
+        repo.na("auto_merge", f"not in {source}", scope="fleet")
+        return
+    reported, why = gh_api(f"repos/{owner}/{key}", "--jq", ".allow_auto_merge")
+    if reported is None:
+        repo.add(
+            "auto_merge", None, why, scope="fleet", mechanism=f"gh api access to {owner}/{key}"
+        )
+        return
+    repo.add(
+        "auto_merge",
+        reported == "false",
+        f"GitHub reports allow_auto_merge {reported}"
+        + (
+            ""
+            if reported == "false"
+            else f": run `github/repo_settings.sh {key}` from the devkit checkout"
+        ),
         scope="fleet",
     )
 
@@ -1231,6 +1284,7 @@ def score_wired(
     if fleet:
         wired_currency(repo, conf)
         wired_listed(repo, state_home)
+        wired_auto_merge(repo, state_home)
     owner_items(repo, stack)
     return repo
 

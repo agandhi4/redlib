@@ -40,10 +40,12 @@
 #   10. Every relative Markdown link in README.md, the root AGENTS.md and docs/**/*.md resolves to
 #      a tracked file or directory (the index, as above). URLs, `#anchors`, root-absolute and
 #      links leaving the repo are skipped; links in code are not links.
-#   12. The root .gitattributes gives docs/decisions.md the union merge driver
-#      (`docs/decisions.md merge=union`), so two PRs that each append an entry rebase cleanly.
-#      `devkit/bin/hooks_check.sh --fix` (`make install`) adds it; why and the caveat live in
-#      bin/_gitattributes_lib.sh. Tracked file only: an untracked one helps nobody else.
+#   12. The root .gitattributes gives docs/decisions.md devkit's decisions merge driver
+#      (`docs/decisions.md merge=devkit-decisions`), so two PRs that each append an entry rebase
+#      cleanly, by date, one blank line apart. `merge=union`, the line until 2026-10-27, is
+#      reported too: it drops that blank line. `devkit/bin/hooks_check.sh --fix` (`make install`)
+#      adds or converts it; why lives in bin/_gitattributes_lib.sh. Tracked file only: an
+#      untracked one helps nobody else.
 #   13-16. The docs diet (decisions.md 2026-10-16): every agent session loads AGENTS.md, so it
 #      stays navigation-sized and uniform; reference material lives in docs/, which nothing loads
 #      unprompted.
@@ -153,8 +155,7 @@ docs_rule() {
 }
 
 # Payload trees (rule 0): `<dir> <reason>` per line in $PAYLOAD, read before the index so every
-# rule below sees only the repo's own agent docs. Functions, not top-level code: the metrics
-# ratchet counts this script's top level as one function (complexity.kit.branches_max).
+# rule below sees only the repo's own agent docs.
 payload_dirs=() payload_hits=()
 payload_read() {
   local pdir preason
@@ -223,85 +224,103 @@ allowance_of() {
 }
 
 # ---- 1. pair shape ---------------------------------------------------------------------------
+# Every repo AGENTS.md the pair rule accepts. Read by rules 2, 4, 13, 15, --fix and closet's
+# scripts/ci/docs_rules.sh, so it stays a global.
 agents_files=()
-seen=" "
-for dir in ${dirs[@]+"${dirs[@]}"}; do
-  case "$seen" in *" $dir "*) continue ;; esac
-  seen="$seen$dir "
-  where=$dir; [ "$dir" = . ] && where="repo root"
-  am=$(mode_of "$dir" AGENTS.md)
-  cm=$(mode_of "$dir" CLAUDE.md)
-  prefix=; [ "$dir" = . ] || prefix=$dir/
-  if [ -z "$am" ]; then
-    docs_fail "$where: CLAUDE.md without AGENTS.md; make it AGENTS.md and symlink CLAUDE.md -> AGENTS.md"
-    continue
-  fi
-  if ! is_regular "$am"; then
-    if [ "$am" = 120000 ]; then
-      docs_fail "$where: AGENTS.md is a symlink (reversed pair); make AGENTS.md the real file and CLAUDE.md -> AGENTS.md"
-    else
-      docs_fail "$where: AGENTS.md is not a regular file (mode $am)"
+rule_pair_shape() {
+  local seen=" " dir where am cm prefix target
+  for dir in ${dirs[@]+"${dirs[@]}"}; do
+    case "$seen" in *" $dir "*) continue ;; esac
+    seen="$seen$dir "
+    where=$dir; [ "$dir" = . ] && where="repo root"
+    am=$(mode_of "$dir" AGENTS.md)
+    cm=$(mode_of "$dir" CLAUDE.md)
+    prefix=; [ "$dir" = . ] || prefix=$dir/
+    if [ -z "$am" ]; then
+      docs_fail "$where: CLAUDE.md without AGENTS.md; make it AGENTS.md and symlink CLAUDE.md -> AGENTS.md"
+      continue
     fi
-    continue
-  fi
-  agents_files+=("${prefix}AGENTS.md")
-  if [ -z "$cm" ]; then
-    docs_fail "$where: AGENTS.md has no CLAUDE.md; add it with: ln -s AGENTS.md ${prefix}CLAUDE.md"
-  elif [ "$cm" != 120000 ]; then
-    docs_fail "$where: CLAUDE.md is a regular file; it must be a symlink to AGENTS.md"
-  else
-    target=$(readlink "${prefix}CLAUDE.md" 2>/dev/null || true)
-    [ "$target" = AGENTS.md ] || docs_fail "$where: CLAUDE.md points to '${target}'; it must point to AGENTS.md"
-  fi
-done
-# A root with either file was judged above; a root with neither has no agent instructions at all.
-[ -n "$(mode_of . AGENTS.md)$(mode_of . CLAUDE.md)" ] || docs_fail "repo root: no AGENTS.md"
+    if ! is_regular "$am"; then
+      if [ "$am" = 120000 ]; then
+        docs_fail "$where: AGENTS.md is a symlink (reversed pair); make AGENTS.md the real file and CLAUDE.md -> AGENTS.md"
+      else
+        docs_fail "$where: AGENTS.md is not a regular file (mode $am)"
+      fi
+      continue
+    fi
+    agents_files+=("${prefix}AGENTS.md")
+    if [ -z "$cm" ]; then
+      docs_fail "$where: AGENTS.md has no CLAUDE.md; add it with: ln -s AGENTS.md ${prefix}CLAUDE.md"
+    elif [ "$cm" != 120000 ]; then
+      docs_fail "$where: CLAUDE.md is a regular file; it must be a symlink to AGENTS.md"
+    else
+      target=$(readlink "${prefix}CLAUDE.md" 2>/dev/null || true)
+      [ "$target" = AGENTS.md ] || docs_fail "$where: CLAUDE.md points to '${target}'; it must point to AGENTS.md"
+    fi
+  done
+  # A root with either file was judged above; a root with neither has no agent instructions at all.
+  [ -n "$(mode_of . AGENTS.md)$(mode_of . CLAUDE.md)" ] || docs_fail "repo root: no AGENTS.md"
+}
 
 # ---- 2. size caps ----------------------------------------------------------------------------
-for f in ${agents_files[@]+"${agents_files[@]}"}; do
-  [ -f "$f" ] || { docs_fail "$f: tracked but missing from the working tree"; continue; }
-  size=$(size_of "$f")
-  cap=$(cap_of "$f")
-  allowed=$(allowance_of "$f")
-  if [ -z "$allowed" ]; then
-    [ "$size" -le "$cap" ] || docs_fail "$f: $size bytes, over the $cap-byte cap; trim it (or list it in $ALLOWLIST)"
-  elif [ "$size" -le "$cap" ]; then
-    docs_fail "$f: $size bytes is within the $cap-byte cap; remove it from $ALLOWLIST"
-  elif [ "$size" -gt "$allowed" ]; then
-    docs_fail "$f: $size bytes, over its $allowed-byte allowance in $ALLOWLIST; trim it"
-  elif [ $((size * 10)) -lt $((allowed * 9)) ]; then
-    docs_fail "$f: $size bytes, under 90% of its $allowed-byte allowance; tighten $ALLOWLIST to $size"
-  fi
-done
+rule_size_caps() {
+  local f size cap allowed
+  for f in ${agents_files[@]+"${agents_files[@]}"}; do
+    [ -f "$f" ] || { docs_fail "$f: tracked but missing from the working tree"; continue; }
+    size=$(size_of "$f")
+    cap=$(cap_of "$f")
+    allowed=$(allowance_of "$f")
+    if [ -z "$allowed" ]; then
+      [ "$size" -le "$cap" ] || docs_fail "$f: $size bytes, over the $cap-byte cap; trim it (or list it in $ALLOWLIST)"
+    elif [ "$size" -le "$cap" ]; then
+      docs_fail "$f: $size bytes is within the $cap-byte cap; remove it from $ALLOWLIST"
+    elif [ "$size" -gt "$allowed" ]; then
+      docs_fail "$f: $size bytes, over its $allowed-byte allowance in $ALLOWLIST; trim it"
+    elif [ $((size * 10)) -lt $((allowed * 9)) ]; then
+      docs_fail "$f: $size bytes, under 90% of its $allowed-byte allowance; tighten $ALLOWLIST to $size"
+    fi
+  done
+}
 
-if [ -f "$ALLOWLIST" ]; then
-  while read -r path bytes extra || [ -n "${path:-}" ]; do
-    case "$path" in ''|'#'*) continue ;; esac
-    case "$bytes" in ''|*[!0-9]*) docs_fail "$ALLOWLIST: '$path' needs a byte count: <path> <max-bytes>"; continue ;; esac
-    [ -z "${extra:-}" ] || docs_fail "$ALLOWLIST: '$path' has trailing fields; expected <path> <max-bytes>"
-    listed=0
-    for f in ${agents_files[@]+"${agents_files[@]}"}; do [ "$f" = "$path" ] && listed=1; done
-    [ $listed = 1 ] || docs_fail "$ALLOWLIST: '$path' is not a tracked AGENTS.md; remove the stale entry"
-  done < "$ALLOWLIST"
-fi
+# Every allowlist entry is <path> <max-bytes> for a tracked AGENTS.md.
+rule_allowlist_entries() {
+  local path bytes extra listed f
+  if [ -f "$ALLOWLIST" ]; then
+    while read -r path bytes extra || [ -n "${path:-}" ]; do
+      case "$path" in ''|'#'*) continue ;; esac
+      case "$bytes" in ''|*[!0-9]*) docs_fail "$ALLOWLIST: '$path' needs a byte count: <path> <max-bytes>"; continue ;; esac
+      [ -z "${extra:-}" ] || docs_fail "$ALLOWLIST: '$path' has trailing fields; expected <path> <max-bytes>"
+      listed=0
+      for f in ${agents_files[@]+"${agents_files[@]}"}; do [ "$f" = "$path" ] && listed=1; done
+      [ $listed = 1 ] || docs_fail "$ALLOWLIST: '$path' is not a tracked AGENTS.md; remove the stale entry"
+    done < "$ALLOWLIST"
+  fi
+}
 
 # ---- 3. decisions log ------------------------------------------------------------------------
-[ -n "$(git ls-files -- docs/decisions.md)" ] || docs_fail "docs/decisions.md is missing; every repo records decisions there"
+rule_decisions_log() {
+  [ -n "$(git ls-files -- docs/decisions.md)" ] || docs_fail "docs/decisions.md is missing; every repo records decisions there"
+}
 
 # ---- 4. retired tools ------------------------------------------------------------------------
-for f in ${agents_files[@]+"${agents_files[@]}"}; do
-  [ -f "$f" ] || continue
-  for word in $BANNED; do
-    while IFS= read -r hit; do
-      docs_fail "$f:${hit%%:*}: names retired tool '$word'"
-    done < <(grep -niwF -- "$word" "$f" || true)
+rule_retired_tools() {
+  local f word hit
+  for f in ${agents_files[@]+"${agents_files[@]}"}; do
+    [ -f "$f" ] || continue
+    for word in $BANNED; do
+      while IFS= read -r hit; do
+        docs_fail "$f:${hit%%:*}: names retired tool '$word'"
+      done < <(grep -niwF -- "$word" "$f" || true)
+    done
   done
-done
+}
 
 # ---- 5. convention deltas heading -----------------------------------------------------------
-if [ -f AGENTS.md ] && ! grep -qE '^## Convention deltas[[:space:]]*$' AGENTS.md; then
-  docs_rule "$DELTAS_FAILS_FROM" "AGENTS.md: no '## Convention deltas' heading; add it (list deviations from ~/.claude/conventions, or 'None.')"
-fi
+rule_deltas_heading() {
+  if [ -f AGENTS.md ] && ! grep -qE '^## Convention deltas[[:space:]]*$' AGENTS.md; then
+    docs_rule "$DELTAS_FAILS_FROM" "AGENTS.md: no '## Convention deltas' heading; add it (list deviations from ~/.claude/conventions, or 'None.')"
+  fi
+}
 
 # Tracked paths, one per line, for rules 6 and 10 (one git call; awk resolves links against it).
 TRACKED=$(git ls-files)
@@ -368,112 +387,131 @@ md_links() {
 }
 
 # ---- 6. required files -----------------------------------------------------------------------
-is_tracked README.md || docs_rule "$DOCS_SET_FAILS_FROM" "README.md is missing; start from devkit's templates/new/common/README.md (devkit/README.md, 'Standard docs')"
-if ! is_tracked docs/architecture.md && ! { [ -f AGENTS.md ] && grep -qix architecture <<<"$(h2_of AGENTS.md)"; }; then
-  docs_rule "$DOCS_SET_FAILS_FROM" "no architecture doc: add docs/architecture.md (skeleton in devkit's templates/new/common/docs/) or an '## Architecture' section in AGENTS.md"
-fi
+rule_required_files() {
+  is_tracked README.md || docs_rule "$DOCS_SET_FAILS_FROM" "README.md is missing; start from devkit's templates/new/common/README.md (devkit/README.md, 'Standard docs')"
+  if ! is_tracked docs/architecture.md && ! { [ -f AGENTS.md ] && grep -qix architecture <<<"$(h2_of AGENTS.md)"; }; then
+    docs_rule "$DOCS_SET_FAILS_FROM" "no architecture doc: add docs/architecture.md (skeleton in devkit's templates/new/common/docs/) or an '## Architecture' section in AGENTS.md"
+  fi
+}
 
 # ---- 7. README sections ----------------------------------------------------------------------
-if is_tracked README.md && [ -f README.md ]; then
-  readme_h2=$(lower "$(h2_of README.md)")
-  for spec in "${README_SECTIONS[@]}"; do
-    grep -qxFf <(spec_names "$spec") <<<"$readme_h2" && continue
-    aliases=${spec#*|}; [ "$aliases" = "$spec" ] && aliases=
-    docs_rule "$DOCS_SET_FAILS_FROM" "README.md: no '## ${spec%%|*}' section${aliases:+ (or one of: ${aliases//|/, })}"
-  done
-fi
+rule_readme_sections() {
+  local readme_h2 spec aliases
+  if is_tracked README.md && [ -f README.md ]; then
+    readme_h2=$(lower "$(h2_of README.md)")
+    for spec in "${README_SECTIONS[@]}"; do
+      grep -qxFf <(spec_names "$spec") <<<"$readme_h2" && continue
+      aliases=${spec#*|}; [ "$aliases" = "$spec" ] && aliases=
+      docs_rule "$DOCS_SET_FAILS_FROM" "README.md: no '## ${spec%%|*}' section${aliases:+ (or one of: ${aliases//|/, })}"
+    done
+  fi
+}
 
 # ---- 8. decisions entries --------------------------------------------------------------------
 # One problem per output line, `<line>: <msg>`; fenced code is skipped (an entry may quote one).
-if [ -f docs/decisions.md ]; then
-  while IFS= read -r problem; do
-    [ -n "$problem" ] && docs_rule "$DOCS_SET_FAILS_FROM" "docs/decisions.md:$problem"
-  done < <(awk '
-    function marker(name) { return "^(- )?(\\*\\*)?" name "(:\\*\\*|\\*\\*:|:)" }
-    function close_entry() {
-      if (!open) return
-      miss = ""
-      if (!why) miss = miss " Why"; if (!dec) miss = miss " Decision"; if (!con) miss = miss " Consequence"
-      if (miss != "") printf "%d: entry \"%s\" has no%s line\n", line, title, miss
-      open = 0
-    }
-    /^[[:space:]]*(```|~~~)/ { fence = !fence; next }
-    fence { next }
-    /^## / {
-      close_entry()
-      if ($0 ~ /^## [0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9] — [^[:space:]]/) {
-        date = substr($0, 4, 10)
-        if (prev != "" && date < prev) printf "%d: %s is older than the entry above it (%s); entries are newest last\n", NR, date, prev
-        prev = date; open = 1; line = NR; title = substr($0, 4); why = dec = con = 0
-      } else {
-        printf "%d: \"%s\" is not a dated entry (## YYYY-MM-DD — title)\n", NR, $0
-      }
-      next
-    }
-    open && $0 ~ marker("Why") { why = 1 }
-    open && $0 ~ marker("Decision") { dec = 1 }
-    open && $0 ~ marker("Consequence") { con = 1 }
-    END { close_entry() }
-  ' docs/decisions.md)
-fi
-
-# ---- 9. make targets named in docs ---------------------------------------------------------
-if [ -f Makefile ]; then
-  targets=$(makefile_targets)
-  for doc in README.md AGENTS.md; do
-    if [ ! -f "$doc" ] || ! is_tracked "$doc"; then continue; fi
-    while IFS=' ' read -r lineno target; do
-      [ -n "$target" ] || continue
-      case "$targets" in *" $target "*) continue ;; esac
-      matched=0
-      for t in $targets; do
-        case "$t" in *%*) case "$target" in ${t%%\%*}*${t#*%}) matched=1; break ;; esac ;; esac
-      done
-      [ $matched = 1 ] || docs_rule "$DOCS_SET_FAILS_FROM" "$doc:$lineno: 'make $target' is not a Makefile target; fix the doc or the Makefile"
-    done < <(awk -v q="'" '
-      # Print "<line> <target>" for each target word of one `make …` command line.
-      function targets_of(cmd,   n, w, k) {
-        gsub(/"[^"]*"/, "\"\"", cmd); gsub(q "[^" q "]*" q, q q, cmd)   # msg="a b" is one word
-        n = split(cmd, w, /[[:space:]]+/)
-        for (k = 2; k <= n; k++) {
-          if (w[k] ~ /^(\||&&|;|#|>|\))/) break
-          if (w[k] ~ /^-[Cf]/) return                 # another Makefile; not ours to judge
-          if (w[k] ~ /^-/ || w[k] ~ /=/ || w[k] ~ /[<>$*{}…]/ || w[k] == "") continue
-          gsub(/[,.:;)]+$/, "", w[k])
-          if (w[k] ~ /^[A-Za-z0-9_.\/-]+$/) print NR, w[k]
-        }
+rule_decisions_entries() {
+  local problem
+  if [ -f docs/decisions.md ]; then
+    while IFS= read -r problem; do
+      [ -n "$problem" ] && docs_rule "$DOCS_SET_FAILS_FROM" "docs/decisions.md:$problem"
+    done < <(awk '
+      function marker(name) { return "^(- )?(\\*\\*)?" name "(:\\*\\*|\\*\\*:|:)" }
+      function close_entry() {
+        if (!open) return
+        miss = ""
+        if (!why) miss = miss " Why"; if (!dec) miss = miss " Decision"; if (!con) miss = miss " Consequence"
+        if (miss != "") printf "%d: entry \"%s\" has no%s line\n", line, title, miss
+        open = 0
       }
       /^[[:space:]]*(```|~~~)/ { fence = !fence; next }
-      fence { line = $0; sub(/^[[:space:]]*(\$[[:space:]]+)?/, "", line); if (line ~ /^make[[:space:]]/) targets_of(line); next }
-      {
-        rest = $0
-        while (match(rest, /`make [^`]*`/)) {
-          targets_of(substr(rest, RSTART + 1, RLENGTH - 2))
-          rest = substr(rest, RSTART + RLENGTH)
+      fence { next }
+      /^## / {
+        close_entry()
+        if ($0 ~ /^## [0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9] — [^[:space:]]/) {
+          date = substr($0, 4, 10)
+          if (prev != "" && date < prev) printf "%d: %s is older than the entry above it (%s); entries are newest last\n", NR, date, prev
+          prev = date; open = 1; line = NR; title = substr($0, 4); why = dec = con = 0
+        } else {
+          printf "%d: \"%s\" is not a dated entry (## YYYY-MM-DD — title)\n", NR, $0
         }
-      }' "$doc")
-  done
-fi
+        next
+      }
+      open && $0 ~ marker("Why") { why = 1 }
+      open && $0 ~ marker("Decision") { dec = 1 }
+      open && $0 ~ marker("Consequence") { con = 1 }
+      END { close_entry() }
+    ' docs/decisions.md)
+  fi
+}
+
+# ---- 9. make targets named in docs ---------------------------------------------------------
+rule_make_targets() {
+  local targets doc lineno target matched t
+  if [ -f Makefile ]; then
+    targets=$(makefile_targets)
+    for doc in README.md AGENTS.md; do
+      if [ ! -f "$doc" ] || ! is_tracked "$doc"; then continue; fi
+      while IFS=' ' read -r lineno target; do
+        [ -n "$target" ] || continue
+        case "$targets" in *" $target "*) continue ;; esac
+        matched=0
+        for t in $targets; do
+          case "$t" in *%*) case "$target" in ${t%%\%*}*${t#*%}) matched=1; break ;; esac ;; esac
+        done
+        [ $matched = 1 ] || docs_rule "$DOCS_SET_FAILS_FROM" "$doc:$lineno: 'make $target' is not a Makefile target; fix the doc or the Makefile"
+      done < <(awk -v q="'" '
+        # Print "<line> <target>" for each target word of one `make …` command line.
+        function targets_of(cmd,   n, w, k) {
+          gsub(/"[^"]*"/, "\"\"", cmd); gsub(q "[^" q "]*" q, q q, cmd)   # msg="a b" is one word
+          n = split(cmd, w, /[[:space:]]+/)
+          for (k = 2; k <= n; k++) {
+            if (w[k] ~ /^(\||&&|;|#|>|\))/) break
+            if (w[k] ~ /^-[Cf]/) return                 # another Makefile; not ours to judge
+            if (w[k] ~ /^-/ || w[k] ~ /=/ || w[k] ~ /[<>$*{}…]/ || w[k] == "") continue
+            gsub(/[,.:;)]+$/, "", w[k])
+            if (w[k] ~ /^[A-Za-z0-9_.\/-]+$/) print NR, w[k]
+          }
+        }
+        /^[[:space:]]*(```|~~~)/ { fence = !fence; next }
+        fence { line = $0; sub(/^[[:space:]]*(\$[[:space:]]+)?/, "", line); if (line ~ /^make[[:space:]]/) targets_of(line); next }
+        {
+          rest = $0
+          while (match(rest, /`make [^`]*`/)) {
+            targets_of(substr(rest, RSTART + 1, RLENGTH - 2))
+            rest = substr(rest, RSTART + RLENGTH)
+          }
+        }' "$doc")
+    done
+  fi
+}
 
 # ---- 10. relative links ----------------------------------------------------------------------
-link_docs=()
-for doc in README.md AGENTS.md; do is_tracked "$doc" && [ -f "$doc" ] && link_docs+=("$doc"); done
-while IFS= read -r doc; do
-  [ -f "$doc" ] && link_docs+=("$doc")
-done < <(grep -E '^docs/.+\.md$' <<<"$TRACKED" || true)
-if [ ${#link_docs[@]} -gt 0 ]; then
-  while IFS= read -r problem; do
-    [ -n "$problem" ] && docs_rule "$DOCS_SET_FAILS_FROM" "$problem"
-  done < <(md_links "${link_docs[@]}" | awk -F'\t' -v q="'" '
-    FILENAME != "-" { tracked[$0] = 1; p = $0; while (sub(/\/[^\/]*$/, "", p)) dirs[p] = 1; next }
-    !($4 in tracked || $4 in dirs) { printf "%s:%d: link to " q "%s" q " does not resolve to a tracked file\n", $1, $2, $3 }
-  ' <(printf '%s\n' "$TRACKED") -)
-fi
+rule_links() {
+  local link_docs=() doc problem
+  for doc in README.md AGENTS.md; do is_tracked "$doc" && [ -f "$doc" ] && link_docs+=("$doc"); done
+  while IFS= read -r doc; do
+    [ -f "$doc" ] && link_docs+=("$doc")
+  done < <(grep -E '^docs/.+\.md$' <<<"$TRACKED" || true)
+  if [ ${#link_docs[@]} -gt 0 ]; then
+    while IFS= read -r problem; do
+      [ -n "$problem" ] && docs_rule "$DOCS_SET_FAILS_FROM" "$problem"
+    done < <(md_links "${link_docs[@]}" | awk -F'\t' -v q="'" '
+      FILENAME != "-" { tracked[$0] = 1; p = $0; while (sub(/\/[^\/]*$/, "", p)) dirs[p] = 1; next }
+      !($4 in tracked || $4 in dirs) { printf "%s:%d: link to " q "%s" q " does not resolve to a tracked file\n", $1, $2, $3 }
+    ' <(printf '%s\n' "$TRACKED") -)
+  fi
+}
 
-# ---- 12. decisions log merges by union -------------------------------------------------------
-if ! is_tracked .gitattributes || ! has_decisions_union .gitattributes; then
-  docs_rule "$DOCS_SET_FAILS_FROM" ".gitattributes: no '$DECISIONS_UNION_LINE', so two PRs that each append a decisions entry conflict on rebase (fix: devkit/bin/hooks_check.sh --fix, then commit .gitattributes)"
-fi
+# ---- 12. decisions log merges by its driver --------------------------------------------------
+rule_decisions_merge() {
+  local decisions_merge=""
+  is_tracked .gitattributes && decisions_merge=$(decisions_merge_attr .gitattributes)
+  case $decisions_merge in
+    devkit-decisions) ;;
+    union) docs_rule "$DOCS_SET_FAILS_FROM" ".gitattributes: docs/decisions.md merge=union drops the blank line between two rebased entries; '$DECISIONS_MERGE_LINE' keeps it (fix: devkit/bin/hooks_check.sh --fix, then commit .gitattributes)" ;;
+    *) docs_rule "$DOCS_SET_FAILS_FROM" ".gitattributes: no '$DECISIONS_MERGE_LINE', so two PRs that each append a decisions entry conflict on rebase (fix: devkit/bin/hooks_check.sh --fix, then commit .gitattributes)" ;;
+  esac
+}
 
 # ---- 13. allowance sunset --------------------------------------------------------------------
 rule_allowance_sunset() {
@@ -571,6 +609,19 @@ rule_contributing() {
          docs_rule "$DIET_FAILS_FROM" "README.md: the Documentation section has no 'Contributors and agents: see [AGENTS.md](AGENTS.md).' line"; }
 }
 
+# Rules run in the header's order (11, the repo extras, last): their messages print in it.
+rule_pair_shape
+rule_size_caps
+rule_allowlist_entries
+rule_decisions_log
+rule_retired_tools
+rule_deltas_heading
+rule_required_files
+rule_readme_sections
+rule_decisions_entries
+rule_make_targets
+rule_links
+rule_decisions_merge
 rule_allowance_sunset
 rule_agents_sections
 rule_docs_set
@@ -694,44 +745,32 @@ fix_readme_append() {
   awk -v n="$end" -v add="$row" '{ print } NR == n { print add }' README.md >README.md.docsfix && mv README.md.docsfix README.md
   git add README.md
 }
-fix_docs() {
-  local f new inbound
-  if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-    echo "docs-fix: the tree has uncommitted changes; commit or stash them first so the fix is one reviewable diff" >&2
-    exit 2
-  fi
-  for f in ${fix_old_names[@]+"${fix_old_names[@]}"}; do
-    if is_tracked docs/operations.md; then
-      fix_judgment "$f and docs/operations.md both exist; merge $f into docs/operations.md"
-      continue
+# fix_outside_doc <path>: archive a doc outside the set to docs/reports/, or link it from README.
+fix_outside_doc() {
+  local f=$1 new inbound
+  inbound=$(fix_referrers "$f")
+  # Report-shaped by directory or name with no reference from outside docs/reports/, or an
+  # unreferenced one-off directly under docs/. A referenced doc (a link, or a plain-text
+  # mention in a source comment or another doc) is in use, so it is linked, never archived.
+  # An unreferenced file inside a named subdirectory (docs/architecture/x.md) is structure
+  # someone chose, so it is linked too; the reader decides what to do with the folder.
+  if [ -z "$inbound" ] && { [[ "${f%/*}" =~ $REPORT_SHAPED_DIR ]] || [[ "${f##*/}" =~ $REPORT_SHAPED_NAME ]] || [ "${f%/*}" = docs ]; }; then
+    new=$(fix_report_name "$f")
+    if is_tracked "$new" || [ -e "$new" ]; then
+      fix_judgment "$f: its report name $new is taken; move it by hand"
+      return
     fi
-    git mv -- "$f" docs/operations.md && fix_did "renamed $f -> docs/operations.md" && fix_relink "$f" docs/operations.md
-    TRACKED=$(git ls-files)
-  done
-  for f in ${fix_outside[@]+"${fix_outside[@]}"}; do
-    inbound=$(fix_referrers "$f")
-    # Report-shaped by directory or name with no reference from outside docs/reports/, or an
-    # unreferenced one-off directly under docs/. A referenced doc (a link, or a plain-text
-    # mention in a source comment or another doc) is in use, so it is linked, never archived.
-    # An unreferenced file inside a named subdirectory (docs/architecture/x.md) is structure
-    # someone chose, so it is linked too; the reader decides what to do with the folder.
-    if [ -z "$inbound" ] && { [[ "${f%/*}" =~ $REPORT_SHAPED_DIR ]] || [[ "${f##*/}" =~ $REPORT_SHAPED_NAME ]] || [ "${f%/*}" = docs ]; }; then
-      new=$(fix_report_name "$f")
-      if is_tracked "$new" || [ -e "$new" ]; then
-        fix_judgment "$f: its report name $new is taken; move it by hand"
-        continue
-      fi
-      mkdir -p docs/reports
-      git mv -- "$f" "$new" || { fix_judgment "$f: git mv to $new failed"; continue; }
-      fix_did "moved $f -> $new"
-      fix_relink "$f" "$new"
-    else
-      fix_readme_append "[$f]($f)" && fix_did "linked $f from README's Documentation section"
-    fi
-  done
-  if [ "$fix_contrib_line_missing" = 1 ]; then
-    fix_readme_append "Contributors and agents: see [AGENTS.md](AGENTS.md)." && fix_did "added the contributors line to README's Documentation section"
+    mkdir -p docs/reports
+    git mv -- "$f" "$new" || { fix_judgment "$f: git mv to $new failed"; return; }
+    fix_did "moved $f -> $new"
+    fix_relink "$f" "$new"
+  else
+    fix_readme_append "[$f]($f)" && fix_did "linked $f from README's Documentation section"
   fi
+}
+# fix_judgments_left: what --fix never does itself (deleting, editing an AGENTS.md), one line each.
+fix_judgments_left() {
+  local f n
   for f in CONTRIBUTING.md .github/CONTRIBUTING.md docs/CONTRIBUTING.md; do
     is_tracked "$f" && fix_judgment "$f: fold what AGENTS.md lacks into AGENTS.md, then git rm it"
   done
@@ -748,6 +787,26 @@ fix_docs() {
       'h2-outside '*) fix_judgment "AGENTS.md '## ${f#h2-outside }' is not a standard section; move it to docs/ or fold it into Convention deltas" ;;
     esac
   done < <(printf '%s\n' ${report_rows[@]+"${report_rows[@]}"} | sed 's/  */ /g')
+}
+fix_docs() {
+  local f
+  if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    echo "docs-fix: the tree has uncommitted changes; commit or stash them first so the fix is one reviewable diff" >&2
+    exit 2
+  fi
+  for f in ${fix_old_names[@]+"${fix_old_names[@]}"}; do
+    if is_tracked docs/operations.md; then
+      fix_judgment "$f and docs/operations.md both exist; merge $f into docs/operations.md"
+      continue
+    fi
+    git mv -- "$f" docs/operations.md && fix_did "renamed $f -> docs/operations.md" && fix_relink "$f" docs/operations.md
+    TRACKED=$(git ls-files)
+  done
+  for f in ${fix_outside[@]+"${fix_outside[@]}"}; do fix_outside_doc "$f"; done
+  if [ "$fix_contrib_line_missing" = 1 ]; then
+    fix_readme_append "Contributors and agents: see [AGENTS.md](AGENTS.md)." && fix_did "added the contributors line to README's Documentation section"
+  fi
+  fix_judgments_left
   echo "docs-fix: $nfix actions, $njudg judgment items; run docs_check.sh --report to see where the repo stands now"
   exit 0
 }

@@ -28,12 +28,16 @@
 #                              its own start, so its later jobs queue ahead of a newer gate's),
 #                              printing `<prefix> waiting for capacity: <label> needs <c> of <cap>,
 #                              <u> in use (<holder> <c>, ...)[; queued behind <label>, ...]` at
-#                              once and every 30 s, polling each second. Then sets SLOT_QUEUED
+#                              once and, as a heartbeat ending ` (waited <n>s)`, every 30 s,
+#                              polling each second (Notices, below). Then sets SLOT_QUEUED
 #                              (whole seconds waited) and SLOT_USED (units in use once admitted)
 #   slot_release               gives back this process's units (and its place in line); callers
 #                              also run it from their EXIT trap
 #   slot_held_count            how many runs hold units now, the caller's own included: the
 #                              budgets' stretch (bin/_load_lib.sh, Slots)
+#   slot_notice <line>         prints a waiting line (Notices, below)
+#   slot_others_units          the units held now by runs other than DEVKIT_SLOT_HOLDER's (every
+#                              holder's, outside one): tests/shards.sh's contention sample
 #   slot_held_above            true when DEVKIT_SLOT_HOLDER names a live process: this run is
 #                              inside one that already holds units (a tier inside a gate job, or
 #                              a tier inside a tier) and must not ask again, which would count its
@@ -41,9 +45,16 @@
 #   run_lock_acquire <prefix> <file> <what>
 #                              blocks until fd 7 holds <file>, an exclusive lock on one thing
 #                              (local_gate: one PR of one repo), printing `<prefix> waiting for
-#                              <what> (<holder line>)` at once and every 30 s; then writes
+#                              <what> (<holder line>)` at once and, ending ` (waited <n>s)`, every
+#                              30 s (Notices); then writes
 #                              `pid <pid> since <utc>` into it. Released when this process exits;
 #                              close fd 7 (`7>&-`) for any child that may outlive it.
+#
+# Notices: the waiting lines (both acquires') go to fd 6 when DEVKIT_NOTICE_FD=6, else stdout.
+# bin/quiet_run.sh opens it on its caller's stdout for a step whose output it captures, so a
+# pre-push tier queued for admission says so instead of sitting silent (rollcall #96: ~7 min, and
+# `make pr` looked hung). 6 is the one fd devkit uses for it; tier_guard.sh closes it for its
+# command, so a server or daemon the tier leaves running cannot hold the hook's output open.
 #
 # The pool is a FIXED path, ${XDG_STATE_HOME:-~/.local/state}/devkit/gate-slots/, so every vendored
 # copy of any rev shares it (DEVKIT_SLOT_DIR, environment only, is the test hook):
@@ -125,15 +136,15 @@ _slot_clamp() { if [ "$1" -gt "$SLOT_CAPACITY" ]; then echo "$SLOT_CAPACITY"; el
 _slot_start() { TZ=UTC LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//'; }
 
 # _slot_live <entry file>: true while the entry's pid is the process that wrote it; sets
-# SLOT_ENTRY_COST and SLOT_ENTRY_LABEL from the same read. One read only: slot_release removes
+# SLOT_ENTRY_COST, SLOT_ENTRY_PID and SLOT_ENTRY_LABEL from the same read. One read only: slot_release removes
 # its entries without the mutex (it runs from EXIT traps), so a second read of a file seen live
 # can find it gone (devkit #240's gate: `cost: unbound variable` under set -u).
 _slot_live() {
-  local pid start
-  SLOT_ENTRY_COST="" SLOT_ENTRY_LABEL=""
-  { read -r SLOT_ENTRY_COST pid _ _ SLOT_ENTRY_LABEL && read -r start; } <"$1" 2>/dev/null || return 1
-  [[ "$SLOT_ENTRY_COST" =~ ^[0-9]+$ ]] && [[ "$pid" =~ ^[0-9]+$ ]] || return 1
-  kill -0 "$pid" 2>/dev/null && [ "$(_slot_start "$pid")" = "$start" ]
+  local start
+  SLOT_ENTRY_COST="" SLOT_ENTRY_PID="" SLOT_ENTRY_LABEL=""
+  { read -r SLOT_ENTRY_COST SLOT_ENTRY_PID _ _ SLOT_ENTRY_LABEL && read -r start; } <"$1" 2>/dev/null || return 1
+  [[ "$SLOT_ENTRY_COST" =~ ^[0-9]+$ ]] && [[ "$SLOT_ENTRY_PID" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$SLOT_ENTRY_PID" 2>/dev/null && [ "$(_slot_start "$SLOT_ENTRY_PID")" = "$start" ]
 }
 
 # _slot_locked <command...>: the command with the pool's mutex held; 1 when it cannot be had in 30 s.
@@ -153,21 +164,23 @@ _slot_legacy() {
 }
 
 # _slot_scan: under the mutex. Deletes stale entries, then sets SLOT_USED (units held),
-# SLOT_HOLDERS (`<label> <cost>, ...`), SLOT_HOLDER_COUNT, SLOT_HEAD (the first live waiter's
-# file name) and SLOT_AHEAD (`<label>, ...` of the waiters before $SLOT_TICKET, if any).
+# SLOT_OTHERS (those not held by DEVKIT_SLOT_HOLDER), SLOT_HOLDERS (`<label> <cost>, ...`),
+# SLOT_HOLDER_COUNT, SLOT_HEAD (the first live waiter's file name) and SLOT_AHEAD (`<label>, ...`
+# of the waiters before $SLOT_TICKET, if any).
 _slot_scan() {
   local f line
-  SLOT_USED=0 SLOT_HOLDERS="" SLOT_HOLDER_COUNT=0 SLOT_HEAD="" SLOT_AHEAD=""
+  SLOT_USED=0 SLOT_OTHERS=0 SLOT_HOLDERS="" SLOT_HOLDER_COUNT=0 SLOT_HEAD="" SLOT_AHEAD=""
   for f in "$SLOT_DIR"/held/*; do
     [ -f "$f" ] || continue
     _slot_live "$f" || { rm -f "$f"; continue; }
     SLOT_USED=$((SLOT_USED + SLOT_ENTRY_COST))
+    [ "$SLOT_ENTRY_PID" = "${DEVKIT_SLOT_HOLDER:-}" ] || SLOT_OTHERS=$((SLOT_OTHERS + SLOT_ENTRY_COST))
     SLOT_HOLDER_COUNT=$((SLOT_HOLDER_COUNT + 1))
     SLOT_HOLDERS="$SLOT_HOLDERS${SLOT_HOLDERS:+, }$SLOT_ENTRY_LABEL $SLOT_ENTRY_COST"
   done
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    SLOT_USED=$((SLOT_USED + SLOT_LEGACY_COST))
+    SLOT_USED=$((SLOT_USED + SLOT_LEGACY_COST)) SLOT_OTHERS=$((SLOT_OTHERS + SLOT_LEGACY_COST))
     SLOT_HOLDER_COUNT=$((SLOT_HOLDER_COUNT + 1))
     SLOT_HOLDERS="$SLOT_HOLDERS${SLOT_HOLDERS:+, }${line% (older devkit)} $SLOT_LEGACY_COST (older devkit)"
   done <<<"$(_slot_legacy)"
@@ -203,7 +216,7 @@ slot_acquire() { # <prefix> <label> <cost> [<order>]
   fi
   until _slot_locked _slot_try "$3"; do
     if [ -z "$said" ] || [ $((SECONDS - said)) -ge 30 ]; then
-      echo "$1 waiting for capacity: $2 needs $3 of $SLOT_CAPACITY, $SLOT_USED in use${SLOT_HOLDERS:+ ($SLOT_HOLDERS)}${SLOT_AHEAD:+; queued behind $SLOT_AHEAD}"
+      slot_notice "$1 waiting for capacity: $2 needs $3 of $SLOT_CAPACITY, $SLOT_USED in use${SLOT_HOLDERS:+ ($SLOT_HOLDERS)}${SLOT_AHEAD:+; queued behind $SLOT_AHEAD}$(_slot_waited "$said" "$t0")"
       said=$SECONDS
     fi
     sleep 1
@@ -223,12 +236,23 @@ slot_release() {
 
 slot_held_count() { _slot_locked _slot_scan; echo "$SLOT_HOLDER_COUNT"; }
 
+slot_others_units() { _slot_locked _slot_scan || return 1; echo "$SLOT_OTHERS"; }
+
+# slot_notice <line>: one waiting line, to the notice fd when the caller's output is captured
+# (header, Notices), else stdout. tier_guard.sh's `admitted` line after a wait goes here too.
+slot_notice() {
+  if [ "${DEVKIT_NOTICE_FD:-}" = 6 ] && { true >&6; } 2>/dev/null; then echo "$1" >&6; else echo "$1"; fi
+}
+
+# _slot_waited <said> <t0>: nothing for a wait's first line, ` (waited <n>s)` for its heartbeats.
+_slot_waited() { [ -z "$1" ] || echo " (waited $((SECONDS - $2))s)"; }
+
 run_lock_acquire() { # <prefix> <file> <what>
-  local said=""
+  local said="" t0=$SECONDS
   exec 7>>"$2"
   until flock -n 7; do
     if [ -z "$said" ] || [ $((SECONDS - said)) -ge 30 ]; then
-      echo "$1 waiting for $3 ($(head -n 1 "$2" 2>/dev/null || true))"
+      slot_notice "$1 waiting for $3 ($(head -n 1 "$2" 2>/dev/null || true))$(_slot_waited "$said" "$t0")"
       said=$SECONDS
     fi
     sleep 1

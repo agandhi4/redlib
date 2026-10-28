@@ -2,12 +2,12 @@
 """Shared vulnerability collector: known vulnerabilities in the locked production dependencies.
 
 Scorecard T11 `sec.audit` (owner, 2026-10-16: security is one of the tracks every repo is
-raised on). One tool for every stack, so Python, Node and Rust repos get the same keys from
-one line in scripts/ci/metrics.conf: it reads the LOCKED production dependency set and asks
-OSV (https://osv.dev, the aggregate of GitHub advisories, PyPA, RustSec and npm) in one batch
-query, then fetches each hit once for its severity. Nothing is installed and no audit tool
-has to exist on the machine (pip-audit cannot build its venv on this Mac; cargo-audit is not
-installed; `npm audit` needs a registry login shape OSV does not).
+raised on). One tool for every stack, so Python, Node, Rust and Swift repos get the same keys
+from one line in scripts/ci/metrics.conf: it reads the LOCKED production dependency set and asks
+OSV (https://osv.dev, the aggregate of GitHub advisories, PyPA, RustSec, npm and SwiftURL) in
+one batch query, then fetches each hit once for its severity. Nothing is installed and no audit
+tool has to exist on the machine (pip-audit cannot build its venv on this Mac; cargo-audit is
+not installed; `npm audit` needs a registry login shape OSV does not).
 
   vuln-backend  backend  python3 -I devkit/metrics/vuln.py --scope backend --uv backend \\
       --out build/metrics/vuln-backend.json
@@ -22,6 +22,13 @@ Sources (repeatable, mixed):
                             (never `devDependencies`) through `snapshots`, parsed by indentation
                             (no YAML library in the stdlib); a package reached both ways is production
   --cargo-lock <file>       Cargo.lock `[[package]]` entries (no dev split in the lock format)
+  --swift <dir>             a Swift project directory: its Package.resolved (or a committed Xcode
+                            project's), else project.yml/Package.swift exact pins; OSV SwiftURL
+                            (metrics/_swiftpm.py has the order and the URL normalisation). A
+                            github.com/gitlab.com pin is queried under each spelling OSV's
+                            SwiftURL export (OSV_DATA_URL/SwiftURL/all.zip, fetched once) has for
+                            it in any case, and reported as pinned. No dev split either: build
+                            plugins' packages (swift-syntax) count
   --compose <file>...       compose files: the `image:` of every service (bin/_compose.py reads
                             them, extends resolved). OSV indexes no container image, so these
                             are counted, not queried: the image keys below, and no
@@ -37,16 +44,24 @@ PR for it, and the scorecard reads the snapshot instead):
                           (instalite's web/), which the scorecard reads as `ratchet.vuln` NA:
                           there is no production exposure to measure
 and one `vuln: <severity> <package>@<version> <id>` line per hit on stderr, worst first.
---findings <file> also writes each hit as JSON, for bin/vuln_watch.py (the nightly's new-advisory
-issues): [{"id", "severity", "packages": [{"ecosystem", "name", "version", "fixed", "locks":
-[[<uv|npm|pnpm|cargo>, <the flag's path>]]}]}], `fixed` the lowest fixed version above the
-locked one in the advisory's ranges (null when none is published), worst first.
-With --compose:
-  vuln.<scope>.images             service image references
-  vuln.<scope>.images_unpinned    neither a digest nor a tag other than `latest` (no tag is
-                                  latest): a pull may bring any version, vulnerable or not
-  vuln.<scope>.images_undigested  no `@sha256:` digest: a tag can be re-pushed, a digest cannot
-and one `vuln: unpinned <file>:<line> <service> <image>` line per unpinned image on stderr.
+--findings <file> also writes each hit as JSON, for bin/vuln_watch.py (the nightly's
+new-advisory issues): [{"id", "severity", "packages": [{"ecosystem", "name", "version", "fixed",
+"locks": [[<uv|npm|pnpm|cargo|swift>, <the flag's path; for swift the file read>]]}]}], `fixed`
+the lowest fixed version above the locked one in the advisory's ranges (null when none is
+published), worst first.
+With --compose, domain `images` (not `vuln`: these count what the compose files say, so they
+move only with a code change, and `undigested` is a GATED bound, docs/decisions.md 2026-10-27):
+  images.<scope>.refs        service image references (report-only: a new service adds one)
+  images.<scope>.unpinned    neither a digest nor a tag other than `latest` (no tag is latest):
+                             a pull may bring any version, vulnerable or not. Report-only: the
+                             compose-pinned-image guard gates it per service, with the declared
+                             exceptions (the fleet's own `:latest` deploy pointers) a count
+                             cannot name
+  images.<scope>.undigested  pinned by a tag but no `@sha256:` digest: a tag can be re-pushed, a
+                             digest cannot. Ratcheted toward 0; Renovate's preset pins and bumps
+                             the digests (renovate/default.json, docker-compose)
+refs = unpinned + undigested + the digest-pinned, and one `vuln: unpinned|undigested <file>:<line>
+<service> <image>` line per such image on stderr.
 
 Severity: OSV `database_specific.severity` when present (GitHub's), else the score of the newest
 CVSS entry that scores, banded (>= 9 CRITICAL, >= 7 HIGH, >= 4 MODERATE, else LOW): a v3.x or
@@ -58,14 +73,17 @@ Else UNKNOWN (counted in total): a CVSS v2 vector or no severity anywhere (an un
 unsound RUSTSEC note has no twin).
 Determinism: the same lockfile gives the same answer for a given day; the keys are dated by
 the snapshot, not by the code, which is why they stay untracked. Exit 2 on an unreadable
-source, a `uv export` failure, or an OSV error (no silent zero: a collector that cannot reach
-its source reports nothing rather than a clean score). OSV_URL overrides the endpoint (tests).
+source (a Swift manifest dependency with no exact pin and no resolved file is one), a `uv
+export` failure, or an OSV error (no silent zero: a collector that cannot reach its source
+reports nothing rather than a clean score). OSV_URL and OSV_DATA_URL override the endpoints
+(tests).
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib.util
+import io
 import json
 import os
 import re
@@ -73,17 +91,21 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 
 EXIT_USAGE = 2
 OSV_URL = os.environ.get("OSV_URL", "https://api.osv.dev")
+OSV_DATA_URL = os.environ.get("OSV_DATA_URL", "https://osv-vulnerabilities.storage.googleapis.com")
 BATCH = 1000  # OSV's querybatch limit
 ORDER = ["CRITICAL", "HIGH", "MODERATE", "LOW", "UNKNOWN"]
 
 Package = tuple[str, str, str]  # (OSV ecosystem, name, version)
-Lock = tuple[str, str]  # (source kind: uv | npm | pnpm | cargo, the path its flag named)
+# (source kind: uv | npm | pnpm | cargo | swift, the path its flag named; for swift the file read
+# under it, which is what a bump edits: bin/vuln_watch.py's bump_command)
+Lock = tuple[str, str]
 
 
 class CollectorError(Exception):
@@ -115,14 +137,20 @@ def compose_images(files: list[str], scope: str) -> dict[str, int]:
             refs.extend((f, s) for s in reader.services(Path(f), f) if s.image is not None)
         except (reader.YamlError, reader.ComposeError) as exc:
             raise CollectorError(str(exc)) from exc
+    # A partition: an unpinned image is the guard's, so it is never also counted undigested.
     unpinned = [(f, s) for f, s in refs if s.image.unpinned]
-    for f, s in unpinned:
-        print(f"vuln: unpinned {f}:{s.line} {s.name} {s.spec['image']}", file=sys.stderr)
-    print(f"vuln: {len(refs)} compose images, {len(unpinned)} unpinned", file=sys.stderr)
+    undigested = [(f, s) for f, s in refs if not s.image.unpinned and not s.image.digest]
+    for label, group in (("unpinned", unpinned), ("undigested", undigested)):
+        for f, s in group:
+            print(f"vuln: {label} {f}:{s.line} {s.name} {s.spec['image']}", file=sys.stderr)
+    print(
+        f"vuln: {len(refs)} compose images, {len(unpinned)} unpinned, {len(undigested)} undigested",
+        file=sys.stderr,
+    )
     return {
-        f"vuln.{scope}.images": len(refs),
-        f"vuln.{scope}.images_unpinned": len(unpinned),
-        f"vuln.{scope}.images_undigested": sum(1 for _, s in refs if not s.image.digest),
+        f"images.{scope}.refs": len(refs),
+        f"images.{scope}.unpinned": len(unpinned),
+        f"images.{scope}.undigested": len(undigested),
     }
 
 
@@ -263,6 +291,20 @@ def cargo_packages(lock: Path) -> list[tuple[str, str, str]]:
     return out
 
 
+def _swiftpm() -> ModuleType:
+    return _devkit_module("metrics/_swiftpm.py", "devkit_swiftpm")
+
+
+def swift_packages(project: Path) -> dict[str, list[Package]]:
+    """Each pin source file read under a Swift project directory, with its packages."""
+    reader = _swiftpm()
+    try:
+        found = reader.pins(project)
+    except reader.PinError as exc:
+        raise CollectorError(str(exc)) from exc
+    return {str(f): [(reader.ECOSYSTEM, n, v) for n, v in pinned] for f, pinned in found.items()}
+
+
 def osv(path: str, body: dict | None = None) -> dict:
     req = urllib.request.Request(f"{OSV_URL}{path}", data=json.dumps(body).encode() if body is not None else None, headers={"Content-Type": "application/json"})
     try:
@@ -270,6 +312,45 @@ def osv(path: str, body: dict | None = None) -> dict:
             return json.loads(resp.read().decode())
     except (urllib.error.URLError, ValueError, TimeoutError) as e:
         raise CollectorError(f"OSV {path}: {e}") from e
+
+
+def swift_advisory_names() -> dict[str, set[str]]:
+    """Every SwiftURL package name OSV's advisories spell, by _swiftpm.match_key, from the
+    ecosystem's export (~110 KB for 33 packages, 2026-10-27): the querybatch matches names
+    exactly, so a pin is asked for under the advisories' spellings of its key."""
+    reader = _swiftpm()
+    url = f"{OSV_DATA_URL}/{reader.ECOSYSTEM}/all.zip"
+    try:
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            archive = zipfile.ZipFile(io.BytesIO(resp.read()))
+        records = [json.loads(archive.read(member)) for member in archive.namelist()]
+    except (urllib.error.URLError, zipfile.BadZipFile, ValueError, TimeoutError) as e:
+        raise CollectorError(f"OSV {url}: {e}") from e
+    names: dict[str, set[str]] = {}
+    for record in records:
+        for affected in record.get("affected") or []:
+            pkg = affected.get("package") or {}
+            if pkg.get("ecosystem") == reader.ECOSYSTEM and pkg.get("name"):
+                names.setdefault(reader.match_key(pkg["name"]), set()).add(pkg["name"])
+    return names
+
+
+def query_names(packages: list[Package]) -> dict[Package, list[str]]:
+    """The names each package is asked of OSV under: its own, and for a Swift pin every
+    advisory spelling of its match key (each named on stderr)."""
+    reader = _swiftpm()
+    swift = any(eco == reader.ECOSYSTEM for eco, _, _ in packages)
+    spellings = swift_advisory_names() if swift else {}
+    out = {}
+    for eco, name, version in packages:
+        names = {name}
+        if eco == reader.ECOSYSTEM:
+            names |= spellings.get(reader.match_key(name), set())
+        for other in sorted(names - {name}):
+            print(f"vuln: {name} is also queried as {other}, OSV's spelling "
+                  "(the host ignores case)", file=sys.stderr)  # fmt: skip
+        out[(eco, name, version)] = sorted(names)
+    return out
 
 
 class Records:
@@ -346,6 +427,10 @@ def locked_packages(args: argparse.Namespace) -> dict[Package, set[Lock]]:
         for p in paths:
             for package in reader(Path(p)):
                 found.setdefault(package, set()).add((kind, p))
+    for p in args.swift:
+        for source, packages in swift_packages(Path(p)).items():
+            for package in packages:
+                found.setdefault(package, set()).add(("swift", source))
     return found
 
 
@@ -369,6 +454,9 @@ def _version_key(version: str) -> tuple:
 
 
 def _same_name(ecosystem: str, a: str, b: str) -> bool:
+    reader = _swiftpm()
+    if ecosystem == reader.ECOSYSTEM:
+        return reader.match_key(a) == reader.match_key(b)
     if ecosystem != "PyPI":
         return a == b
     return re.sub(r"[-_.]+", "-", a).lower() == re.sub(r"[-_.]+", "-", b).lower()  # PEP 503
@@ -400,12 +488,17 @@ def locked_vulns(args: argparse.Namespace) -> tuple[dict[str, int], list[dict]]:
     # A lockfile with only dev dependencies (instalite's web/) has an empty production set:
     # that is the answer, zero exposure, not a broken source.
     if not packages:
-        print("vuln: 0 locked production packages (dev-only lockfile): nothing to query", file=sys.stderr)
+        print("vuln: 0 locked production packages (a dev-only or dependency-free lock): "
+              "nothing to query", file=sys.stderr)  # fmt: skip
+    names = query_names(packages)
+    queries = [(package, name) for package in packages for name in names[package]]
     hits: dict[str, set[Package]] = {}
-    for i in range(0, len(packages), BATCH) if packages else []:
-        chunk = packages[i : i + BATCH]
-        res = osv("/v1/querybatch", {"queries": [{"package": {"name": n, "ecosystem": eco}, "version": v} for eco, n, v in chunk]})
-        for package, r in zip(chunk, res.get("results", [])):
+    for i in range(0, len(queries), BATCH) if queries else []:
+        chunk = queries[i : i + BATCH]
+        batch = [{"package": {"name": n, "ecosystem": eco}, "version": v}
+                 for (eco, _, v), n in chunk]  # fmt: skip
+        res = osv("/v1/querybatch", {"queries": batch})
+        for (package, _), r in zip(chunk, res.get("results", [])):
             for vuln in r.get("vulns") or []:
                 hits.setdefault(vuln["id"], set()).add(package)
     records = Records()
@@ -464,13 +557,14 @@ def main() -> int:
     ap.add_argument("--npm-lock", action="append", default=[], help="a package-lock.json")
     ap.add_argument("--pnpm-lock", action="append", default=[], help="a pnpm-lock.yaml (v9)")
     ap.add_argument("--cargo-lock", action="append", default=[], help="a Cargo.lock")
+    ap.add_argument("--swift", action="append", default=[], help="a Swift project directory")
     ap.add_argument("--compose", action="extend", nargs="+", default=[], metavar="FILE", help="compose files (image references)")
     ap.add_argument("--out", help="write the JSON here (default: stdout)")
     ap.add_argument("--findings", help="also write each hit here as JSON (header)")
     args = ap.parse_args()
-    locked = bool(args.uv or args.npm_lock or args.pnpm_lock or args.cargo_lock)
+    locked = bool(args.uv or args.npm_lock or args.pnpm_lock or args.cargo_lock or args.swift)
     if not (locked or args.compose):
-        ap.error("at least one of --uv, --npm-lock, --pnpm-lock, --cargo-lock, --compose")
+        ap.error("at least one of --uv, --npm-lock, --pnpm-lock, --cargo-lock, --swift, --compose")
     out: dict[str, int] = {}
     findings: list[dict] = []
     try:

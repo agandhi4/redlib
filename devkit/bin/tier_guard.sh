@@ -32,10 +32,12 @@
 # share (bin/_slot_lib.sh; GATE_CAPACITY from the environment or gate.env, as the gate reads it)
 # for its tier name's cost (unit 2, db 3, ...), holder `<repo>:<tier>`, so `make ci-unit` by hand
 # in four worktrees queues instead of piling onto the gates' load (2026-10-21). While it does not
-# fit it prints, at once and every 30 s,
-#   TIER <tier> waiting for capacity: <repo>:<tier> needs <c> of <cap>, <u> in use (<holder> <c>, ...)
+# fit it prints, at once and every 30 s (each heartbeat ending ` (waited <n>s)`),
+#   TIER <tier> waiting for capacity: <repo>:<tier> needs <c> of <cap>, <u> in use (<holder> <c>, ...)[; queued behind ...]
 # then `TIER <tier> admitted (cost <c> of <cap>[, queued <n>s])`. The wait is before the budget
-# clock. Inside a gate job (or another tier) DEVKIT_SLOT_HOLDER names a live holder and the tier
+# clock. Under a hook (bin/quiet_run.sh captures the step) the waiting lines, and the admitted
+# line after a wait, reach the hook's own output on its notice fd (bin/_slot_lib.sh, Notices),
+# so a queued pre-push says why it is quiet; the command runs with that fd closed. Inside a gate job (or another tier) DEVKIT_SLOT_HOLDER names a live holder and the tier
 # runs on its units, silently; TIER_SLOT=0 (default 1) stays out of the pool for a deliberately
 # quick single test.
 # A bad invocation exits 2 before the command runs. TIER_BUDGET_ENFORCE=0 (default 1) keeps
@@ -196,40 +198,50 @@ strip_ansi() {
   sed $'s/\x1b\\[[0-9;?]*[A-Za-z]//g'
 }
 
-[ $# -ge 1 ] || usage
-TIER=$1
-shift
-[[ "$TIER" =~ ^[A-Za-z0-9_-]+$ ]] || die "tier '$TIER' must match [A-Za-z0-9_-]+ (it becomes the key tier.<tier>.seconds)"
-
+TIER=""
 BUDGET=""
 FLOORS=()   # "<runner> <min>" entries, in the order given
-while [ $# -gt 0 ] && [ "$1" != "--" ]; do
-  case "$1" in
-    --budget)
-      [ $# -ge 2 ] || usage
-      [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "--budget must be a positive whole number of seconds (got '$2')"
-      BUDGET=$2
-      shift 2
-      ;;
-    --floor)
-      [ $# -ge 2 ] || usage
-      [[ "$2" =~ ^[a-z]+(=[0-9]+)?$ ]] || die "--floor takes <runner>[=<min>] (got '$2')"
-      runner=${2%%=*}
-      case " $RUNNERS " in *" $runner "*) ;; *) die "unknown runner '$runner' (one of: $RUNNERS)" ;; esac
-      for f in ${FLOORS[@]+"${FLOORS[@]}"}; do
-        [ "${f%% *}" != "$runner" ] || die "--floor $runner given twice"
-      done
-      min=0
-      [ "$runner" = "$2" ] || min=${2#*=}
-      FLOORS+=("$runner $min")
-      shift 2
-      ;;
-    *) usage ;;
-  esac
-done
-[ $# -ge 2 ] && [ "$1" = "--" ] || usage
-shift
-[ -n "$BUDGET" ] || die "--budget is required: every tier has one (the test-value standard)"
+# add_floor <runner>[=<min>]: one --floor, onto FLOORS.
+add_floor() {
+  local runner=${1%%=*} min=0 f
+  [[ "$1" =~ ^[a-z]+(=[0-9]+)?$ ]] || die "--floor takes <runner>[=<min>] (got '$1')"
+  case " $RUNNERS " in *" $runner "*) ;; *) die "unknown runner '$runner' (one of: $RUNNERS)" ;; esac
+  for f in ${FLOORS[@]+"${FLOORS[@]}"}; do
+    [ "${f%% *}" != "$runner" ] || die "--floor $runner given twice"
+  done
+  [ "$runner" = "$1" ] || min=${1#*=}
+  FLOORS+=("$runner $min")
+}
+# parse_args "$@": TIER, BUDGET and FLOORS; ARG_WORDS counts the words up to and with `--`,
+# which the caller shifts off to leave the command.
+parse_args() {
+  [ $# -ge 1 ] || usage
+  TIER=$1
+  shift
+  [[ "$TIER" =~ ^[A-Za-z0-9_-]+$ ]] || die "tier '$TIER' must match [A-Za-z0-9_-]+ (it becomes the key tier.<tier>.seconds)"
+  ARG_WORDS=1
+  while [ $# -gt 0 ] && [ "$1" != "--" ]; do
+    case "$1" in
+      --budget)
+        [ $# -ge 2 ] || usage
+        [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "--budget must be a positive whole number of seconds (got '$2')"
+        BUDGET=$2
+        ;;
+      --floor)
+        [ $# -ge 2 ] || usage
+        add_floor "$2"
+        ;;
+      *) usage ;;
+    esac
+    shift 2
+    ARG_WORDS=$((ARG_WORDS + 2))
+  done
+  [ $# -ge 2 ] && [ "$1" = "--" ] || usage
+  ARG_WORDS=$((ARG_WORDS + 1))
+  [ -n "$BUDGET" ] || die "--budget is required: every tier has one (the test-value standard)"
+}
+parse_args "$@"
+shift "$ARG_WORDS"
 ENFORCE=${TIER_BUDGET_ENFORCE:-1}
 [[ "$ENFORCE" =~ ^[01]$ ]] || die "TIER_BUDGET_ENFORCE must be 0 or 1 (got '$ENFORCE')"
 TAKE_SLOT=${TIER_SLOT:-1}
@@ -268,7 +280,9 @@ ratchet_floors() {
 ratchet_floors
 
 SHIFT=${DEVKIT_CLOCK_SHIFT:-}
-if [ -n "$SHIFT" ]; then
+# clock_shift_env: under DEVKIT_CLOCK_SHIFT, the plugins' environment (header, "Clock shift").
+clock_shift_env() {
+  local f plugin_dir
   [[ "$SHIFT" =~ ^[1-9][0-9]*d$ ]] || die "DEVKIT_CLOCK_SHIFT must be whole days ahead, like 30d (got '$SHIFT')"
   [ "${#FLOORS[@]}" -gt 0 ] || die "DEVKIT_CLOCK_SHIFT needs --floor pytest=<min> or vitest=<min>: the floor is how the shift is checked"
   for f in "${FLOORS[@]}"; do
@@ -283,7 +297,8 @@ if [ -n "$SHIFT" ]; then
   export PYTEST_PLUGINS="devkit_clock_shift${PYTEST_PLUGINS:+,$PYTEST_PLUGINS}"
   export DEVKIT_CLOCK_SHIFT_CONF="$root/scripts/ci/clock_shift.conf"
   export DEVKIT_CLOCK_SHIFT_VITEST="$plugin_dir/vitest_clock_shift.mjs"
-fi
+}
+[ -z "$SHIFT" ] || clock_shift_env
 
 # keep_inputs / put_back_inputs: a shifted run's metrics inputs (header, "Clock shift"). KEPT
 # holds each file input's path (absolute) by index, and $KEEP/<index> its copy when it existed.
@@ -353,19 +368,29 @@ devkit_stay_awake
 # held_slots: the pool's holder count for the budget's stretch (bin/_load_lib.sh, Slots); 1 under
 # TIER_SLOT=0, which stays out of the pool altogether.
 held_slots() { if [ "$TAKE_SLOT" = 1 ]; then slot_held_count; else echo 1; fi; }
-if [ "$TAKE_SLOT" = 1 ]; then
+# take_slot: under TIER_SLOT=1, the tier's capacity, unless a tier above it already holds it.
+take_slot() {
+  local cost
   # Only GATE_CAPACITY is read from gate.env; the gate's other keys are its own. Inside a gate
   # too: the tier asks for nothing there, but its budget stretches by the holders.
   gate_env_load tier_guard GATE_CAPACITY "$GATE_LOCAL_KEYS|$GATE_REMOTE_KEYS"
   slot_pool_init tier_guard
-  if ! slot_held_above; then
-    cost=$(slot_cost "$TIER")
-    slot_acquire "TIER $TIER" "$(repo_name):$TIER" "$cost"
-    echo "TIER $TIER admitted (cost $cost of $SLOT_CAPACITY$([ "$SLOT_QUEUED" = 0 ] || echo ", queued ${SLOT_QUEUED}s"))"
-    # The holder for a tier the command runs inside this one (it asks for nothing again).
-    export DEVKIT_SLOT_HOLDER=$$
+  slot_held_above && return 0
+  cost=$(slot_cost "$TIER")
+  slot_acquire "TIER $TIER" "$(repo_name):$TIER" "$cost"
+  if [ "$SLOT_QUEUED" = 0 ]; then
+    echo "TIER $TIER admitted (cost $cost of $SLOT_CAPACITY)"
+  else
+    slot_notice "TIER $TIER admitted (cost $cost of $SLOT_CAPACITY, queued ${SLOT_QUEUED}s)"
   fi
-fi
+  # The holder for a tier the command runs inside this one (it asks for nothing again).
+  export DEVKIT_SLOT_HOLDER=$$
+}
+[ "$TAKE_SLOT" = 0 ] || take_slot
+# Done with the notice fd (header, Capacity): a tier inside this one never waits, so nothing in
+# the command writes to it, and a server the command leaves behind must not hold the hook's
+# output open.
+if [ "${DEVKIT_NOTICE_FD:-}" = 6 ]; then exec 6>&-; unset DEVKIT_NOTICE_FD; fi
 devkit_load_scale "$BUDGET" "$(held_slots)"
 start=$SECONDS
 DEVKIT_LOAD_SCALE=$LOAD_SCALE "$@" 2>&1 | tee "$LOG"
@@ -378,22 +403,25 @@ slot_release
 budget_text="budget ${BUDGET}s"
 [ -z "$LOAD_NOTE" ] || budget_text=$LOAD_NOTE
 
-if [ "$rc" -ne 0 ]; then
+# fail_command: the command failed; exits with its code.
+fail_command() {
   echo "TIER $TIER FAIL (exit $rc, ${secs}s)"
   # pytest exits 1 when tests failed; a usage error (4, a bad clock_shift.conf line) is not rot.
   if [ -n "$SHIFT" ] && [ "$rc" -eq 1 ]; then
     echo "tier_guard: failed with the wall clock $SHIFT ahead: a fixture dated from the real clock beside a pinned one, or a fixed date the clock will pass. Date it from the pinned clock; list a test the shift cannot reach (a database's now(), a file's mtime) in scripts/ci/clock_shift.conf with the reason" >&2
   fi
   exit "$rc"
-fi
+}
+[ "$rc" -eq 0 ] || fail_command
 
 failed=$put_back   # a metrics input left as the shifted run wrote it fails the tier
 counts=""   # " <runner>=<n>" for the success line
 metrics="  \"tier.$TIER.seconds\": $secs"
 stripped=$(strip_ansi <"$LOG")
-for f in ${FLOORS[@]+"${FLOORS[@]}"}; do
-  runner=${f%% *}
-  min=${f#* }
+# judge_floor <runner> <min>: the runner's count from the log onto metrics and counts; failed=1
+# when it ran unshifted under a shift, printed no summary or fell under its floor.
+judge_floor() {
+  local runner=$1 min=$2 n
   if [ -n "$SHIFT" ] && ! grep -q "^$runner +$SHIFT " "$PROOF"; then
     echo "TIER $TIER NOSHIFT $runner (no shifted $runner process: it ran on the real clock)"
     case $runner in
@@ -407,7 +435,7 @@ for f in ${FLOORS[@]+"${FLOORS[@]}"}; do
     echo "TIER $TIER FLOOR $runner no summary line (floor $min)"
     echo "tier_guard: $runner printed no summary: it did not run, or a reporter replaced its default one (keep the default reporter alongside json)" >&2
     failed=1
-    continue
+    return
   fi
   metrics="$metrics,"$'\n'"  \"tests.$TIER.$runner\": $n"
   counts="$counts $runner=$n"
@@ -416,18 +444,23 @@ for f in ${FLOORS[@]+"${FLOORS[@]}"}; do
     echo "tier_guard: a test file, marker or glob stopped being picked up, or tests now skip; lower a floor only in the PR that removes tests (make metrics-rebaseline KEYS=tests.$TIER.$runner and the metrics-rebaseline label)" >&2
     failed=1
   fi
-done
+}
+for f in ${FLOORS[@]+"${FLOORS[@]}"}; do judge_floor "${f%% *}" "${f#* }"; done
 
-out=$root/build/metrics/tier-$TIER.json
-if [ -z "$SHIFT" ] && ! { mkdir -p "${out%/*}" && printf '{\n%s\n}\n' "$metrics" >"$out"; }; then
-  die "could not write $out"
-fi
+# write_tier_json: build/metrics/tier-<tier>.json, the unshifted run's only (header, "Clock shift").
+write_tier_json() {
+  local out=$root/build/metrics/tier-$TIER.json
+  [ -z "$SHIFT" ] || return 0
+  { mkdir -p "${out%/*}" && printf '{\n%s\n}\n' "$metrics" >"$out"; } || die "could not write $out"
+}
+write_tier_json
 
 # A shifted run is reported, never failed, on its budget: the unshifted run of the same suite
 # holds it, and the CLOCK group runs every shifted tier at once, in bursts shorter than the
 # 1-minute load average the stretch reads (locus #148 and Orbit #118: clock-unit-30d 25 s and
 # 38 s against 20 s and 30 s, unstretched, while their unshifted unit-backend passed).
-if [ "$secs" -gt "$LOAD_BUDGET" ]; then
+judge_budget() {
+  [ "$secs" -gt "$LOAD_BUDGET" ] || return 0
   echo "TIER $TIER OVERBUDGET ${secs}s ($budget_text)"
   if [ -n "$SHIFT" ]; then
     echo "TIER $TIER: over budget, not enforced (shifted: the unshifted run holds the budget)"
@@ -437,7 +470,8 @@ if [ "$secs" -gt "$LOAD_BUDGET" ]; then
   else
     echo "TIER $TIER: over budget, not enforced (TIER_BUDGET_ENFORCE=0)"
   fi
-fi
+}
+judge_budget
 
 [ "$failed" = 0 ] || exit 1
 echo "TIER $TIER: ${secs}s ($budget_text)$counts${SHIFT:+ shift=+$SHIFT}"

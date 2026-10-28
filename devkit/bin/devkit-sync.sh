@@ -44,9 +44,10 @@
 # template (a repo that adopted the hooks gets every hook devkit adds: commit-msg, 2026-10-18),
 # executable when its base is; a repo with no .githooks/ gets none.
 #
-# Merge driver: after vendoring, every path below runs metrics_driver_heal
-# (bin/_gitattributes_lib.sh) with the new devkit/bin, so this clone's merge.devkit-metrics.driver
-# matches the vendored command without another `make install` (rollcall #78).
+# Merge drivers: after vendoring, every path below runs merge_drivers_heal
+# (bin/_gitattributes_lib.sh) with the new devkit/bin, so this clone's merge.devkit-metrics and
+# merge.devkit-decisions drivers match the vendored commands without another `make install`
+# (rollcall #78).
 # gh's default repo likewise becomes origin (gh_default_heal, bin/_gh_repo_lib.sh): a fork's bare
 # gh resolves to its parent (redlib, 2026-10-26).
 #
@@ -133,8 +134,8 @@ while IFS=' ' read -r base copy; do
   echo "devkit-sync: $verb $copy from devkit/$base"
   REFRESHED+=("$copy")
 done <<<"$(base_copies)"
-metrics_driver_heal "$ROOT" "$ROOT/devkit/bin" devkit-sync \
-  || echo "devkit-sync: cannot set merge.devkit-metrics.driver (git above); make install sets it" >&2
+merge_drivers_heal "$ROOT" "$ROOT/devkit/bin" devkit-sync \
+  || echo "devkit-sync: cannot set a merge driver's config (git above); make install sets it" >&2
 gh_default_heal "$ROOT" devkit-sync \
   || echo "devkit-sync: cannot make origin gh's default repo (git above); devkit-check retries it" >&2
 if [ "$CURRENT" = 1 ]; then
