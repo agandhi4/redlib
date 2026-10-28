@@ -48,6 +48,8 @@ What each path is; [AGENTS.md](AGENTS.md) holds the invariants that tie them tog
 | `bin/throwaway_pg.sh` | One throwaway Postgres container for tests and smoke boots: `up` prints `PG_PORT=<n>`, `url`, `down`. tmpfs on by default (the volume-leak fix), TCP readiness, loopback only; env-driven. **Lanes:** `name <base>` prints `<base>-<lane>`, the lane being `GATE_LANE_ID` or a hash of the checkout's top-level path, so two worktrees of one repo never share a container; `up` labels the container with its lane and refuses (exit 1) to remove one still running for another lane. A repo's container default is `$(shell devkit/bin/throwaway_pg.sh name <repo>-test-pg)` with an auto port read back through `url`; a Makefile that builds its URL from a port at parse time derives it with `port <base>` (20000-29999 from the base and the lane) instead of a literal, since a fixed port collides the same way. devkit-check warns on a literal name or port, quoted or not (finplat's `finplat-test-pg` on 55460). Per-worker databases on a server several lanes share are `<db>_<lane>_<worker>`, not `<db>_<worker>`. |
 | `bin/boot_image.sh` | Boots a built app image on a private network (optionally with `throwaway_pg.sh` Postgres as `<name>-pg`), waits for its health endpoint with early exit on container death, prints `BASE=<url>`; `down` removes everything. Post-boot assertions stay in each repo. Env-driven (`BOOT_*`); `BOOT_EXPECT_VERSION` also requires the health JSON `version` to equal it. |
 | `bin/contract_probe.sh` | `<base> --live P --health P --request-id P --json-log FILE\|CONTAINER --metrics P --require-metric NAME --proxy-404 URL`: the observability contract asserted against a booted app, each assertion opt-in so repos switch them on as they comply. Called from a smoke after `boot_image.sh up`; `BOOT_EXPECT_VERSION` is checked in health, logs and `app_info`. One `probe <name> PASS\|FAIL` line each, every assertion runs. |
+| `bin/publish.sh` | `<repo-checkout> [--ungated <reason>]`, run as `make publish` by linux-box's timer: moves `latest` to origin/main when every commit since it was gated and an image input changed, after `ci-image` + `ci-smoke` at main on native amd64. See "Publish". |
+| `bin/registry_prune.sh` | `<ghcr.io/owner/name> [--keep N] [--dry-run]`: GHCR retention in images, not package versions: the newest N `sha-*` images, everything since, `latest`, and every manifest they reference. publish.sh runs it. |
 | `bin/ship_tag.sh` | `<owner/repo> <sha> [--date YYYY-MM-DD]`: the deploying step marks a main commit shipped with the annotated tag `ship-<date>-<sha7>` via `gh api` (no clone). Idempotent for the same sha, refuses another, survives a create race; prints `SHIP_TAG=<tag>`. Needs `contents: write`. |
 | `bin/release_check.sh` | Guard for `ci-quick`: the image is the only source of `APP_VERSION`. Dockerfile final stage has the ARG, ENV and OCI `image.version` LABEL; no compose file sets it under `environment:`; every workflow step that pushes an image passes it as a build arg. Every Dockerfile (root and one level down): a non-root final `USER` may `EXPOSE` and health-check only ports >= 1024 (the NAS kernel refuses a privileged bind; Orbit was down 16 h on 2026-10-13). |
 | `bin/workflows_check.sh`, `bin/_workflows_lib.sh` | Guard for `ci-quick`: Actions follows the minutes and supply-chain rules. Every `uses:` is a commit SHA with a `# vX.Y.Z` comment (devkit reusable workflows may float on `@main`). A `pull_request` workflow runs one job, skips drafts, cancels superseded runs and ignores `**.md`; more jobs need a top-level `# workflows-check: multi-job ok: <reason>`. A job pushing an image on main runs with `cancel-in-progress: false`. Every `runs-on:` names a versioned image (`ubuntu-24.04`), never a `-latest` label. The lib's push-step detection is shared with `release_check.sh`. |
@@ -106,8 +108,8 @@ provisions the pinned toolchain itself; for `swift-app`, Xcode, plus `xcodegen` 
 `exit 2` stubs that say so); `scripts/ci/gate_plan.sh`; `.githooks/` + `scripts/ci/hooks.conf`
 (the split in "Git hooks" below; swift-app's pre-commit is `ci-quick` and its pre-push
 `ci-lint-swift`, since its tests take minutes); `.github/workflows/quick-check.yml` calling the reusable workflow (swift-app's runs
-the `ci-guards` target, the only tier that runs off a Mac), and for image stacks `publish.yml`
-(build, `ci-smoke`, push `sha-<7>` + `latest`, ship tag, never cancelled) with a Dockerfile carrying the `APP_VERSION` trio;
+the `ci-guards` target, the only tier that runs off a Mac), and for image stacks a `publish`
+target, `PUBLISH_IMAGE=` in the plan (see "Publish") and a Dockerfile carrying the `APP_VERSION` trio;
 `renovate.json` on the shared preset; `.claude/settings.json` (claude-kit plugins); `AGENTS.md`
 (the project delta only: Stack + `Conventions:`, Architecture placeholder, Convention deltas,
 Commands, Workflow) with `CLAUDE.md` symlinked; `docs/decisions.md` with its first entry; the
@@ -1001,6 +1003,27 @@ unwired or unrecorded in the PR's file, never a loss against the PR's own file. 
 (v1 `tracks`, or the share-only `{"wired": <share>}`) records no check by name: it reads as
 first adoption on either side and fails the `scorecard_file` check until `make metrics-tighten`
 rewrites it.
+
+## Publish
+
+Every app image ships from one place: linux-box, where homelab's `devkit-publish@<repo>.timer`
+runs the repo's `make publish` (`devkit/bin/publish.sh .`) every 5 min from a clone kept at main
+(homelab hosts/linux-box/README.md, "Publisher"). GitHub Actions cannot run on the private repos.
+The Mac never publishes: publish.sh refuses any host but native amd64 (an arm64 image crash-looped
+the NAS). A run prints one `PUBLISH <name> <sha7> published|up-to-date|skipped|refused|failed
+<secs>s` line, and is a no-op unless `latest` is behind main, an image input changed (the gate's
+IMAGE group), and every first-parent commit since `latest` is a PR whose head passed `local-gate`
+on its parent (a Renovate PR whose diff only moves image digests, `_dependency_pr.py
+digest-only`, passes on the smoke where the plan says `GATE_RENOVATE_AUTOMERGE=digest`). Then it builds `ci-image` + `ci-smoke` at main as
+`<image>:sha-<7>`, pushes it, points `latest` at it, ship-tags main and prunes (`registry_prune.sh
+--keep 10`). An ungated commit is refused; the owner's escape is `devkit/bin/publish.sh .
+--ungated '<reason>'` on linux-box, and the reason lands in the ship tag.
+
+A repo opts in with the contract devkit-check holds: `PUBLISH_IMAGE=ghcr.io/<owner>/<name>` as
+one literal plan line, `publish: ; devkit/bin/publish.sh .`, `ci-image` that only builds
+(`CI_IMAGE`, `CI_BUILD_VERSION`), `ci-smoke` that boots it, and a gate job running `ci-smoke`.
+Then one homelab line in `hosts/linux-box/publish.list`, and its Actions publish job deleted in
+the same window, so exactly one thing moves `latest`.
 
 ## Deploy
 

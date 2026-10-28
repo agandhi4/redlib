@@ -2,7 +2,8 @@
 # Sourced, never run. Reads the root Makefile the way the guards need it, without running make
 # (a Makefile's $(shell …) and includes of generated files must not run inside a check).
 # Used by: docs_check.sh (rule 9, `make <target>` words in docs), ci_targets_check.sh,
-# devkit-check.sh (makefile_raw_docker, makefile_bare_python, makefile_fixed_pg), hook_steps.sh
+# devkit-check.sh (makefile_raw_docker, makefile_bare_python, makefile_fixed_pg,
+# makefile_rule_text: the publish contract), hook_steps.sh
 # (the docs-check fallback) and hooks_check.sh (a ci-lint no pre-commit step runs).
 
 # makefile_files: ./Makefile, then each file it includes by literal path, one per line.
@@ -34,6 +35,25 @@ makefile_targets() {
       n = split(head, t, /[[:space:]]+/)
       for (k = 1; k <= n; k++) if (t[k] != "" && t[k] !~ /^\./) printf "%s ", t[k]
     }' "${makefiles[@]}")"
+}
+
+# makefile_rule_text <target>: the rule of <target> in makefile_files as one line per rule line:
+# the text after its `:` (prerequisites and an inline `; recipe`), then each recipe line (tab-led,
+# plus the continuation lines of one). Nothing when no rule names it. Comments are dropped.
+makefile_rule_text() {
+  local files=() file
+  while IFS= read -r file; do files+=("$file"); done < <(makefile_files)
+  [ "${#files[@]}" -gt 0 ] || return 0
+  awk -v t="$1" '
+    FNR == 1 { inrule = 0; cont = 0 }
+    /^[[:space:]]*#/ { next }
+    inrule && (/^\t/ || cont) { cont = /\\$/; print; next }
+    { inrule = 0; cont = 0 }
+    !/^\t/ {
+      i = index($0, ":"); if (i < 2 || substr($0, i + 1, 1) == "=") next
+      n = split(substr($0, 1, i - 1), w, /[[:space:]]+/)
+      for (k = 1; k <= n; k++) if (w[k] == t) { inrule = 1; print substr($0, i + 1); next }
+    }' "${files[@]}"
 }
 
 # makefile_recipe_calls <command> [<skip ERE>]: `<file>:<line>: <recipe line>` for each recipe
