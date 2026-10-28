@@ -95,6 +95,14 @@
 # CHANGELOG.md) is prose, never an import, and dated history may name what was retired: it is
 # never scanned. Why (2026-10-26): closet reworded a past decisions.md entry just to silence it.
 #
+# Also, the publish contract (bin/publish.sh, which linux-box's timer runs as `make publish`): a
+# plan's PUBLISH_IMAGE is one literal line `PUBLISH_IMAGE=ghcr.io/<owner>/<name>` (publish.sh
+# reads it without sourcing the plan). With it, the Makefile has `publish` running
+# devkit/bin/publish.sh, `ci-image` that only builds (no ci-smoke, ci-e2e or boot_image.sh in its
+# rule: the publisher runs `ci-image ci-smoke`, never Playwright) and `ci-smoke`, and the plan runs
+# ci-smoke as a gate job. A publish rule with no PUBLISH_IMAGE fails too: it would refuse every
+# run. Why (2026-10-27): `ci-image` meant three things across the fleet.
+#
 # Also, where origin is a GitHub repo (bin/_gh_repo_lib.sh): the plan's literal GATE_SLUG is
 # origin's (owner and name without case), since the gate and make merge act on GATE_SLUG alone;
 # and gh's default repo in this clone is origin (gh_default_heal, one line when it sets it, a
@@ -260,6 +268,31 @@ check_plan() {
   plan_literal_setting "$plan" GATE_CODE_PATHS '[A-Za-z0-9._/-]+(,[A-Za-z0-9._/-]+)*' \
     'GATE_CODE_PATHS=<prefix>[,<prefix>...], unquoted (plugins/,templates/)'
   plan_image_excludes "$plan"
+}
+# check_publish_contract: the header's publish contract.
+publish_contract_fail() { echo "devkit-check: publish contract: $*" >&2; publish_failed=1; }
+check_publish_contract() {
+  local plan image publish_rule image_rule publish_failed=0
+  plan=$(awk '{ sub(/#.*/, "") } 1' <<<"$plan_src")
+  plan_literal_setting "$plan" PUBLISH_IMAGE 'ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+' 'PUBLISH_IMAGE=ghcr.io/<owner>/<name>'
+  image=$(gate_plan_literal <(printf '%s\n' "$plan_src") PUBLISH_IMAGE)
+  publish_rule=$(makefile_rule_text publish)
+  if [ -z "$image" ]; then
+    ! grep -q 'publish\.sh' <<<"$publish_rule" \
+      || publish_contract_fail "Makefile's publish runs publish.sh but scripts/ci/gate_plan.sh has no PUBLISH_IMAGE= line"
+    [ "$publish_failed" = 0 ] || exit 1
+    return 0
+  fi
+  grep -q 'devkit/bin/publish\.sh' <<<"$publish_rule" \
+    || publish_contract_fail "PUBLISH_IMAGE is set, so the Makefile needs 'publish: ; devkit/bin/publish.sh .'"
+  case "$(makefile_targets)" in *" ci-smoke "*) ;; *) publish_contract_fail "no ci-smoke target: it boots CI_IMAGE and asserts CI_BUILD_VERSION" ;; esac
+  image_rule=$(makefile_rule_text ci-image)
+  [ -n "$image_rule" ] || publish_contract_fail "no ci-image target: it builds CI_IMAGE with APP_VERSION=CI_BUILD_VERSION"
+  ! grep -qE '(^|[^A-Za-z0-9_.-])(ci-smoke|ci-e2e|boot_image\.sh)([^A-Za-z0-9_.-]|$)' <<<"$image_rule" \
+    || publish_contract_fail "ci-image must only build: it runs a smoke or browser tier, so the publisher would run it twice or run Playwright; the gate plan runs ci-smoke (and ci-e2e) as their own jobs"
+  grep -qE '(^|[^A-Za-z0-9_.-])ci-smoke([^A-Za-z0-9_.-]|$)' <<<"$plan" \
+    || publish_contract_fail "scripts/ci/gate_plan.sh runs no ci-smoke job; with ci-image build-only, no gate would boot the image"
+  [ "$publish_failed" = 0 ] || exit 1
 }
 check_clone_config() {
   local origin plan_slug
@@ -448,6 +481,7 @@ check_deprecated_exports() {
 check_vendored_tree
 check_swift_format
 check_plan
+check_publish_contract
 check_clone_config
 check_baselines
 check_tsbuildinfo

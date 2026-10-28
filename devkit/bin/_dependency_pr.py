@@ -44,6 +44,15 @@ What counts as a pin change, a fixed list (README "pr_merge.sh"):
               line on either side of the diff is held to it; a file GitHub sends no patch for (too
               large, binary) or renamed is not a pin change.
 
+  _dependency_pr.py digest-only <PR author login> <commit author logins, comma-separated>
+reads the same changed files on stdin for bin/publish.sh: exit 0 printing `renovate` when a
+Renovate PR, every commit Renovate's, only moves image digests: every changed line is a compose
+`image:` or Dockerfile `FROM` line, paired in order with the line it replaces in its hunk, equal
+to it once each `@sha256:<64 hex>` is dropped, and carrying a digest it did not (pinDigest) or a
+different one (digest). A tag, a name or any other line changing is not. Exit 1 otherwise,
+printing why. The one definition of the automerge hole renovate/automerge-digest opens (devkit
+decisions 2026-10-27, "One image publisher"): publish.sh admits such a commit on the smoke alone.
+
   _dependency_pr.py paths
 reads the same changed files on stdin and prints every path they touch, one per line: each
 `filename`, and a rename's or copy's `previous_filename` too (a rename from src/x.py to docs/x.md
@@ -275,6 +284,72 @@ def exempt(author: str, commit_authors: str, files_ndjson: str) -> tuple[int, st
     return (1, reason) if reason else (0, who)
 
 
+IMAGE_DIGEST = re.compile(r"@sha256:[0-9a-f]{64}")
+
+
+def _digest_line(path: str, line: str) -> bool:
+    """Whether <line> of <path> is an image reference a digest update may change."""
+    if COMPOSE_FILE.search(path):
+        return bool(COMPOSE_IMAGE.match(line))
+    return bool(DOCKERFILE.search(path) and DOCKER_FROM.match(line))
+
+
+def _digest_pair(path: str, old: str, new: str) -> str:
+    """'' when <new> replaces <old> by its image digest alone, else why not."""
+    if not (_digest_line(path, old) and _digest_line(path, new)):
+        return f"{path} changes more than an image reference: {new.strip()[:80]}"
+    if IMAGE_DIGEST.sub("", old) != IMAGE_DIGEST.sub("", new):
+        return f"{path} changes more than a digest: {old.strip()[:60]} -> {new.strip()[:60]}"
+    if not IMAGE_DIGEST.search(new) or old == new:
+        return f"{path} drops or keeps the digest: {new.strip()[:80]}"
+    return ""
+
+
+def _undigested_hunk(path: str, removed: list[str], added: list[str]) -> str:
+    """'' when each added line replaces the removed line at its place by its digest alone."""
+    if len(removed) != len(added):
+        return f"{path} adds or removes lines, not only digests"
+    for old, new in zip(removed, added, strict=True):
+        reason = _digest_pair(path, old, new)
+        if reason:
+            return reason
+    return ""
+
+
+def undigested(files: Iterable[dict[str, object]]) -> str:
+    """Why these changed files are more than image digest moves, '' when they are not."""
+    for change in files:
+        path, status = str(change.get("filename") or ""), str(change.get("status") or "")
+        patch = change.get("patch")
+        if status != "modified" or not isinstance(patch, str):
+            return f"{path} is {status or 'of unknown status'} or has no patch"
+        removed: list[str] = []
+        added: list[str] = []
+        for raw in [*patch.splitlines(), "@@"]:
+            if raw[:1] in ("-", "+"):
+                (removed if raw[:1] == "-" else added).append(raw[1:])
+                continue
+            reason = _undigested_hunk(path, removed, added)
+            if reason:
+                return reason
+            removed, added = [], []
+    return ""
+
+
+def digest_only(author: str, commit_authors: str, files_ndjson: str) -> tuple[int, str]:
+    """(exit code, what to print) of the `digest-only` mode (module docstring)."""
+    if bot(author) != "renovate":
+        return 1, f"{author or '?'} is not Renovate"
+    strangers = sorted({a or "?" for a in commit_authors.split(",") if bot(a) != "renovate"})
+    if strangers:
+        return 1, f"a commit by {', '.join(strangers)}, not only renovate"
+    files = changes(files_ndjson)
+    if not files:
+        raise ValueError("no changed files")
+    reason = undigested(files)
+    return (1, reason) if reason else (0, "renovate")
+
+
 def changes(files_ndjson: str) -> list[dict[str, object]]:
     """The changed files of `gh api …/pulls/<n>/files --jq '.[]'`, one JSON object per line."""
     files = [json.loads(line) for line in files_ndjson.splitlines() if line.strip()]
@@ -323,15 +398,16 @@ def main() -> int:
         for path in touched:
             print(path)
         return 0
-    if sys.argv[1:2] == ["exempt"]:
+    if sys.argv[1:2] in (["exempt"], ["digest-only"]):
         if len(sys.argv) != 4:
             print(
-                "usage: _dependency_pr.py exempt <author> <commit authors,...> <files",
+                f"usage: _dependency_pr.py {sys.argv[1]} <author> <commit authors,...> <files",
                 file=sys.stderr,
             )
             return 2
+        mode = exempt if sys.argv[1] == "exempt" else digest_only
         try:
-            code, out = exempt(sys.argv[2], sys.argv[3], sys.stdin.read())
+            code, out = mode(sys.argv[2], sys.argv[3], sys.stdin.read())
         except ValueError as exc:
             print(f"_dependency_pr: stdin is not the PR's changed files: {exc}", file=sys.stderr)
             return 2

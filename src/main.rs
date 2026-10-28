@@ -109,8 +109,10 @@ async fn main() {
 		.parse_filters(&std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".to_string()))
 		.init();
 
+	// `--version` reports the build's one version string (the image's sha7), not the crate semver:
+	// make ci-smoke asserts it, since nothing else answers before the OAuth bootstrap below.
 	let matches = Command::new("Redlib")
-		.version(env!("CARGO_PKG_VERSION"))
+		.version(instance_info::app_version())
 		.about("Private front-end for Reddit written in Rust ")
 		.arg(Arg::new("ipv4-only").short('4').long("ipv4-only").help("Listen on IPv4 only").num_args(0))
 		.arg(Arg::new("ipv6-only").short('6').long("ipv6-only").help("Listen on IPv6 only").num_args(0))
