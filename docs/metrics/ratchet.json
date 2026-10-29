@@ -20,7 +20,7 @@
     "source": "rust-app"
   },
   "coverage.app.lines": {
-    "bound": 62.51,
+    "bound": 62.6,
     "direction": "higher",
     "source": "cov-app"
   },
