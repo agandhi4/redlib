@@ -2,6 +2,7 @@ use crate::{
 	config::{Config, CONFIG},
 	preferences::Preferences,
 	server::RequestExt,
+	sources,
 	utils::ErrorTemplate,
 };
 use askama::Template;
@@ -186,6 +187,9 @@ impl InstanceInfo {
 			])
 			.with_header_row(["Default preferences"]),
 		);
+		container.add_raw("<br />");
+		// Live, unlike the rest of this page: which source each kind of read is on right now.
+		container.add_table(Table::from(sources::status().into_iter().map(|(kind, source)| [kind.to_string(), source])).with_header_row(["Reddit sources"]));
 		container.to_html_string().replace("<th>", "<th colspan=\"2\">")
 	}
 	fn to_string(&self, string_type: &StringType) -> String {

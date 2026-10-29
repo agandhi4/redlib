@@ -1,5 +1,5 @@
 //! Classification of one Reddit API response into the caller's result and the token action.
-//! Used by `client::fetch_reddit` (behind `json()` and `gql()`), which performs the action.
+//! Used by `client::fetch_reddit` (behind `fetch_json()` and `fetch_gql()`), which performs the action.
 
 use log::error;
 use serde_json::Value;

@@ -2,8 +2,9 @@
 //! GraphQL query (`gql_comments`), since Reddit 403s the thread JSON routes for app-only tokens.
 //! Used by `post::item`.
 
-use crate::client::{distrust_listing, gql, json};
+use crate::client::{distrust_listing, gql};
 use crate::gql_comments::{is_supported_sort, listing, request_body, CommentsRequest};
+use crate::sources::json;
 use log::{debug, warn};
 use serde_json::Value;
 use std::time::Instant;
@@ -56,7 +57,7 @@ pub async fn fetch(query: ThreadQuery) -> Result<Thread, String> {
 	Ok(Thread { post, comments, sort })
 }
 
-/// The post alone, from `/by_id/` (still served to app-only tokens).
+/// The post alone, from `/by_id/` (PostsByIds through `sources`, REST as its fallback).
 async fn post(query: &ThreadQuery) -> Result<Value, String> {
 	let path = format!("/by_id/t3_{}.json?raw_json=1", query.post_id);
 	let listing = json(path.clone(), query.quarantine).await?;

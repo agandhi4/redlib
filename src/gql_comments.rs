@@ -2,27 +2,18 @@
 //! API's comments Listing so `comments::parse_comments` renders them unchanged. Since 2026-10-23
 //! Reddit 403s the thread JSON routes for app-only tokens; this operation still answers them.
 //! Pure: builds the request body and converts the response, with no I/O (`thread::fetch` sends it
-//! through `client::gql`).
+//! through `client::gql`). The operation's hash is `gql_ops::POST_COMMENTS`.
 //!
 //! Ported from upstream redlib PR #603 (fxmfxmfx, unmerged), whose converter and RTJSON renderer
 //! (here `rtjson.rs`) are adapted from polak14's implementation (AGPL-3.0-only):
 //! https://github.com/polak14/redlib/commit/a63460b4ac29c27401e3e2aaab34b68dca02991e
 
-use crate::rtjson::render;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::DateTime;
+use crate::gql_fields::{awards, content_html, decode_cursor, edited, encode_cursor, flair, lowercase, timestamp};
+use crate::gql_ops::{body, POST_COMMENTS};
 use serde_json::{json, Value};
 
-const OPERATION: &str = "PostComments";
-/// The Android app's persisted-query id for `PostComments`; gql-fed rejects raw query text, so this
-/// hash is the whole query. When Reddit retires it, every thread renders post-only and
-/// `thread::fetch` logs a "PersistedQueryNotFound"-style error: update this constant from
-/// https://github.com/Amqx/reddit-gql/blob/main/src/operations.ts.
-const POST_COMMENTS_HASH: &str = "314f29c2494fd78c7844ef2c6b09acb4bef5b37ab50b4ddc01691d6d5c8433f8";
 const COMMENT_COUNT: u32 = 200;
 const MAX_DEPTH: u32 = 10;
-/// Longest base64 cursor accepted from a URL; Reddit's own are far shorter.
-const MAX_CURSOR_LEN: usize = 8192;
 
 /// JSON API sort names and their GraphQL `CommentSort` values. `best` is an alias of `confidence`.
 const SORTS: [(&str, &str); 6] = [
@@ -81,27 +72,7 @@ pub(crate) fn request_body(req: &CommentsRequest) -> Result<Value, String> {
 		}
 		(None, None) => {}
 	}
-	Ok(json!({
-		"operationName": OPERATION,
-		"variables": variables,
-		"extensions": { "persistedQuery": { "version": 1, "sha256Hash": POST_COMMENTS_HASH } },
-	}))
-}
-
-/// Reddit's cursors carry `:`, `+` and `/`; URL-safe base64 keeps them intact in a query string.
-fn encode_cursor(cursor: &str) -> String {
-	URL_SAFE_NO_PAD.encode(cursor)
-}
-
-fn decode_cursor(cursor: &str) -> Result<String, String> {
-	if cursor.len() > MAX_CURSOR_LEN {
-		return Err("invalid comments cursor (too long)".to_string());
-	}
-	URL_SAFE_NO_PAD
-		.decode(cursor)
-		.ok()
-		.and_then(|bytes| String::from_utf8(bytes).ok())
-		.ok_or_else(|| "invalid comments cursor".to_string())
+	Ok(body(&POST_COMMENTS, variables))
 }
 
 /// The JSON API comments Listing for a `PostComments` response: `children` nested by depth,
@@ -228,7 +199,7 @@ fn comment_item(node: &Value, parent: &str) -> Option<Value> {
 	if !deleted && !fullname.strip_prefix("t1_").is_some_and(valid_id) {
 		return None;
 	}
-	let (author, body, body_html) = content(node, deleted);
+	let (author, markdown, body_html) = content(node, deleted);
 	let author_flair = &node["authorFlair"];
 	let (flair_type, flair_richtext) = flair(author_flair);
 	Some(json!({
@@ -237,21 +208,21 @@ fn comment_item(node: &Value, parent: &str) -> Option<Value> {
 			"id": fullname.strip_prefix("t1_").unwrap_or(fullname),
 			"name": fullname,
 			"author": author,
-			"body": body,
+			"body": markdown,
 			"body_html": format!("<div class=\"md\">{body_html}</div>"),
 			"created_utc": timestamp(&node["createdAt"]).unwrap_or_default(),
-			"edited": timestamp(&node["editedAt"]).map_or(Value::Bool(false), Value::from),
+			"edited": edited(&node["editedAt"]),
 			"score": node["score"].as_i64().unwrap_or_default(),
 			"score_hidden": node["isScoreHidden"] == true,
 			"stickied": node["isStickied"] == true,
 			// Reddit's own collapse (an admin takedown, a low score), the JSON API's `collapsed`.
 			"collapsed": node["isInitiallyCollapsed"] == true,
-			"distinguished": node["distinguishedAs"].as_str().map(str::to_lowercase),
+			"distinguished": lowercase(&node["distinguishedAs"]),
 			"author_flair_type": flair_type,
 			"author_flair_richtext": flair_richtext,
 			"author_flair_text": author_flair["text"],
 			"author_flair_background_color": author_flair["template"]["backgroundColor"],
-			"author_flair_text_color": author_flair["textColor"].as_str().map(str::to_lowercase),
+			"author_flair_text_color": lowercase(&author_flair["textColor"]),
 			"all_awardings": awards(&node["awardings"]),
 			"parent_id": parent,
 			"replies": "",
@@ -275,43 +246,7 @@ fn content(node: &Value, deleted: bool) -> (String, String, String) {
 		return ("[deleted]".into(), "[removed]".into(), String::new());
 	}
 	let content = &node["content"];
-	let markdown = content["markdown"].as_str().unwrap_or_default();
-	// `richtext` is a JSON string holding `{"document": [...]}`; `html` arrives empty.
-	let richtext: Value = content["richtext"].as_str().and_then(|r| serde_json::from_str(r).ok()).unwrap_or_default();
-	let html = if richtext["document"].is_array() {
-		render(&richtext["document"], &content["richtextMedia"])
-	} else {
-		format!("<p>{}</p>", htmlescape::encode_minimal(markdown))
-	};
-	(author.into(), markdown.into(), html)
-}
-
-/// The JSON API's `author_flair_type` and `author_flair_richtext` for a GraphQL `authorFlair`.
-fn flair(flair: &Value) -> (&'static str, Value) {
-	let richtext: Value = flair["richtext"].as_str().and_then(|r| serde_json::from_str(r).ok()).unwrap_or_default();
-	let kind = if richtext.as_array().is_some_and(|r| !r.is_empty()) {
-		"richtext"
-	} else if flair["text"].as_str().is_some_and(|t| !t.is_empty()) {
-		"text"
-	} else {
-		""
-	};
-	(kind, richtext)
-}
-
-/// `all_awardings` in the shape `model::Awards::parse` reads.
-fn awards(awardings: &Value) -> Vec<Value> {
-	awardings
-		.as_array()
-		.into_iter()
-		.flatten()
-		.map(|a| json!({ "name": a["award"]["name"], "count": a["total"], "resized_icons": [{ "url": a["award"]["static_icon_16"]["url"] }] }))
-		.collect()
-}
-
-/// `2026-10-20T01:20:04.977000+0000` as Unix seconds.
-fn timestamp(value: &Value) -> Option<f64> {
-	DateTime::parse_from_str(value.as_str()?, "%Y-%m-%dT%H:%M:%S%.f%z").ok().map(|t| t.timestamp() as f64)
+	(author.into(), content["markdown"].as_str().unwrap_or_default().into(), content_html(content))
 }
 
 #[cfg(test)]
@@ -356,7 +291,7 @@ mod tests {
 		}
 		let body = request_body(&request(None, "top", None, 0)).unwrap();
 		assert_eq!(body["operationName"], "PostComments");
-		assert_eq!(body["extensions"]["persistedQuery"]["sha256Hash"], POST_COMMENTS_HASH);
+		assert_eq!(body["extensions"]["persistedQuery"]["sha256Hash"], POST_COMMENTS.hash);
 		assert_eq!(body["variables"]["id"], "t3_p");
 		assert_eq!(body["variables"]["count"], 200);
 		assert_eq!(body["variables"]["maxDepth"], 10);
@@ -383,8 +318,6 @@ mod tests {
 	fn foreign_cursors_are_refused() {
 		assert!(request_body(&request(None, "top", Some("%FF"), 0)).is_err());
 		assert!(request_body(&request(None, "top", Some(&encode_cursor(&"x".repeat(7000))), 0)).is_err());
-		// Valid base64 that is not UTF-8
-		assert!(request_body(&request(None, "top", Some(&URL_SAFE_NO_PAD.encode([0xff, 0xfe])), 0)).is_err());
 	}
 
 	#[test]
@@ -563,14 +496,6 @@ mod tests {
 		let deleted = json!({"depth": 0, "node": {"__typename": "DeletedComment"}});
 		let data = &item(&deleted, "p").unwrap().1["data"];
 		assert_eq!(data["body_html"], "<div class=\"md\"><p>[deleted]</p></div>");
-	}
-
-	#[test]
-	fn timestamps_parse_with_and_without_fractions() {
-		assert_eq!(timestamp(&json!("2026-10-20T01:20:04.977000+0000")), Some(1792459204.0));
-		assert_eq!(timestamp(&json!("2026-10-20T01:20:04+0000")), Some(1792459204.0));
-		assert_eq!(timestamp(&json!("yesterday")), None);
-		assert_eq!(timestamp(&Value::Null), None);
 	}
 
 	#[test]
