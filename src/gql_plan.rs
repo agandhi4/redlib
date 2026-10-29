@@ -6,7 +6,7 @@
 use crate::gql_ops;
 use crate::gql_posts::{connection, is_post, listing, post};
 use crate::gql_users::{comment, community, redditor, subreddit_about, unavailable_reason};
-use crate::reddit_path::{Page, Resource, SearchPage, UserListing};
+use crate::reddit_path::{Page, Resource, SearchPage, Sort, UserListing};
 use futures_lite::future::Boxed;
 use log::warn;
 use serde::{Deserialize, Serialize};
@@ -231,8 +231,33 @@ struct Fetched {
 	next: Option<String>,
 }
 
+/// A thing's rank under one overview sort, higher first: both sides arrive in that order.
+type Rank = fn(&Value) -> f64;
+
 fn created(thing: &Value) -> f64 {
 	thing["data"]["created_utc"].as_f64().unwrap_or_default()
+}
+
+fn score(thing: &Value) -> f64 {
+	thing["data"]["score"].as_f64().unwrap_or_default()
+}
+
+/// Reddit's published hot rank (score's order of magnitude plus age in 12.5 h units), which
+/// orders both posts and comments by `hot`.
+fn hot(thing: &Value) -> f64 {
+	let score = score(thing);
+	score.signum() * score.abs().max(1.0).log10() + (created(thing) - 1_134_028_003.0) / 45_000.0
+}
+
+/// The rank the overview merges a sort by; None for a sort whose rank GraphQL does not carry
+/// (controversial needs the vote split), which REST serves.
+fn overview_rank(sort: Sort) -> Option<Rank> {
+	match sort {
+		Sort::New => Some(created),
+		Sort::Top => Some(score),
+		Sort::Hot => Some(hot),
+		Sort::Controversial | Sort::Rising | Sort::Best => None,
+	}
 }
 
 impl Fetched {
@@ -245,18 +270,18 @@ impl Fetched {
 		}
 	}
 
-	/// The oldest thing this side shows, when the side has more: nothing older from the other
-	/// side may show yet, since this side's next page may hold things newer than it.
-	fn bound(&self) -> Option<f64> {
+	/// The lowest-ranked thing this side shows, when the side has more: nothing ranked lower
+	/// from the other side may show yet, since this side's next page may outrank it.
+	fn bound(&self, rank: Rank) -> Option<f64> {
 		self.next.as_ref()?;
-		self.things.iter().map(created).reduce(f64::min)
+		self.things.iter().map(rank).reduce(f64::min)
 	}
 
 	/// This side's things down to `bound`, and where the side resumes: past its page when all of
 	/// it showed, else on the same page past what showed.
-	fn take(self, bound: Option<f64>) -> (Vec<Value>, Option<SideCursor>) {
+	fn take(self, rank: Rank, bound: Option<f64>) -> (Vec<Value>, Option<SideCursor>) {
 		let Self { mut things, at, next } = self;
-		let shown = bound.map_or(things.len(), |bound| things.iter().take_while(|t| created(t) >= bound).count());
+		let shown = bound.map_or(things.len(), |bound| things.iter().take_while(|t| rank(t) >= bound).count());
 		let resume = if shown == things.len() {
 			next.map(|a| SideCursor { a: Some(a), s: 0 })
 		} else {
@@ -318,11 +343,14 @@ async fn user_comments(name: &str, page: &Page, gql: GqlFetch<'_>) -> Result<Sid
 	Ok((summaries.iter().map(|s| comment(s, body(&s["id"]))).collect(), cursor))
 }
 
-/// Posts and comments, newest first: a page of each side, merged down to a shared boundary (the
-/// newer of the two sides' oldest things, among sides with more), so the overview stays in time
-/// order across pages. A side cut at the boundary resumes on the same page, past what showed;
-/// both resume points travel in one `after`, so nothing repeats or is skipped.
+/// Posts and comments in the page's sort: a page of each side, merged by that sort's rank down
+/// to a shared boundary (the higher of the two sides' lowest-ranked things, among sides with
+/// more), so the order holds across pages. A side cut at the boundary resumes on the same page,
+/// past what showed; both resume points travel in one `after`, so nothing repeats or is skipped.
 async fn overview(name: &str, page: &Page, gql: GqlFetch<'_>) -> Result<Side, GqlError> {
+	let Some(rank) = overview_rank(page.sort) else {
+		return Err(GqlError::NotServed(format!("the overview cannot merge by {:?}", page.sort)));
+	};
 	let cursor = match &page.after {
 		None => OverviewCursor {
 			p: Some(SideCursor::default()),
@@ -343,10 +371,10 @@ async fn overview(name: &str, page: &Page, gql: GqlFetch<'_>) -> Result<Side, Gq
 	)
 	.await;
 	let (posts, comments) = (Fetched::new(posts?, cursor.p), Fetched::new(comments?, cursor.c));
-	let bound = posts.bound().into_iter().chain(comments.bound()).reduce(f64::max);
-	let ((mut things, p), (more, c)) = (posts.take(bound), comments.take(bound));
+	let bound = posts.bound(rank).into_iter().chain(comments.bound(rank)).reduce(f64::max);
+	let ((mut things, p), (more, c)) = (posts.take(rank, bound), comments.take(rank, bound));
 	things.extend(more);
-	things.sort_by(|a, b| created(b).total_cmp(&created(a)));
+	things.sort_by(|a, b| rank(b).total_cmp(&rank(a)));
 	let next = (p.is_some() || c.is_some()).then(|| serde_json::to_string(&OverviewCursor { p, c }).unwrap_or_default());
 	Ok((things, next))
 }
@@ -630,6 +658,20 @@ mod tests {
 			(vec!["t3_d".to_string()], Some(json!("pc")), Some(json!("cc")))
 		);
 		assert!(listing["data"]["after"].is_null());
+
+		// Top merges by score; controversial has no rank here and is REST's
+		let scored = |id: &str, score: i64| json!({ "__typename": "SubredditPost", "id": id, "title": "t", "score": score, "createdAt": "2026-10-01T00:00:00+0000", "subreddit": {"name": "rust"} });
+		let high = json!({ "id": "t1_c", "score": 50, "createdAt": "2020-01-01T00:00:00+0000", "postInfo": {"id": "t3_x", "title": "On"} });
+		let comments = ("SubmittedComments", json!({ "data": { "redditorInfoByName": { "comments": edges(vec![high], None) } } }));
+		let fake = Fake::new(vec![submitted(vec![scored("t3_a", 90), scored("t3_b", 10)], None), comments, bodies()]);
+		assert_eq!(
+			ids(&fake.run("/user/spez/overview.json?sort=top&t=all", false).await.unwrap()),
+			vec!["t3_a", "t1_c", "t3_b"]
+		);
+		assert!(matches!(
+			Fake::new(Vec::new()).run("/user/spez/overview.json?sort=controversial", false).await,
+			Err(GqlError::NotServed(_))
+		));
 
 		let foreign = after_param("not json");
 		assert!(matches!(
