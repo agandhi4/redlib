@@ -37,10 +37,15 @@
 #     After the sync, every other devkit-sync/* branch whose tip is the job's commit, vendoring a
 #     devkit commit main has moved past, with no open PR, is deleted (`pruned`, prune_sync_branches).
 #   - then gated and merged as below, counting toward --max. A fail is a devkit regression: one
-#     comment per head, the PR left open, the next devkit change opening its successor. A gate
-#     failing on the metrics job is the same fail: the existing rules apply by hand (a gain wants
-#     `make metrics-tighten` on the branch, a loss the metrics-rebaseline label), which makes it
-#     a repo change under the normal Codex rule. Merged: the worktree moves to the new main.
+#     comment per head, the PR left open, the next devkit change opening its successor. Except a
+#     fail on gains alone (gate_record.py gains: every failure of the code is a metrics key the
+#     ratchet measured BETTER and asks to lock in, as when devkit #268 re-counted shell branches):
+#     lock_in_sync rebuilds the sync commit with those bounds tightened (metrics_ratchet.py
+#     lock-in, the reason `devkit <sha7> re-measured: <key> <old>→<new>, ...` in its message),
+#     pushes it over the head and gates it once more; a second fail is the regression as above.
+#     Still a sync (devkit_sync_only), so make merge asks no Codex review of it. A loss (WORSE,
+#     MISSING) is never settled here: the metrics-rebaseline label, by hand, makes it a repo
+#     change under the normal Codex rule. Merged: the worktree moves to the new main.
 # _dependency_pr.py classifies the open Renovate and Dependabot PRs against main, oldest first;
 # majors and unreadable update types are skipped and listed. Then, per minor/patch PR:
 #   - behind main: gated like any PR. The gate tests the merge into the current main and
@@ -91,7 +96,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
 . "$HERE/_gate_env.sh"
 # shellcheck source=bin/_toolchain_lib.sh
 . "$HERE/_toolchain_lib.sh"
-# shellcheck source=bin/_vendor_paths.sh  # DEVKIT_URL, vendor_tree_of, vendoring_only, vendored_from
+# shellcheck source=bin/_vendor_paths.sh  # DEVKIT_URL, VENDOR_SYNC_BOUNDS, vendor_tree_of, devkit_sync_only, vendored_from
 . "$HERE/_vendor_paths.sh"
 # shellcheck source=bin/_trailer_lib.sh  # DEVKIT_DEFAULT_TRAILER, the sync commit's trailer
 . "$HERE/_trailer_lib.sh"
@@ -253,8 +258,8 @@ failure_comment() {
     printf '`make gate PR=%s` failed on head %s (bin/dependency_merge.sh, the nightly devkit sync): ' "$1" "${2:0:12}"
     printf "devkit's main breaks this repo, a devkit regression (or a bug this repo relied on). "
     printf 'This PR stays open and is not gated again; the next devkit change opens its successor. '
-    printf 'A failing metrics job follows the usual rules by hand: a gain wants `make metrics-tighten` committed here, '
-    printf 'a loss the metrics-rebaseline label; either makes this a repo change, under the normal Codex rule.\n\n'
+    printf 'Gains alone were locked in by the job and gated again (lock_in_sync); a metrics key worse than its bound '
+    printf 'wants the metrics-rebaseline label by hand, which makes this a repo change, under the normal Codex rule.\n\n'
   else
     printf '`make gate PR=%s` failed on head %s (bin/dependency_merge.sh, the nightly dependency merge). ' "$1" "${2:0:12}"
     printf 'This PR stays open; the nightly run gates it again once its head changes.\n\n'
@@ -263,17 +268,19 @@ failure_comment() {
   printf '\nLog on %s: `%s`\n' "$(hostname -s)" "$PR_LOG"
 }
 
-# gate_pr <slug> <state name> <n> <head> <kind>: gate, then merge or comment, and record the
-# outcome. <kind> (dependency, devkit-sync) words the comment and a failure's record.
+# gate_pr <slug> <state name> <n> <head> <kind> [<locked>]: gate, then merge or comment, and
+# record the outcome. <kind> (dependency, devkit-sync) words the comment and a failure's record.
+# <locked>: lock_in_sync's reason, for the head it made; that head's gains are a failure.
 gate_pr() {
-  local slug=$1 n=$3 head=$4 kind=$5 rc gate_json verdict failures refusal regression=""
+  local slug=$1 n=$3 head=$4 kind=$5 locked=${6:-} rc gate_json verdict failures refusal regression="" gains
   gate_json=${XDG_STATE_HOME:-$HOME/.local/state}/$2/logs/$n/gate.json
   PR_LOG=$STATE/dependency-merge/${slug#*/}-$n.log
-  make -C "$WT" gate PR="$n" GATE_ARGS="--expect-head $head" >"$PR_LOG" 2>&1 8>&-
+  [ -n "$locked" ] || : >"$PR_LOG"  # the re-gate after a lock-in follows the first gate's log
+  make -C "$WT" gate PR="$n" GATE_ARGS="--expect-head $head" >>"$PR_LOG" 2>&1 8>&-
   rc=$?
   if [ "$rc" = 0 ]; then
     if make -C "$WT" merge PR="$n" >>"$PR_LOG" 2>&1 8>&-; then
-      record "$slug#$n" merged "head ${head:0:12}"
+      record "$slug#$n" merged "head ${head:0:12}${locked:+ ($locked)}"
     else
       refusal=$(grep -E '^merge: refused: ' "$PR_LOG" | tail -n 1)
       case "$refusal" in
@@ -292,6 +299,14 @@ gate_pr() {
   if [ -z "$("$DEVKIT_PYTHON" -I "$HERE/gate_record.py" failures --code-only "$gate_json" "$head")" ]; then
     record "$slug#$n" error "only the machine failed (gate step, silence or budget; not the PR): $(paste -sd ';' - <<<"${failures:-whole-gate budget}"); see $PR_LOG"
     return 0
+  fi
+  if [ "$kind" = devkit-sync ] && [ -z "$locked" ]; then
+    gains=$("$DEVKIT_PYTHON" -I "$HERE/gate_record.py" gains "$gate_json" "$head")
+    if [ -n "$gains" ]; then
+      lock_in_sync "$n" "$head" "$gains" || return 0
+      gate_pr "$slug" "$2" "$n" "$SYNC_HEAD" "$kind" "$SYNC_LOCKED"
+      return
+    fi
   fi
   [ "$kind" != devkit-sync ] || regression="devkit regression: "
   if net gh pr comment "$n" --repo "$slug" --body "$(failure_comment "$n" "$head" "$failures" "$kind")" >/dev/null; then
@@ -399,10 +414,10 @@ reusable_sync() {
   [ "${rev%% *}" = "$2" ] && git -C "$WT" merge-tree --write-tree origin/main "$1" >/dev/null 2>&1
 }
 
-# job_sync_commit <dir> <commit>: true when <commit> is a sync commit as push_sync makes it:
-# subject "Update devkit to ...", the model-agnostic trailer, one parent on origin/main and nothing
-# but vendoring on top of it. A person's commit on the branch, or the job's amended with other
-# paths, is not.
+# job_sync_commit <dir> <commit>: true when <commit> is a sync commit as push_sync (or
+# lock_in_sync) makes it: subject "Update devkit to ...", the model-agnostic trailer, one parent
+# on origin/main and nothing but vendoring (and tightened bounds) on top of it. A person's commit
+# on the branch, or the job's amended with other paths, is not.
 job_sync_commit() {
   local parent paths
   git -C "$1" log -1 --format=%s "$2" 2>/dev/null | grep -q '^Update devkit to ' || return 1
@@ -411,7 +426,7 @@ job_sync_commit() {
   [[ "$parent" =~ ^[0-9a-f]+$ ]] || return 1
   git -C "$1" merge-base --is-ancestor "$parent" refs/remotes/origin/main || return 1
   paths=$(git -C "$1" -c core.quotePath=false diff --name-only --no-renames "$parent" "$2")
-  (cd "$1" && vendoring_only "$2" "$paths")
+  (cd "$1" && devkit_sync_only "$2" "$parent" "$paths")
 }
 
 # adopt_sync_branch <tip> <log>: true when devkit-sync/<sha7>, found at <tip> with no open labelled
@@ -473,7 +488,7 @@ push_sync() {
   # just now, so it is at least the commit it vendored.
   upstream=$(net fetch_devkit_main "$SYNC_WT") \
     || { record_fail "$SLUG" $? error "cannot fetch devkit's main from $DEVKIT_URL (git above)"; return 1; }
-  (cd "$SYNC_WT" && vendoring_only HEAD "$paths" && vendored_from HEAD "$upstream" "$main") || {
+  (cd "$SYNC_WT" && devkit_sync_only HEAD "$main" "$paths" && vendored_from HEAD "$upstream" "$main") || {
     record "$SLUG" refused "the sync is not vendoring only (outside devkit/: $(grep -v '^devkit/' <<<"$paths" | paste -sd ' ' -)); not pushed"
     return 1
   }
@@ -495,6 +510,39 @@ push_sync() {
   net git -C "$SYNC_WT" push -q "--force-with-lease=refs/heads/$branch:$lease" origin "HEAD:refs/heads/$branch" \
     >>"$log" 2>&1 8>&- \
     || { record_fail "$SLUG" $? skipped "cannot push $branch (moved since this run read it: a person's push?); not overwritten; see $log"; return 1; }
+}
+
+# lock_in_sync <n> <head> <gains>: the sync PR's gate failed on gains alone (header): in a fresh
+# worktree of <head>, rebuild its one commit with each `<key>=<value>` of <gains> locked in
+# (metrics_ratchet.py lock-in, which refuses anything but a tightening) and the reason in its
+# message, check it is still the job's sync commit (job_sync_commit), and push it over <head>.
+# Rebuilt on main, not amended: the pre-commit hook then judges vendoring plus tightened bounds
+# (devkit_sync_only) and runs none of the repo's steps, as for push_sync's commit. Sets SYNC_HEAD
+# and SYNC_LOCKED (the reason); else records why and returns 1.
+lock_in_sync() {
+  local n=$1 head=$2 log=$STATE/dependency-merge/${SLUG#*/}-devkit-sync.log
+  local branch=$SYNC_LABEL/${SYNC_NEW:0:7} gains=() line moved message
+  while IFS= read -r line; do gains+=("$line"); done <<<"$3"
+  SYNC_WT=$STATE/dependency-merge/sync-${SLUG#*/}
+  remove_worktree "$SYNC_WT"
+  git -C "$WT" worktree add -q --detach "$SYNC_WT" "$head" >>"$log" 2>&1 \
+    || { SYNC_WT=""; record "$SLUG#$n" error "cannot add a worktree of its head to lock in its gains; see $log"; return 1; }
+  moved=$("$DEVKIT_PYTHON" -I "$HERE/metrics_ratchet.py" lock-in --bounds "$SYNC_WT/$VENDOR_SYNC_BOUNDS" "${gains[@]}" 2>>"$log") \
+    || { record "$SLUG#$n" error "metrics_ratchet.py lock-in refused its gains ($(paste -sd ' ' - <<<"$3")); see $log"; return 1; }
+  SYNC_LOCKED="devkit ${SYNC_NEW:0:7} re-measured: $(sed -E 's/^ratchet ([^ ]+) ([^ ]+) -> ([^ ]+)$/\1 \2→\3/' <<<"$moved" | paste -sd ',' - | sed 's/,/, /g')"
+  message=$(git -C "$SYNC_WT" log -1 --format=%B "$head" | grep -vxF "$DEVKIT_DEFAULT_TRAILER")
+  message=$(printf '%s\n\n%s; the gate measured each BETTER than its bound, so the nightly sync locks it in (dependency_merge.sh lock_in_sync).\n\n%s\n' \
+    "$message" "$SYNC_LOCKED" "$DEVKIT_DEFAULT_TRAILER")
+  { git -C "$SYNC_WT" reset -q --soft HEAD^ && git -C "$SYNC_WT" add -- "$VENDOR_SYNC_BOUNDS" \
+      && git -C "$SYNC_WT" commit -q -F - <<<"$message"; } >>"$log" 2>&1 8>&- \
+    || { record "$SLUG#$n" error "cannot commit its locked-in bounds (a refused commit?); see $log"; return 1; }
+  SYNC_HEAD=$(git -C "$SYNC_WT" rev-parse HEAD)
+  job_sync_commit "$SYNC_WT" "$SYNC_HEAD" \
+    || { record "$SLUG#$n" refused "its lock-in is not a sync commit of vendoring and tightened bounds; not pushed"; return 1; }
+  net git -C "$SYNC_WT" push -q "--force-with-lease=refs/heads/$branch:$head" origin "HEAD:refs/heads/$branch" \
+    >>"$log" 2>&1 8>&- \
+    || { record_fail "$SLUG#$n" $? skipped "cannot push its lock-in to $branch (moved since this run read it: a person's push?); see $log"; return 1; }
+  note "$SLUG#$n locked in ${SYNC_HEAD:0:12}: $SYNC_LOCKED; gating it again"
 }
 
 # open_sync_pr <n or ""> <old> <log>: update PR <n>'s body and label, or open the draft PR for the

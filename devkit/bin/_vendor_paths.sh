@@ -49,8 +49,22 @@
 #       reviewed code and not a hand edit recorded as a sync; with <base rev>, also a commit that
 #       contains <base rev>'s vendored one (a sync forward, never back). Needs <upstream>'s
 #       objects: `git fetch "$DEVKIT_URL" main` first.
+#
+#   devkit_sync_only <rev> <base> <paths>
+#       True when <paths> are a devkit sync at <rev>: every path but VENDOR_SYNC_BOUNDS passes
+#       vendoring_only (at least one must), and that bounds file, when listed, differs from
+#       <base>'s copy only by tightened bounds (metrics_ratchet.py tightens). Why: the nightly
+#       sync locks in the gains a devkit collector change measures (dependency_merge.sh
+#       lock_in_sync, devkit decisions 2026-10-28), and a tightening can only make the gate
+#       stricter, which the gate then verifies. Used where vendoring_only decided alone: the
+#       hooks' skip, make merge's Codex exemption and the nightly sync's own checks. <base> is a
+#       commit (never "" here); the bounds check needs the caller's devkit_python
+#       (bin/_toolchain_lib.sh), run only when the file is listed. Sets VENDORED_TREE.
 
 DEVKIT_URL=${DEVKIT_URL:-https://github.com/agandhi4/devkit.git}
+VENDOR_SYNC_BOUNDS=docs/metrics/ratchet.json
+# Resolved now: callers run these functions from inside a subshell that cd'd to the repo.
+_VENDOR_PATHS_BIN=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 vendor_filter_tree() { # <tree> <manifest text>
   local tree=$1 line path index status=0
@@ -167,4 +181,21 @@ vendored_from() { # <rev> <upstream> [<base rev>]
   [ -n "$base" ] || return 0
   base=$(git show "$3:.devkit-rev") || return 1
   git merge-base --is-ancestor "${base%% *}" "$commit" 2>/dev/null
+}
+
+devkit_sync_only() { # <rev> <base> <paths>
+  local rev=$1 base=$2 vendored tmp status
+  vendored=$(grep -vxF "$VENDOR_SYNC_BOUNDS" <<<"$3")
+  vendoring_only "$rev" "$vendored" || return 1
+  grep -qxF "$VENDOR_SYNC_BOUNDS" <<<"$3" || return 0
+  [ -n "$base" ] && devkit_python || return 1
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/sync-bounds.XXXXXX") || return 1
+  # "$rev:" is the index when <rev> is "", as everywhere above.
+  git show "$base:$VENDOR_SYNC_BOUNDS" >"$tmp/base.json" 2>/dev/null \
+    && git show "$rev:$VENDOR_SYNC_BOUNDS" >"$tmp/head.json" 2>/dev/null \
+    && "$DEVKIT_PYTHON" -I "$_VENDOR_PATHS_BIN/metrics_ratchet.py" tightens \
+      --base-bounds "$tmp/base.json" --head-bounds "$tmp/head.json" >/dev/null
+  status=$?
+  rm -rf "$tmp"
+  return "$status"
 }

@@ -12,6 +12,11 @@ Read back (dependency_merge.sh: whether a dependency PR's gate failed, and on wh
   gate_record.py verdict-of <gate.json> <head>  pass, fail or error, or nothing
   gate_record.py failures [--code-only] <gate.json> <head>
       one `<job> (<verdict>): <rules>` line per failed job; --code-only keeps the PR's code's own
+  gate_record.py gains <gate.json> <head>
+      one `<key>=<value>` line per gain the ratchet asked to lock in, only when those gains are
+      every failure of the PR's code (recorded_gains); else nothing. Parsed from the job logs
+      beside the record by this copy, never stored in it: the nightly sync (devkit main's copy)
+      reads gates whose recorder is a consumer's older vendored one
 Read back (local_gate.sh: the whole-gate budget scales with the jobs the plan ran):
   gate_record.py typical --logs D [--exclude D] <job>...
       one `<job> <seconds>|-` line per job: the median seconds of its newest TYPICAL_RUNS
@@ -106,6 +111,15 @@ RULE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 )
 
 
+# metrics_ratchet.py check's line for a gain it fails until locked in; the value is _fmt's (an
+# int's str or a float's repr, both JSON numbers). Its rule is the `ratchet` pattern's above.
+GAIN_LINE = re.compile(r"^ratchet (\S+) (\S+) vs \S+ BETTER — run\b", re.M)
+# The FAIL line check prints for those gains. A log with any other FAIL (a WORSE, MISSING or
+# loosened key, a collector, the scorecard ratchet) has no gains: they would not be all it
+# failed on.
+GAIN_FAIL = re.compile(r"^ratchet FAIL: \d+ metric\(s\) better than their bound\b")
+FAIL_WORD = re.compile(r"\bFAIL\b")
+
 # A line that says what went wrong, for a failed job no RULE_PATTERNS line names (docstring).
 ERROR_LINE = re.compile(
     r"(?i)\b(?:error|errors|failed|failure|fatal|exception|traceback|conflict|panic|denied|cannot"
@@ -138,6 +152,24 @@ def log_rules(text: str) -> list[str]:
         for m in pattern.finditer(clean)
     )
     return list(dict.fromkeys(rule for _, rule in found))
+
+
+def log_gains(text: str) -> tuple[tuple[str, float], ...]:
+    """Every (key, value) GAIN_LINE finds in a job log, each key once; none when a FAIL line
+    other than GAIN_FAIL is there too. A value that is not a JSON number is left out, so its
+    rule stays a failure no gain covers."""
+    clean = ANSI.sub("", text)
+    if any(FAIL_WORD.search(line) and not GAIN_FAIL.match(line) for line in clean.splitlines()):
+        return ()
+    gains: dict[str, float] = {}
+    for m in GAIN_LINE.finditer(clean):
+        try:
+            value = json.loads(m.group(2))
+        except ValueError:
+            continue
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            gains.setdefault(m.group(1), value)
+    return tuple(gains.items())
 
 
 def unparsed_rule(name: str, text: str) -> tuple[str, str | None]:
@@ -417,6 +449,32 @@ def recorded_failures(path: Path, head: str, code_only: bool = False) -> list[st
     return lines
 
 
+def recorded_gains(path: Path, head: str) -> list[str]:
+    """`<key>=<value>` per gain of the record of `head`, sorted, when every failure of the PR's
+    code is one: each failed job that is not the machine's (_machine_failure) has, its budget
+    rules aside (the machine's too), only `ratchet:<key>` rules, each key among the gains of
+    its log in the run dir beside the record (log_gains). [] otherwise, or with no gain: a WORSE,
+    MISSING or loosened key, or any other rule, is a failure no lock-in may settle; so is a
+    record with no logs beside it (a remote gate's, imported: its logs stay on the host)."""
+    jobs = _record_of(path, head).get("jobs")
+    run_dir = path.resolve().parent  # logs/<pr>/gate.json links to the run's own dir
+    found: dict[str, float] = {}
+    for name, job in jobs.items() if isinstance(jobs, dict) else ():
+        if not isinstance(job, dict) or job.get("verdict") in {"pass", "skip"}:
+            continue
+        if _machine_failure(job):
+            continue
+        rules = [str(r) for r in job.get("rules") or () if not str(r).startswith("budget:")]
+        log = run_dir / f"{name}.log"
+        gains = dict(log_gains(log.read_text(errors="replace"))) if log.is_file() else {}
+        keys = [rule.removeprefix("ratchet:") for rule in rules]
+        pairs = zip(keys, rules, strict=True)
+        if not rules or any(key == rule or key not in gains for key, rule in pairs):
+            return []
+        found.update((key, gains[key]) for key in keys)
+    return [f"{key}={json.dumps(value)}" for key, value in sorted(found.items())]
+
+
 # The typical seconds of a job: the median of its newest TYPICAL_RUNS passing records, read from
 # at most TYPICAL_FILES run records (newest first); under TYPICAL_MIN it has none yet.
 TYPICAL_RUNS = 10
@@ -503,6 +561,13 @@ def main(argv: list[str] | None = None) -> int:
             print("usage: gate_record.py main-of <gate.json> <head>", file=sys.stderr)
             return 2
         print(recorded_main(Path(argv[1]), argv[2]))
+        return 0
+    if argv[:1] == ["gains"]:
+        if len(argv) != 3:
+            print("usage: gate_record.py gains <gate.json> <head>", file=sys.stderr)
+            return 2
+        for line in recorded_gains(Path(argv[1]), argv[2]):
+            print(line)
         return 0
     if argv[:1] in (["verdict-of"], ["failures"]):
         code_only = argv[0] == "failures" and argv[1:2] == ["--code-only"]
