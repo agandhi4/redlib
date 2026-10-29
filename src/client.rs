@@ -9,6 +9,7 @@ use futures_lite::{future::Boxed, FutureExt};
 use log::{trace, warn};
 use percent_encoding::{percent_encode, CONTROLS};
 use serde_json::Value;
+use std::future::Future;
 use std::result::Result;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::LazyLock;
@@ -18,7 +19,8 @@ use wreq::{header as wreq_header, Method, RequestBuilder, Response as WreqRespon
 const REDDIT_URL_BASE: &str = "https://oauth.reddit.com";
 const REDDIT_URL_BASE_HOST: &str = "oauth.reddit.com";
 
-// Android app's GraphQL endpoint; `thread::fetch` reads comments here (see gql_comments.rs).
+// Android app's GraphQL endpoint: the primary source of every read (`sources`), and of thread
+// comments (`thread::fetch`, gql_comments.rs).
 const GQL_URL: &str = "https://gql-fed.reddit.com/";
 const GQL_URL_HOST: &str = "gql-fed.reddit.com";
 
@@ -238,15 +240,21 @@ const JSON_STALE_MAX: Duration = Duration::from_secs(300);
 type JsonKey = (String, bool);
 static JSON_CACHE: LazyLock<SwrCache<JsonKey, Value>> = LazyLock::new(|| SwrCache::new(100, JSON_FRESH, JSON_STALE_MAX));
 
-/// Make a request to a Reddit API and parse the JSON response, through the
-/// stale-while-revalidate cache above.
-pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
-	JSON_CACHE.get((path, quarantine), |(path, quarantine)| fetch_json(path, quarantine)).await
+/// The JSON document for `path`, through the stale-while-revalidate cache above: `fetch` runs on
+/// a miss and for a stale hit's background refresh. The key is the REST path whichever source
+/// answers it, so `distrust_listing` evicts by path. Used by `sources::json`, which passes its
+/// GraphQL-first router as `fetch`.
+pub(crate) async fn cached_json<F, Fut>(path: String, quarantine: bool, fetch: F) -> Result<Value, String>
+where
+	F: FnOnce(String, bool) -> Fut + Send + 'static,
+	Fut: Future<Output = Result<Value, String>> + Send + 'static,
+{
+	JSON_CACHE.get((path, quarantine), |(path, quarantine)| fetch(path, quarantine)).await
 }
 
 /// POST a GraphQL operation (built by `gql_comments::request_body`) to gql-fed and return its
-/// response, through the same cache as `json()`, keyed on the body. A response carrying GraphQL
-/// `errors` is an Err, so it is never cached. Used by `thread::fetch`.
+/// response, through the same cache as `cached_json()`, keyed on the body. A response carrying
+/// GraphQL `errors` is an Err, so it is never cached. Used by `thread::fetch`.
 pub async fn gql(body: Value) -> Result<Value, String> {
 	JSON_CACHE.get((format!("gql {body}"), false), move |_| fetch_gql(body)).await
 }
@@ -285,18 +293,20 @@ fn json_shape(body: &Value) -> String {
 	format!("kind={} keys=[{}] data=[{}]", body["kind"].as_str().unwrap_or("-"), keys(body), keys(&body["data"]))
 }
 
-/// Fetch and parse one Reddit JSON document. Uncached; every caller goes through `json()`.
-async fn fetch_json(path: String, quarantine: bool) -> Result<Value, String> {
+/// Fetch and parse one REST document from oauth.reddit.com. Uncached: `sources` calls it as the
+/// fallback inside `cached_json`.
+pub(crate) async fn fetch_json(path: String, quarantine: bool) -> Result<Value, String> {
 	let label = path.clone();
 	fetch_reddit(&label, Budget::Rest, move || reddit_get(path, quarantine)).await
 }
 
-/// Send one GraphQL operation. Uncached; every caller goes through `gql()`. gql-fed answers a
+/// Send one GraphQL operation. Uncached: `gql()` caches it, and `sources` caches the converted
+/// result of its plans instead (`cached_json`), so a plan's calls come here. gql-fed answers a
 /// failed operation with 200 and an `errors` array, which becomes the Err here. It also times
 /// out single fields that way and answers the same operation on a resend (upstream #603), so an
 /// error is retried once. A retired persisted query ("PersistedQueryNotFound") never recovers,
 /// so it is not.
-async fn fetch_gql(body: Value) -> Result<Value, String> {
+pub(crate) async fn fetch_gql(body: Value) -> Result<Value, String> {
 	let operation = body["operationName"].as_str().unwrap_or("unnamed").to_string();
 	// Not a thread route, so a non-JSON 403 here rotates the token as it does for a listing.
 	let label = format!("gql:{operation}");
@@ -446,7 +456,7 @@ mod tests {
 	#[ignore = "hits live reddit"]
 	async fn test_localization_popular() {
 		init_oauth_client().await;
-		let val = json(POPULAR_URL.to_string(), false).await.unwrap();
+		let val = fetch_json(POPULAR_URL.to_string(), false).await.unwrap();
 		assert_eq!("GLOBAL", val["data"]["geo_filter"].as_str().unwrap());
 	}
 
@@ -464,7 +474,7 @@ mod tests {
 	#[ignore = "hits live reddit"]
 	async fn test_private_sub() {
 		init_oauth_client().await;
-		let link = json("/r/suicide/about.json?raw_json=1".into(), true).await;
+		let link = fetch_json("/r/suicide/about.json?raw_json=1".into(), true).await;
 		assert!(link.is_err());
 		assert_eq!(link, Err("private".into()));
 	}
@@ -473,7 +483,7 @@ mod tests {
 	#[ignore = "hits live reddit"]
 	async fn test_banned_sub() {
 		init_oauth_client().await;
-		let link = json("/r/aaa/about.json?raw_json=1".into(), true).await;
+		let link = fetch_json("/r/aaa/about.json?raw_json=1".into(), true).await;
 		assert!(link.is_err());
 		assert_eq!(link, Err("banned".into()));
 	}
@@ -483,7 +493,7 @@ mod tests {
 	async fn test_gated_sub() {
 		init_oauth_client().await;
 		// quarantine to false to specifically catch when we _don't_ catch it
-		let link = json("/r/drugs/about.json?raw_json=1".into(), false).await;
+		let link = fetch_json("/r/drugs/about.json?raw_json=1".into(), false).await;
 		assert!(link.is_err());
 		assert_eq!(link, Err("gated".into()));
 	}

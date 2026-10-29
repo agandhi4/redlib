@@ -3,11 +3,12 @@
 
 #![allow(clippy::cmp_owned)]
 
-use crate::client::json;
+use crate::client::distrust_listing;
 use crate::config::get_setting;
 use crate::media::{GalleryMedia, Media};
 use crate::preferences::Preferences;
 use crate::rewrite::{format_url, rewrite_urls};
+use crate::sources::json;
 use crate::utils::{format_num, time, to_absolute_url, val};
 use askama::Template;
 use serde::Serialize;
@@ -187,7 +188,7 @@ impl Post {
 		// No `children` at all (an empty listing still has `[]`): Reddit sent something else to
 		// this token. See client::distrust_listing.
 		let Some(post_list) = res["data"]["children"].as_array() else {
-			return Err(crate::client::distrust_listing(path, quarantine, &res).await);
+			return Err(distrust_listing(path, quarantine, &res).await);
 		};
 
 		let mut posts: Vec<Self> = Vec::new();

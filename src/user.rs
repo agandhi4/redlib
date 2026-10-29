@@ -1,9 +1,9 @@
 #![allow(clippy::cmp_owned)]
-use crate::client::json;
 use crate::model::{filter_posts, get_post_url, Post, User};
 use crate::preferences::{get_filters, setting, Preferences};
 use crate::rewrite::format_url;
 use crate::server::RequestExt;
+use crate::sources::json;
 use crate::utils::{error, nsfw_landing, param, template};
 use crate::{config, utils};
 use askama::Template;

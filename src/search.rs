@@ -4,8 +4,8 @@ use crate::preferences::{get_filters, setting, Preferences};
 use crate::rewrite::format_url;
 use crate::utils::{self, catch_random, error, format_num, param, redirect, template, val};
 use crate::{
-	client::json,
 	server::RequestExt,
+	sources::json,
 	subreddit::{can_access_quarantine, quarantine},
 };
 use askama::Template;
