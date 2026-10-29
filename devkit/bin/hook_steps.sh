@@ -44,8 +44,9 @@
 # skip. A native-only change runs nothing and prints one line saying so.
 #
 # Vendoring only: a pre-commit whose staged paths only vendor devkit (devkit/ at the tree
-# .devkit-rev records, .devkit-rev, byte-exact base copies: devkit-sync's commit) runs no step
-# and prints one line; _hook_vendoring_only says why.
+# .devkit-rev records, .devkit-rev, byte-exact base copies: devkit-sync's commit), with at most
+# tightened bounds beside them (the nightly sync's lock-in), runs no step and prints one line;
+# _hook_vendoring_only says why.
 #
 # Overrides, for a repo whose layout or target naming the defaults misjudge (most need none):
 #   :unless=<globs>  skip the step when EVERY changed path matches one of the globs
@@ -244,8 +245,8 @@ run_hook_steps() {
     fi
   fi
 
-  if [ "$listed" = 1 ] && _hook_vendoring_only "$hook" "$push_input" "$changed"; then
-    echo "– vendoring only (devkit/ is .devkit-rev's tree ${HOOK_VENDORED_TREE:0:7}, every other path a base copy): the repo's steps skip; the PR gate runs them"
+  if [ "$listed" = 1 ] && _hook_vendoring_only "$hook" "$push_input" "$changed" "${1:-origin}"; then
+    echo "– vendoring only (devkit/ is .devkit-rev's tree ${HOOK_VENDORED_TREE:0:7}, every other path a base copy or a tightened bound): the repo's steps skip; the PR gate runs them"
     _hook_allow_push "$uses_lfs" "$push_input" "$@"
     return 0
   fi
@@ -329,9 +330,11 @@ _hook_missing_node_modules() {
   return 1
 }
 
-# <hook> <push input> <changed paths>: true when the change only vendors devkit
-# (_vendor_paths.sh vendoring_only), as devkit-sync's own commit does: pre-commit judges the
-# index, pre-push the one commit it pushes (a push of several tips runs every step). Sets
+# <hook> <push input> <changed paths> <remote>: true when the change only vendors devkit, with
+# at most a tightening of the bounds (_vendor_paths.sh devkit_sync_only), as devkit-sync's own
+# commit and the nightly sync's lock-in do: pre-commit judges the index against HEAD, pre-push
+# the one commit it pushes against its merge base with <remote>'s main (a push of several tips
+# runs every step). Sets
 # HOOK_VENDORED_TREE. Why skip the repo's steps for it (closet, 2026-10-19): the sync commits and
 # pushes from a fresh worktree before any install (by hand, or the nightly sync in
 # dependency_merge.sh), and a lint, typecheck or test step then fails on a missing node_modules,
@@ -339,17 +342,18 @@ _hook_missing_node_modules() {
 # upstream's, already gated there, and its effect on this repo is the PR gate's to judge. A hand
 # edit under devkit/ breaks the hash, so it runs every step.
 _hook_vendoring_only() {
-  local rev='' tips rc
+  local rev='' base=HEAD tips rc
   HOOK_VENDORED_TREE=
   case $1 in
     pre-commit) ;;
     pre-push)
       tips=$(awk '$2 !~ /^0+$/ { print $2 }' <<<"$2" | sort -u)
       [[ "$tips" =~ ^[0-9a-f]{40}$ ]] || return 1
-      rev=$tips ;;
+      rev=$tips
+      base=$(git merge-base "$rev" "refs/remotes/$4/main" 2>/dev/null) ;;
     *) return 1 ;;
   esac
-  vendoring_only "$rev" "$3"
+  devkit_sync_only "$rev" "$base" "$3"
   rc=$?
   HOOK_VENDORED_TREE=$VENDORED_TREE
   return "$rc"

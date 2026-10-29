@@ -92,6 +92,8 @@ Usage:
   metrics_ratchet.py rebaseline --snapshot S --bounds B [--report-only F] [--keys K1,K2]
   metrics_ratchet.py merge --out OUT [--skipped NAME]... [--] [INPUT.json...]
   metrics_ratchet.py loosened --base-ref REF --head-ref REF [--repo DIR] [--bounds REL]
+  metrics_ratchet.py lock-in --bounds B KEY=VALUE...
+  metrics_ratchet.py tightens --base-bounds F --head-bounds F
   metrics_ratchet.py floors --bounds B [--tier T]
 
 Key shape (docs/metrics-keys.md): flat dotted keys `<domain>.<scope>.<stat>`, numbers only,
@@ -154,14 +156,25 @@ source emitted nothing reads SKIPPED, not MISSING (skipped_collector); a tier th
 the runner's count is MISSING. Lowering a floor is `rebaseline --keys` under the label, in the
 PR that removes the tests.
 
+A devkit sync's gains (2026-10-28): a sync that changes how a collector counts (devkit #268, a
+guard is not a branch) moves keys with no code change in the repo, and the nightly sync
+(dependency_merge.sh) has no author to run `tighten`. `lock-in KEY=VALUE...` is what it runs
+instead, with the values the gate's own check printed BETTER (gate_record.py gains): each key
+must hold a gated bound the value strictly beats, else exit 2 and nothing is written, so it can
+only tighten, never seed, drop or loosen. `tightens` is the test the sync's exemptions apply to
+the bounds file (_vendor_paths.sh devkit_sync_only): exit 0 when the head file differs from the
+base only by TIGHTENED bounds, else exit 1 naming each other move.
+
 Exit codes: 0 ok, 1 ratchet failed (`tighten`: a WORSE or MISSING key, after writing the
-tightened bounds), 2 usage error or unreadable/invalid file or base ref.
+tightened bounds; `tightens`: a move that is not a tightening), 2 usage error or
+unreadable/invalid file or base ref.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -1141,6 +1154,71 @@ def cmd_loosened(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _parse_lock_in(item: str) -> tuple[str, float]:
+    key, sep, text = item.partition("=")
+    try:
+        value = json.loads(text) if sep else None
+    except ValueError:
+        value = None
+    if not _is_number(value) or not math.isfinite(value):
+        raise InputError(f"lock-in {item!r}: want KEY=<finite number>")
+    _check_key(key, "lock-in")
+    return key, value
+
+
+def cmd_lock_in(args: argparse.Namespace) -> int:
+    """Move each named bound to its value, only when the value strictly beats it (module
+    docstring, A devkit sync's gains); any other key refuses the whole call before a write."""
+    bounds_path = Path(args.bounds)
+    bounds = load_bounds(bounds_path)
+    gains = dict(_parse_lock_in(item) for item in args.values)
+    for key, value in gains.items():
+        bound = bounds.get(key)
+        if bound is None or bound.bound is None or is_report_only(key):
+            raise InputError(f"lock-in {key}: not a gated bound in {bounds_path}")
+        if not is_better(value, bound.bound, bound.direction):
+            raise InputError(
+                f"lock-in {key}: {_fmt(value)} does not beat its bound {_fmt(bound.bound)} "
+                f"({bound.direction}); lock-in never loosens"
+            )
+    locked = dict(bounds)
+    for key in sorted(gains):
+        locked[key] = Bound(bounds[key].direction, gains[key], bounds[key].source)
+        print(f"ratchet {key} {_fmt(bounds[key].bound)} -> {_fmt(gains[key])}")
+    write_bounds(bounds_path, locked)
+    return EXIT_OK
+
+
+def _not_a_tightening(metric: str, old: Bound | None, new: Bound | None) -> str | None:
+    """Why an entry that differs between base and head is not one lock-in writes, or None when
+    it is: the same gated key, direction and source, its bound strictly better. Stricter than
+    bound_moves, which lets `source` and report-only keys move: a source starting `tier-` reads
+    a missing key SKIPPED (skipped_collector), so changing one can waive a MISSING failure."""
+    if old is None or new is None:
+        return "ADDED" if old is None else "REMOVED"
+    if is_report_only(metric):
+        return "REPORT-ONLY"
+    if new.direction != old.direction:
+        return "DIRECTION"
+    if new.source != old.source:
+        return "SOURCE"
+    if old.bound is None or new.bound is None or not is_better(new.bound, old.bound, old.direction):
+        return "LOOSENED"
+    return None
+
+
+def cmd_tightens(args: argparse.Namespace) -> int:
+    """Exit 0 when the head bounds differ from the base's only by tightened bound values (at
+    least one, _not_a_tightening); else print each other difference and exit 1."""
+    base = load_bounds(Path(args.base_bounds))
+    head = load_bounds(Path(args.head_bounds))
+    changed = [m for m in sorted(set(base) | set(head)) if base.get(m) != head.get(m)]
+    others = [(m, why) for m in changed if (why := _not_a_tightening(m, base.get(m), head.get(m)))]
+    for metric, why in others:
+        print(f"ratchet-bound {metric} {why}")
+    return EXIT_OK if changed and not others else EXIT_RATCHET
+
+
 # ---- merge-driver: git's three-way merge of the committed metrics files ----------------------
 # Why (2026-10-20): docs/metrics/ratchet.json, report-only.json and scorecard.json are whole-file
 # JSON that every lane's tighten rewrites, and sorted keys put two lanes' edits on neighbouring
@@ -1256,6 +1334,26 @@ def cmd_merge_driver(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _add_sync_parsers(sub: argparse._SubParsersAction) -> None:
+    """The nightly devkit sync's two (module docstring, A devkit sync's gains)."""
+    lock_in = sub.add_parser(
+        "lock-in",
+        help="move each named bound to a value that strictly beats it (the nightly devkit "
+        "sync's gains); refuses anything else",
+    )
+    lock_in.add_argument("--bounds", required=True, help="bounds JSON to rewrite")
+    lock_in.add_argument("values", nargs="+", metavar="KEY=VALUE", help="a gain the gate measured")
+    lock_in.set_defaults(func=cmd_lock_in)
+
+    tightens = sub.add_parser(
+        "tightens",
+        help="exit 0 when the head bounds only tighten the base's (a devkit sync's test)",
+    )
+    tightens.add_argument("--base-bounds", required=True, help="the base's bounds JSON")
+    tightens.add_argument("--head-bounds", required=True, help="the head's bounds JSON")
+    tightens.set_defaults(func=cmd_tightens)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="metrics_ratchet.py",
@@ -1327,6 +1425,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--bounds", default="docs/metrics/ratchet.json", help="the bounds file's repo-relative path"
     )
     loosened.set_defaults(func=cmd_loosened)
+
+    _add_sync_parsers(sub)
 
     floors = sub.add_parser(
         "floors", help="print `<tier> <runner> <min>` per test-count floor (tier_guard.sh)"
