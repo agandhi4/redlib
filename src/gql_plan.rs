@@ -83,9 +83,16 @@ fn refusal(sub: &str, quarantine: bool, info: &Value) -> Option<GqlError> {
 	if info.is_null() {
 		return Some(GqlError::Refused(format!("r/{sub} does not exist")));
 	}
-	match unavailable_reason(info)? {
-		reason @ ("quarantined" | "gated") if quarantine => Some(GqlError::NotServed(format!("r/{sub} is {reason}; the opt-in needs REST"))),
-		reason => Some(GqlError::Refused(reason.to_string())),
+	match unavailable_reason(info) {
+		Some(reason @ ("quarantined" | "gated")) if quarantine => Some(GqlError::NotServed(format!("r/{sub} is {reason}; the opt-in needs REST"))),
+		Some(reason) => Some(GqlError::Refused(reason.to_string())),
+		// Still Reddit's answer, for a reason this does not know: refused, never Failed, or one
+		// odd sub would open the breaker and send every page of its kind to REST.
+		None if info["__typename"] == "UnavailableSubreddit" => {
+			warn!("[source] r/{sub}: unavailable for an unknown reason {}", info["forbiddenReason"]);
+			Some(GqlError::Refused(format!("r/{sub} is unavailable")))
+		}
+		None => None,
 	}
 }
 
@@ -450,6 +457,8 @@ mod tests {
 		assert_eq!(fake.run("/r/rust/about.json?raw_json=1", false).await.unwrap()["data"]["display_name"], "rust");
 		let private = Fake::new(vec![info(unavailable("PRIVATE"))]);
 		assert_eq!(private.run("/r/x/about.json", true).await, Err(GqlError::Refused("private".into())));
+		let unknown = Fake::new(vec![info(unavailable("SOMETHING_NEW"))]);
+		assert_eq!(unknown.run("/r/x/about.json", false).await, Err(GqlError::Refused("r/x is unavailable".into())));
 		let odd = Fake::new(vec![info(json!({ "__typename": "SomethingNew" }))]);
 		assert!(matches!(odd.run("/r/x/about.json", false).await, Err(GqlError::Failed(_))));
 	}
