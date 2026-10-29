@@ -1,9 +1,9 @@
 {
   "metrics": {
     "coupling.app.fan_in_max": 12,
-    "duplication.app.jscpd_percent": 1.14,
-    "size.app.max_lines": 578,
-    "size.app.over_600": 0,
+    "duplication.app.jscpd_percent": 1.13,
+    "size.app.max_lines": 636,
+    "size.app.over_600": 1,
     "vuln.app.critical": 0,
     "vuln.app.high": 1,
     "vuln.app.packages": 326,
