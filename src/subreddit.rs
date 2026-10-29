@@ -5,7 +5,7 @@ use crate::model::{filter_posts, Post, Subreddit};
 use crate::preferences::{get_filters, setting, Preferences};
 use crate::rewrite::{format_url, rewrite_urls};
 use crate::utils::{catch_random, error, format_num, info, nsfw_landing, param, redirect, template, val, FEEDS};
-use crate::{client::json, server::RequestExt, server::ResponseExt};
+use crate::{server::RequestExt, server::ResponseExt, sources::json};
 use askama::Template;
 use cookie::Cookie;
 use hyper::{Body, Request, Response};

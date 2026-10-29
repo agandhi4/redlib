@@ -3,7 +3,7 @@
 
 use crate::config::{self, get_setting};
 use crate::preferences::{setting, Preferences};
-use crate::{client::json, server::RequestExt};
+use crate::{server::RequestExt, sources::json};
 use askama::Template;
 use hyper::{Body, Request, Response};
 use log::{error, warn};
