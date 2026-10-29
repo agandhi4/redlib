@@ -201,11 +201,63 @@ async fn missing_user_listing(name: &str, operation: &str, gql: GqlFetch<'_>) ->
 /// One page of a user listing: its things and the next cursor of each side.
 type Side = (Vec<Value>, Option<String>);
 
-/// The overview's `after`: the next cursor of each side; a side without one is exhausted.
-#[derive(Serialize, Deserialize, Default)]
+/// Where one side of the overview resumes: the GraphQL cursor of the page it is fetched from
+/// (`None` is its first page) and how many of that page's things earlier overview pages showed.
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct SideCursor {
+	a: Option<String>,
+	s: usize,
+}
+
+/// The overview's `after`: where each side resumes; a side with none is exhausted.
+#[derive(Serialize, Deserialize)]
 struct OverviewCursor {
-	p: Option<String>,
-	c: Option<String>,
+	p: Option<SideCursor>,
+	c: Option<SideCursor>,
+}
+
+/// One side's things for this overview page (the already-shown ones skipped), where it was
+/// fetched from, and its next GraphQL cursor.
+struct Fetched {
+	things: Vec<Value>,
+	at: Option<SideCursor>,
+	next: Option<String>,
+}
+
+fn created(thing: &Value) -> f64 {
+	thing["data"]["created_utc"].as_f64().unwrap_or_default()
+}
+
+impl Fetched {
+	fn new((things, next): Side, at: Option<SideCursor>) -> Self {
+		let skip = at.as_ref().map_or(0, |at| at.s);
+		Self {
+			things: things.into_iter().skip(skip).collect(),
+			at,
+			next,
+		}
+	}
+
+	/// The oldest thing this side shows, when the side has more: nothing older from the other
+	/// side may show yet, since this side's next page may hold things newer than it.
+	fn bound(&self) -> Option<f64> {
+		self.next.as_ref()?;
+		self.things.iter().map(created).reduce(f64::min)
+	}
+
+	/// This side's things down to `bound`, and where the side resumes: past its page when all of
+	/// it showed, else on the same page past what showed.
+	fn take(self, bound: Option<f64>) -> (Vec<Value>, Option<SideCursor>) {
+		let Self { mut things, at, next } = self;
+		let shown = bound.map_or(things.len(), |bound| things.iter().take_while(|t| created(t) >= bound).count());
+		let resume = if shown == things.len() {
+			next.map(|a| SideCursor { a: Some(a), s: 0 })
+		} else {
+			at.map(|at| SideCursor { s: at.s + shown, ..at })
+		};
+		things.truncate(shown);
+		(things, resume)
+	}
 }
 
 async fn user_listing(name: &str, kind: UserListing, page: &Page, gql: GqlFetch<'_>) -> Result<Value, GqlError> {
@@ -259,17 +311,21 @@ async fn user_comments(name: &str, page: &Page, gql: GqlFetch<'_>) -> Result<Sid
 	Ok((summaries.iter().map(|s| comment(s, body(&s["id"]))).collect(), cursor))
 }
 
-/// Posts and comments, newest first: a page of each side, merged. The next page continues each
-/// side from its own cursor (both carried in one `after`), so nothing repeats or is skipped.
+/// Posts and comments, newest first: a page of each side, merged down to a shared boundary (the
+/// newer of the two sides' oldest things, among sides with more), so the overview stays in time
+/// order across pages. A side cut at the boundary resumes on the same page, past what showed;
+/// both resume points travel in one `after`, so nothing repeats or is skipped.
 async fn overview(name: &str, page: &Page, gql: GqlFetch<'_>) -> Result<Side, GqlError> {
-	let cursor: OverviewCursor = match &page.after {
-		None => OverviewCursor::default(),
+	let cursor = match &page.after {
+		None => OverviewCursor {
+			p: Some(SideCursor::default()),
+			c: Some(SideCursor::default()),
+		},
 		Some(after) => serde_json::from_str(after).map_err(|_| GqlError::Refused("This page link is no longer valid".to_string()))?,
 	};
-	// On page 1 both sides start; after that, only a side that has a cursor goes on.
-	let side_page = |after: &Option<String>| {
-		(page.after.is_none() || after.is_some()).then(|| Page {
-			after: after.clone(),
+	let side_page = |at: &Option<SideCursor>| {
+		at.as_ref().map(|at| Page {
+			after: at.a.clone(),
 			..page.clone()
 		})
 	};
@@ -279,9 +335,10 @@ async fn overview(name: &str, page: &Page, gql: GqlFetch<'_>) -> Result<Side, Gq
 		side(name, UserListing::Comments, comments_page.as_ref(), gql),
 	)
 	.await;
-	let ((mut things, p), (more, c)) = (posts?, comments?);
+	let (posts, comments) = (Fetched::new(posts?, cursor.p), Fetched::new(comments?, cursor.c));
+	let bound = posts.bound().into_iter().chain(comments.bound()).reduce(f64::max);
+	let ((mut things, p), (more, c)) = (posts.take(bound), comments.take(bound));
 	things.extend(more);
-	let created = |thing: &Value| thing["data"]["created_utc"].as_f64().unwrap_or_default();
 	things.sort_by(|a, b| created(b).total_cmp(&created(a)));
 	let next = (p.is_some() || c.is_some()).then(|| serde_json::to_string(&OverviewCursor { p, c }).unwrap_or_default());
 	Ok((things, next))
@@ -532,6 +589,37 @@ mod tests {
 		let listing = fake.run(&format!("/user/spez/overview.json?after={after}"), false).await.unwrap();
 		assert_eq!((ids(&listing), fake.operations()), (vec!["t3_older".to_string()], vec!["UserSubmittedPosts".to_string()]));
 		assert_eq!(fake.sent.lock().unwrap()[0]["variables"]["after"], "pc");
+		assert!(listing["data"]["after"].is_null());
+
+		// Both sides have more: page 1 shows nothing older than the newer side's oldest thing, and
+		// the cut side resumes on its first page, past what showed
+		let page = vec![node("t3_a", "2026-10-05T00:00:00+0000"), node("t3_b", "2026-10-04T00:00:00+0000")];
+		let year_old = json!({ "id": "t1_c", "createdAt": "2025-10-02T00:00:00+0000", "postInfo": {"id": "t3_x", "title": "On"} });
+		let comments = (
+			"SubmittedComments",
+			json!({ "data": { "redditorInfoByName": { "comments": edges(vec![year_old], Some("cc")) } } }),
+		);
+		let fake = Fake::new(vec![submitted(page, Some("pc")), comments.clone(), bodies()]);
+		let listing = fake.run("/user/spez/overview.json", false).await.unwrap();
+		assert_eq!(ids(&listing), vec!["t3_a", "t3_b"]);
+		let after = listing["data"]["after"].as_str().unwrap().to_string();
+		let fake = Fake::new(vec![submitted(vec![node("t3_d", "2024-01-01T00:00:00+0000")], None), comments, bodies()]);
+		let listing = fake.run(&format!("/user/spez/overview.json?after={after}"), false).await.unwrap();
+		// The year-old comment shows, the 2024 post waits: comments may still hold newer things
+		assert_eq!(ids(&listing), vec!["t1_c"]);
+		let sent = fake.sent.lock().unwrap().clone();
+		let after_of = |op: &str| sent.iter().find(|b| b["operationName"] == op).map(|b| b["variables"]["after"].clone());
+		assert_eq!((after_of("UserSubmittedPosts"), after_of("SubmittedComments")), (Some(json!("pc")), Some(Value::Null)));
+		let after = listing["data"]["after"].as_str().unwrap().to_string();
+		let empty = ("SubmittedComments", json!({ "data": { "redditorInfoByName": { "comments": edges(Vec::new(), None) } } }));
+		let fake = Fake::new(vec![submitted(vec![node("t3_d", "2024-01-01T00:00:00+0000")], None), empty]);
+		let listing = fake.run(&format!("/user/spez/overview.json?after={after}"), false).await.unwrap();
+		let sent = fake.sent.lock().unwrap().clone();
+		let after_of = |op: &str| sent.iter().find(|b| b["operationName"] == op).map(|b| b["variables"]["after"].clone());
+		assert_eq!(
+			(ids(&listing), after_of("UserSubmittedPosts"), after_of("SubmittedComments")),
+			(vec!["t3_d".to_string()], Some(json!("pc")), Some(json!("cc")))
+		);
 		assert!(listing["data"]["after"].is_null());
 
 		let foreign = after_param("not json");
