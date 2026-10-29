@@ -110,8 +110,11 @@
 #     devkit change, and the code is devkit's own, Codex-reviewed and gated on devkit main, so a
 #     second review per consumer adds nothing; its effect on the repo is the gate's to judge.
 #     Content decides, not the label or the author: a hand edit under devkit/, a downgrade or any
-#     repo-owned path (a metrics-tighten of docs/metrics/ratchet.json included) takes the
-#     normal rule.
+#     other repo-owned path takes the normal rule. The one repo-owned file a sync may change is
+#     docs/metrics/ratchet.json, and only by tightening bounds against the merge base
+#     (devkit_sync_only): the nightly sync's lock-in of what devkit's collectors re-measured
+#     (devkit decisions 2026-10-28), which only makes the gate stricter. A person's
+#     metrics-tighten beside other edits, or one that seeds or loosens a bound, is reviewed.
 # A draft that passes every check above is marked ready (`gh pr ready`, one `merge: … marked it
 # ready` line) and then merged: the fleet Workflow gates a PR while it is a draft, and GitHub
 # refuses to merge one (locus #136 needed a hand `gh pr ready`). A draft that fails a check is
@@ -170,7 +173,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
 . "$HERE/_paths_lib.sh"
 # shellcheck source=bin/_toolchain_lib.sh
 . "$HERE/_toolchain_lib.sh"
-# shellcheck source=bin/_vendor_paths.sh  # vendoring_only, vendored_from: the devkit-sync exemption
+# shellcheck source=bin/_vendor_paths.sh  # devkit_sync_only, vendored_from: the devkit-sync exemption
 . "$HERE/_vendor_paths.sh"
 # shellcheck source=bin/_merge_carry.sh  # carry_plan, carry_commit: a gate across a decisions-only main
 . "$HERE/_merge_carry.sh"
@@ -371,8 +374,8 @@ sync_exempt() {
     || { echo "merge: cannot fetch PR #$PR's head and main to check its vendoring (git above)" >&2; exit 2; }
   upstream=$(fetch_devkit_main "$ROOT") \
     || { echo "merge: cannot fetch devkit's main from $DEVKIT_URL (git above)" >&2; exit 2; }
-  (cd "$ROOT" && vendoring_only "$head" "$touched") \
-    || { not_sync="a path other than devkit/, .devkit-rev and byte-equal base copies, or a devkit/ that is not the tree its .devkit-rev records"; return 1; }
+  (cd "$ROOT" && devkit_sync_only "$head" "$(git merge-base "$head" "$main_now")" "$touched") \
+    || { not_sync="a path other than devkit/, .devkit-rev, byte-equal base copies and tightened bounds, or a devkit/ that is not the tree its .devkit-rev records"; return 1; }
   (cd "$ROOT" && vendored_from "$head" "$upstream" "$main_now") \
     || { not_sync="its .devkit-rev names no commit on devkit main, forward of main's, whose vendored tree it records"; return 1; }
 }
