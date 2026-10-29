@@ -361,7 +361,10 @@ fn search(sub: Option<&str>, query: &Query) -> Option<Resource> {
 	let q = query.get("q")?.trim();
 	let restrict = matches!(query.get("restrict_sr"), Some("on" | "true" | "1"));
 	let q = match sub.filter(|_| restrict) {
-		Some(sub) if valid_name(sub) => format!("subreddit:{sub} {q}"),
+		// Grouped, so an OR in the query cannot escape the restriction. A query with its own
+		// parentheses could unbalance the group; REST serves it.
+		Some(_) if q.contains(['(', ')']) => return None,
+		Some(sub) if valid_name(sub) => format!("subreddit:{sub} ({q})"),
 		// A restricted multireddit search would need a grouped OR; REST serves it.
 		Some(_) => return None,
 		None => q.to_string(),
@@ -507,8 +510,13 @@ pub(crate) mod tests {
 		);
 		assert_eq!(
 			parse("/r/rust/search.json?q=async&restrict_sr=on"),
-			search("subreddit:rust async", SearchSort::Relevance, None)
+			search("subreddit:rust (async)", SearchSort::Relevance, None)
 		);
+		assert_eq!(
+			parse("/r/rust/search.json?q=async%20OR%20tokio&restrict_sr=on"),
+			search("subreddit:rust (async OR tokio)", SearchSort::Relevance, None)
+		);
+		assert_eq!(parse("/r/rust/search.json?q=(a&restrict_sr=on"), Resource::Other);
 		// Unrestricted, a sub's search is Reddit-wide
 		assert_eq!(parse("/r/rust/search.json?q=async"), search("async", SearchSort::Relevance, None));
 		assert_eq!(parse("/r/a+b/search.json?q=x&restrict_sr=on"), Resource::Other);

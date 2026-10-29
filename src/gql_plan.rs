@@ -546,7 +546,7 @@ mod tests {
 		let fake = Fake::new(vec![posts]);
 		let listing = fake.run("/r/rust/search.json?q=async&restrict_sr=on&sort=new", false).await.unwrap();
 		assert_eq!(listing["data"]["after"], after_param("OQ=="));
-		assert_eq!(fake.sent.lock().unwrap()[0]["variables"]["query"], "subreddit:rust async");
+		assert_eq!(fake.sent.lock().unwrap()[0]["variables"]["query"], "subreddit:rust (async)");
 		let missing = Fake::new(vec![("SearchPosts", json!({ "data": { "search": null } }))]);
 		assert!(matches!(missing.run("/search.json?q=x", false).await, Err(GqlError::Failed(_))));
 
