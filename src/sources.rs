@@ -303,9 +303,12 @@ mod tests {
 	async fn rest_cursors_and_unplanned_paths_skip_graphql() {
 		let (breakers, gql, rest) = (Breakers::new(), Fake::ok(feed()), Fake::ok(rest_listing()));
 		read("/r/rust/hot.json?after=t3_abc", T0, &breakers, &gql, &rest).await.unwrap();
-		read("/r/rust/wiki/index.json?raw_json=1", T0, &breakers, &gql, &rest).await.unwrap();
-		assert_eq!((gql.calls(), rest.calls()), (0, 2));
-		assert_eq!(*rest.last.lock().unwrap(), Some(json!("/r/rust/wiki/index.json?raw_json=1")));
+		read("/r/rust/duplicates/abc.json?after=t3_x&sort=new&raw_json=1", T0, &breakers, &gql, &rest)
+			.await
+			.unwrap();
+		read("/user/spez/upvoted.json?raw_json=1", T0, &breakers, &gql, &rest).await.unwrap();
+		assert_eq!((gql.calls(), rest.calls()), (0, 3));
+		assert_eq!(*rest.last.lock().unwrap(), Some(json!("/user/spez/upvoted.json?raw_json=1")));
 	}
 
 	#[tokio::test]
@@ -360,6 +363,17 @@ mod tests {
 		read("/r/a+b/hot.json", T0, &breakers, &Fake::failing("too long"), &rest).await.unwrap();
 		assert_eq!(rest.calls(), 1);
 		assert!(breakers.allows(Kind::Listing, T0));
+	}
+
+	#[test]
+	fn info_lists_every_kind_and_only_the_open_one_on_rest() {
+		let breakers = Breakers::new();
+		assert!(breakers.trip(Kind::Wiki, T0));
+		let status = status_at(&breakers, T0);
+		let kinds: Vec<&str> = status.iter().map(|(kind, _)| *kind).collect();
+		assert_eq!(kinds, ["listing", "post", "about", "user", "search", "wiki", "duplicates"]);
+		assert_eq!(status[5].1, "REST until 08:05 UTC");
+		assert!(status.iter().filter(|(kind, _)| *kind != "wiki").all(|(_, source)| source == "GraphQL"));
 	}
 
 	#[test]
