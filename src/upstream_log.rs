@@ -83,17 +83,53 @@ impl Kind {
 	}
 }
 
-/// Logs one sent request: its status, or `failed` when it never got a response.
-pub(crate) fn sent<E>(kind: Kind, target: &str, started: Instant, result: &Result<wreq::Response, E>) {
-	info!(target: "upstream", "{}", line(kind, target, status_of(result), started.elapsed().as_millis(), current_cause()));
+/// One request on its way to Reddit, from just before its send. `finish` logs its status, or
+/// `failed` when it got no response; dropped unfinished (an outer timeout cancelled the send,
+/// e.g. the token mint's 5 s), it logs `cancelled`, since Reddit may have received it anyway.
+/// The cause is read at the start: a drop can run outside the task-local's scope.
+#[must_use = "an unfinished request logs as cancelled"]
+pub(crate) struct InFlight {
+	kind: Kind,
+	target: String,
+	started: Instant,
+	cause: &'static str,
+	logged: bool,
 }
 
-fn status_of<E>(result: &Result<wreq::Response, E>) -> Option<u16> {
-	result.as_ref().ok().map(|response| response.status().as_u16())
+pub(crate) fn start(kind: Kind, target: &str) -> InFlight {
+	InFlight {
+		kind,
+		target: target.to_string(),
+		started: Instant::now(),
+		cause: current_cause(),
+		logged: false,
+	}
 }
 
-fn line(kind: Kind, target: &str, status: Option<u16>, ms: u128, cause: &str) -> String {
-	let status = status.map_or_else(|| "failed".to_string(), |status| status.to_string());
+impl InFlight {
+	pub(crate) fn finish<E>(mut self, result: &Result<wreq::Response, E>) {
+		self.log(&status_of(result));
+	}
+
+	fn log(&mut self, status: &str) {
+		self.logged = true;
+		info!(target: "upstream", "{}", line(self.kind, &self.target, status, self.started.elapsed().as_millis(), self.cause));
+	}
+}
+
+impl Drop for InFlight {
+	fn drop(&mut self) {
+		if !self.logged {
+			self.log("cancelled");
+		}
+	}
+}
+
+fn status_of<E>(result: &Result<wreq::Response, E>) -> String {
+	result.as_ref().map_or_else(|_| "failed".to_string(), |response| response.status().as_u16().to_string())
+}
+
+fn line(kind: Kind, target: &str, status: &str, ms: u128, cause: &str) -> String {
 	format!("kind={} target={target:?} status={status} ms={ms} cause={cause}", kind.name())
 }
 
@@ -104,11 +140,11 @@ mod tests {
 	#[test]
 	fn a_line_is_logfmt_with_the_target_quoted() {
 		assert_eq!(
-			line(Kind::Rest, "/search.json?q=rust lang", Some(403), 120, "page"),
+			line(Kind::Rest, "/search.json?q=rust lang", "403", 120, "page"),
 			r#"kind=rest target="/search.json?q=rust lang" status=403 ms=120 cause=page"#
 		);
 		assert_eq!(
-			line(Kind::Media, "i.redd.it", None, 3001, "page"),
+			line(Kind::Media, "i.redd.it", "failed", 3001, "page"),
 			r#"kind=media target="i.redd.it" status=failed ms=3001 cause=page"#
 		);
 	}
@@ -117,9 +153,23 @@ mod tests {
 	fn a_response_logs_its_status_and_a_transport_error_logs_failed() {
 		let response = wreq::Response::from(http::Response::builder().status(403).body("").unwrap());
 		let answered: Result<wreq::Response, ()> = Ok(response);
-		assert_eq!(status_of(&answered), Some(403));
-		assert_eq!(status_of(&Err::<wreq::Response, _>(())), None);
-		sent(Kind::Rest, "/r/rust/hot.json", Instant::now(), &answered);
+		assert_eq!(status_of(&answered), "403");
+		assert_eq!(status_of(&Err::<wreq::Response, _>(())), "failed");
+		let request = start(Kind::Rest, "/r/rust/hot.json");
+		assert!(!request.logged);
+		request.finish(&answered);
+	}
+
+	#[tokio::test]
+	async fn a_send_cancelled_by_a_timeout_still_logs_with_its_cause() {
+		let send = scope(Cause::Startup, async {
+			let request = start(Kind::Token, "https://accounts.reddit.com/api/access_token");
+			assert_eq!(request.cause, "startup");
+			std::future::pending::<()>().await;
+			request.finish(&Err::<wreq::Response, _>(()));
+		});
+		// The timeout drops the send unfinished: the guard's Drop logs it as cancelled
+		assert!(tokio::time::timeout(std::time::Duration::from_millis(1), send).await.is_err());
 	}
 
 	#[test]

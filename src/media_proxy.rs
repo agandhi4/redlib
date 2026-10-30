@@ -7,7 +7,6 @@ use crate::transport::CLIENT;
 use crate::upstream_log;
 use hyper::{header, Body, Request as HyperRequest, Response as HyperResponse};
 use log::{error, warn};
-use std::time::Instant;
 use wreq::{header as wreq_header, Response as WreqResponse};
 
 pub async fn proxy(req: HyperRequest<Body>, format: &str) -> Result<HyperResponse<Body>, String> {
@@ -47,9 +46,9 @@ pub async fn proxy(req: HyperRequest<Body>, format: &str) -> Result<HyperRespons
 		// This is needed or Reddit will redirect us to a /media landing page that just renders the image.
 		builder = builder.header(wreq_header::ACCEPT, "*/*");
 
-		let started = Instant::now();
+		let in_flight = upstream_log::start(upstream_log::Kind::Media, wreq_uri.host().unwrap_or_default());
 		let sent = builder.send().await;
-		upstream_log::sent(upstream_log::Kind::Media, wreq_uri.host().unwrap_or_default(), started, &sent);
+		in_flight.finish(&sent);
 		match sent {
 			// Retry CDN-side errors; pass the final attempt's response through unmodified.
 			Ok(res) if res.status().is_server_error() && attempt < MAX_ATTEMPTS => {

@@ -6,7 +6,6 @@ use base64::{engine::general_purpose, Engine as _};
 use log::{info, trace};
 use serde_json::json;
 use std::collections::HashMap;
-use std::time::Instant;
 use tegen::tegen::TextGenerator;
 
 const REDDIT_ANDROID_OAUTH_CLIENT_ID: &str = "ohXpoqrZYub1kg";
@@ -96,9 +95,9 @@ impl OauthBackend for MobileSpoofAuth {
 		trace!("Sending token request to {url}...");
 
 		// Send request
-		let started = Instant::now();
+		let in_flight = upstream_log::start(upstream_log::Kind::Token, &url);
 		let resp = builder.json(&json).send().await;
-		upstream_log::sent(upstream_log::Kind::Token, &url, started, &resp);
+		in_flight.finish(&resp);
 		let resp = resp?;
 
 		trace!("Received response with status {} and length {:?}", resp.status(), resp.headers().get("content-length"));

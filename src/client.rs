@@ -14,7 +14,7 @@ use std::future::Future;
 use std::result::Result;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::LazyLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use wreq::{header as wreq_header, Method, RequestBuilder, Response as WreqResponse};
 
 const REDDIT_URL_BASE: &str = "https://oauth.reddit.com";
@@ -178,10 +178,10 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 	let builder = with_reddit_headers(CLIENT.request(method.clone(), &url), host, quarantine, None);
 
 	async move {
-		let started = Instant::now();
-		let sent = builder.send().await;
 		let kind = if *method == Method::HEAD { upstream_log::Kind::Head } else { upstream_log::Kind::Rest };
-		upstream_log::sent(kind, &url, started, &sent);
+		let in_flight = upstream_log::start(kind, &url);
+		let sent = builder.send().await;
+		in_flight.finish(&sent);
 		match sent {
 			Ok(response) => {
 				// Reddit may respond with a 3xx. Decide whether or not to
@@ -343,9 +343,9 @@ fn gql_post(body: &Value) -> Boxed<Result<WreqResponse, String>> {
 	let operation = body["operationName"].as_str().unwrap_or("unnamed").to_string();
 	let builder = with_reddit_headers(CLIENT.post(GQL_URL), GQL_URL_HOST, false, Some("application/json")).body(body.to_string());
 	async move {
-		let started = Instant::now();
+		let in_flight = upstream_log::start(upstream_log::Kind::Gql, &operation);
 		let sent = builder.send().await;
-		upstream_log::sent(upstream_log::Kind::Gql, &operation, started, &sent);
+		in_flight.finish(&sent);
 		sent.map_err(|e| e.to_string())
 	}
 	.boxed()
