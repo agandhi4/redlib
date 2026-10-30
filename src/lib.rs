@@ -1,3 +1,4 @@
+pub mod breaker;
 pub mod client;
 pub mod comments;
 pub mod compression;
