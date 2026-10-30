@@ -250,3 +250,8 @@ Consequence: left: zstd 0.13.3 (0391) and zstd-safe 7.2.4 (0395–0406, 12 advis
 Why: asked whether our own traffic gets the instance blocked, nothing could say: redlib logged only warnings, the cache hides how many page views reach Reddit, and the prefetcher's and the background refresh's requests looked like the reader's.
 Decision: an `upstream_log::start` guard around each of the four senders' sends logs (on `finish`, or as `cancelled` from Drop when a timeout drops the send) kind, target, status, latency and a cause (a tokio task-local: `page`, `prefetch` via a `Purpose: prefetch` header from prefetch.js, `startup`, or `background` for spawned work, which inherits no task-local). Logged under the `upstream` target, on by default; logfmt so LogQL can count it.
 Consequence: one line per Reddit request (about 0.3 MB a day for one reader). A new code path that sends to Reddit must use the `upstream_log::start` guard, or its traffic is invisible again (AGENTS.md).
+
+## 2026-10-30 — The token daemon starts after the session is stored
+Why: `init_oauth_client` spawned `token_daemon()` inside `OnceCell::get_or_init`, before the cell held the session; the daemon's first `oauth_session()` could run first on another worker and panic. Loki shows it on 5 of 16 boots in October. A panicked tokio task is silent, so those boots never refreshed their token until Reddit refused it.
+Decision: spawn the daemon after `get_or_init` returns, only on the call that bootstrapped.
+Consequence: every boot refreshes its token on schedule; the "OAuth client used before init_oauth_client() completed" panic should never appear in the logs again.

@@ -234,13 +234,29 @@ static OAUTH_SESSION: OnceCell<TokenManager<MobileSpoofMinter>> = OnceCell::cons
 /// tokio runtime, before anything calls `oauth_client()`. Idempotent: concurrent or repeated
 /// calls (tests) share the first initialization. Exits the process if every mint attempt fails.
 pub async fn init_oauth_client() {
-	OAUTH_SESSION
-		.get_or_init(|| async {
-			let session = TokenManager::bootstrap(MobileSpoofMinter).await.unwrap_or_else(|e| exit_for_restart(&e));
-			tokio::spawn(token_daemon());
-			session
+	let bootstrap = async { TokenManager::bootstrap(MobileSpoofMinter).await.unwrap_or_else(|e| exit_for_restart(&e)) };
+	init_then(&OAUTH_SESSION, bootstrap, || {
+		tokio::spawn(token_daemon());
+	})
+	.await;
+}
+
+/// Fills `cell` with `init` and then, only on the call that ran `init`, runs `started`, once the
+/// cell holds the value. The token daemon reads the session at once: spawned inside
+/// get_or_init it raced the store, panicked in `oauth_session()` on 5 of 16 boots (Loki,
+/// 2026-10) and, a panicked task being silent, left those boots without token refresh.
+async fn init_then<T>(cell: &OnceCell<T>, init: impl Future<Output = T>, started: impl FnOnce()) {
+	let mut ran = false;
+	let first = &mut ran;
+	cell
+		.get_or_init(|| async move {
+			*first = true;
+			init.await
 		})
 		.await;
+	if ran {
+		started();
+	}
 }
 
 /// The live token manager: current token, request budget, rotation. Panics if
@@ -287,6 +303,20 @@ pub async fn refresh_blocked_token() {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[tokio::test]
+	async fn the_daemon_starts_once_and_only_after_the_session_is_stored() {
+		let cell = OnceCell::new();
+		let started = std::cell::Cell::new(0);
+		for _ in 0..2 {
+			init_then(&cell, async { 7 }, || {
+				assert_eq!(cell.get(), Some(&7));
+				started.set(started.get() + 1);
+			})
+			.await;
+		}
+		assert_eq!(started.get(), 1);
+	}
 
 	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "hits live reddit"]
