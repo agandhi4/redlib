@@ -15,6 +15,7 @@ use time::{Duration, OffsetDateTime};
 
 use crate::compression::compress_response;
 use crate::config;
+use crate::upstream_log;
 
 const BANNED_USER_AGENTS: &[&str] = &[
 	"AI2Bot",
@@ -309,7 +310,8 @@ impl Server {
 							parammed.set_params(found.params().clone());
 
 							// Run the route's function
-							let func = (found.handler().to_owned().to_owned())(parammed);
+							let cause = upstream_log::Cause::of(&req_headers);
+							let func = upstream_log::scope(cause, (found.handler().to_owned().to_owned())(parammed));
 							async move {
 								match func.await {
 									Ok(mut res) => {

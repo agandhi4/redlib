@@ -1,13 +1,13 @@
 {
   "metrics": {
     "coupling.app.fan_in_max": 12,
-    "duplication.app.jscpd_percent": 1.12,
+    "duplication.app.jscpd_percent": 1.1,
     "size.app.max_lines": 687,
     "size.app.over_600": 1,
     "vuln.app.critical": 0,
-    "vuln.app.high": 1,
-    "vuln.app.packages": 326,
-    "vuln.app.total": 20
+    "vuln.app.high": 0,
+    "vuln.app.packages": 325,
+    "vuln.app.total": 16
   },
   "schema_version": 2,
   "skipped": [],

@@ -4,6 +4,7 @@ use crate::reddit_response::{interpret_response, TokenAction};
 use crate::rewrite::format_url;
 use crate::swr_cache::SwrCache;
 use crate::transport::CLIENT;
+use crate::upstream_log;
 use cached::proc_macro::cached;
 use futures_lite::{future::Boxed, FutureExt};
 use log::{trace, warn};
@@ -177,7 +178,11 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 	let builder = with_reddit_headers(CLIENT.request(method.clone(), &url), host, quarantine, None);
 
 	async move {
-		match builder.send().await {
+		let kind = if *method == Method::HEAD { upstream_log::Kind::Head } else { upstream_log::Kind::Rest };
+		let in_flight = upstream_log::start(kind, &url);
+		let sent = builder.send().await;
+		in_flight.finish(&sent);
+		match sent {
 			Ok(response) => {
 				// Reddit may respond with a 3xx. Decide whether or not to
 				// redirect based on caller params.
@@ -335,8 +340,15 @@ fn gql_error(response: &Value) -> Option<String> {
 
 /// POST `body` to gql-fed with the same identity as every other Reddit request.
 fn gql_post(body: &Value) -> Boxed<Result<WreqResponse, String>> {
+	let operation = body["operationName"].as_str().unwrap_or("unnamed").to_string();
 	let builder = with_reddit_headers(CLIENT.post(GQL_URL), GQL_URL_HOST, false, Some("application/json")).body(body.to_string());
-	async move { builder.send().await.map_err(|e| e.to_string()) }.boxed()
+	async move {
+		let in_flight = upstream_log::start(upstream_log::Kind::Gql, &operation);
+		let sent = builder.send().await;
+		in_flight.finish(&sent);
+		sent.map_err(|e| e.to_string())
+	}
+	.boxed()
 }
 
 /// Which `x-ratelimit-*` budget a request draws on. gql-fed meters the same token separately (a

@@ -13,6 +13,7 @@ use redlib::oauth::init_oauth_client;
 use redlib::preferences::ThemeAssets;
 use redlib::server::{self, RequestExt};
 use redlib::startup_check::rate_limit_check;
+use redlib::upstream_log::{self, Cause};
 use redlib::utils::{error, redirect};
 use redlib::{config, db, duplicates, headers, instance_info, post, search, settings, subreddit, subreddit_rss, user};
 
@@ -104,9 +105,10 @@ async fn main() {
 
 	// Initialize logger. Default `warn`, not env_logger's error-only: the token-rotation and
 	// rate-limit lines are warn!, and with no RUST_LOG on the instance they never reached the
-	// logs, so the 2026-10-20 thread 403s could not be told from token blocks. RUST_LOG overrides.
+	// logs, so the 2026-10-20 thread 403s could not be told from token blocks. `upstream=info` is
+	// the one line per request sent to Reddit (`upstream_log`). RUST_LOG overrides both.
 	pretty_env_logger::formatted_builder()
-		.parse_filters(&std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".to_string()))
+		.parse_filters(&std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,upstream=info".to_string()))
 		.init();
 
 	// `--version` reports the build's one version string (the image's sha7), not the crate semver:
@@ -158,9 +160,13 @@ async fn main() {
 	// server accepts requests. Bootstrapped here, in the runtime, rather than lazily from a
 	// blocking static initializer — see the note on `OAUTH_SESSION` in oauth.rs.
 	info!("Creating OAUTH client.");
-	init_oauth_client().await;
+	let rate_limit = upstream_log::scope(Cause::Startup, async {
+		init_oauth_client().await;
+		rate_limit_check().await
+	})
+	.await;
 
-	match rate_limit_check().await {
+	match rate_limit {
 		Ok(()) => {
 			info!("[✅] Rate limit check passed");
 		}
