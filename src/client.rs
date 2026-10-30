@@ -1,3 +1,4 @@
+use crate::breaker::{clock, unix_now, Breaker};
 use crate::dbg_msg;
 use crate::oauth::{force_refresh_token, oauth_client, oauth_session, refresh_blocked_token};
 use crate::reddit_response::{interpret_response, TokenAction};
@@ -298,11 +299,43 @@ fn json_shape(body: &Value) -> String {
 	format!("kind={} keys=[{}] data=[{}]", body["kind"].as_str().unwrap_or("-"), keys(body), keys(&body["data"]))
 }
 
+/// How long REST is skipped after oauth.reddit.com answers with the 403 block page, in seconds.
+/// Since 2026-10-29 it answers every route that way for our tokens, and each blocked read also
+/// mints a token (`refresh_blocked_token`, 60 s cooldown): without the skip, every page GraphQL
+/// cannot serve asked Reddit again. A 10-minute probe still notices REST coming back.
+const REST_BLOCKED_FOR: u64 = 600;
+
+/// Open while REST is skipped; tripped in `fetch_reddit`, read in `fetch_json` and on /info.
+static REST_BLOCK: Breaker = Breaker::new();
+
 /// Fetch and parse one REST document from oauth.reddit.com. Uncached: `sources` calls it as the
-/// fallback inside `cached_json`.
+/// fallback inside `cached_json`. While REST is skipped it sends nothing.
 pub(crate) async fn fetch_json(path: String, quarantine: bool) -> Result<Value, String> {
+	if let Some(until) = REST_BLOCK.open_until(unix_now()) {
+		return Err(rest_skipped(until));
+	}
 	let label = path.clone();
 	fetch_reddit(&label, Budget::Rest, move || reddit_get(path, quarantine)).await
+}
+
+fn rest_skipped(until: u64) -> String {
+	format!(
+		"Reddit refused this request (403 block page). Reddit is refusing its JSON API to logged-out clients, so redlib does not ask again until {}.",
+		clock(until)
+	)
+}
+
+/// For /info: whether REST is being skipped.
+pub(crate) fn rest_state(now: u64) -> String {
+	REST_BLOCK
+		.open_until(now)
+		.map_or_else(|| "tried".to_string(), |until| format!("skipped until {} (403 block page)", clock(until)))
+}
+
+/// A block page on REST opens `REST_BLOCK`. Only REST: gql-fed is the source that still works,
+/// and its own failures are `sources`' per-kind breakers' business.
+fn blocks_rest(budget: Budget, action: &TokenAction) -> bool {
+	budget == Budget::Rest && matches!(action, TokenAction::RotateBlocked)
 }
 
 /// Send one GraphQL operation. Uncached: `gql()` caches it, and `sources` caches the converted
@@ -386,6 +419,9 @@ async fn fetch_reddit(label: &str, budget: Budget, send: impl FnOnce() -> Boxed<
 	let body = response.bytes().await.map_err(|e| format!("Failed receiving body from Reddit: {e} | {label}"))?;
 
 	let (result, action) = interpret_response(status, &body, reset.as_deref(), label);
+	if blocks_rest(budget, &action) && REST_BLOCK.trip(unix_now(), REST_BLOCKED_FOR) {
+		warn!("[rest] 403 block page on {label}; REST skipped for {} min", REST_BLOCKED_FOR / 60);
+	}
 	match action {
 		TokenAction::None => {}
 		TokenAction::RotateInBackground => {
@@ -421,6 +457,15 @@ fn record_ratelimit(response: &WreqResponse, ratelimit: Option<&AtomicU16>, curr
 mod tests {
 	use super::*;
 	use serde_json::json;
+
+	#[test]
+	fn only_a_rest_block_page_skips_rest() {
+		assert!(blocks_rest(Budget::Rest, &TokenAction::RotateBlocked));
+		assert!(!blocks_rest(Budget::Gql, &TokenAction::RotateBlocked));
+		assert!(!blocks_rest(Budget::Rest, &TokenAction::Rotate));
+		assert!(rest_skipped(1_800_000_000).ends_with("until 08:00 UTC."));
+		assert_eq!(rest_state(0), "tried");
+	}
 
 	#[test]
 	fn gql_error_reads_the_first_message() {

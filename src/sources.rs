@@ -9,15 +9,13 @@
 //! an open breaker whose REST read fails closes and hands that read to GraphQL.
 //! Used by every page through `json`; /info shows `status`.
 
-use crate::client::{cached_json, fetch_gql, fetch_json};
+use crate::breaker::{clock, unix_now, Breaker};
+use crate::client::{cached_json, fetch_gql, fetch_json, rest_state};
 use crate::gql_plan::{run, GqlError, GqlFetch};
 use crate::reddit_path::{parse, without_gql_cursor, Kind, Resource};
 use futures_lite::{future::Boxed, FutureExt};
 use log::{info, warn};
 use serde_json::Value;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-use time::{macros::format_description, OffsetDateTime};
 
 /// How long a kind reads from REST after its GraphQL plan failed and REST served it, in seconds.
 const GQL_RETRY_AFTER: u64 = 300;
@@ -28,38 +26,36 @@ const REDDIT_REASONS: [&str; 6] = ["quarantined", "gated", "private", "banned", 
 /// Fetches one REST document; `client::fetch_json` in production.
 type RestFetch<'a> = &'a (dyn Fn(String, bool) -> Boxed<Result<Value, String>> + Sync);
 
-/// One breaker per `Kind`: the Unix second until which its GraphQL plan is skipped (0 when it
-/// has never failed). Lock-free, so a page never waits on another's bookkeeping.
-pub(crate) struct Breakers([AtomicU64; Kind::ALL.len()]);
+/// One breaker per `Kind`: while open, that kind's GraphQL plan is skipped.
+pub(crate) struct Breakers([Breaker; Kind::ALL.len()]);
 
 impl Breakers {
 	const fn new() -> Self {
-		Self([const { AtomicU64::new(0) }; Kind::ALL.len()])
+		Self([const { Breaker::new() }; Kind::ALL.len()])
 	}
 
-	fn slot(&self, kind: Kind) -> &AtomicU64 {
+	fn slot(&self, kind: Kind) -> &Breaker {
 		&self.0[kind as usize]
 	}
 
 	/// Whether `kind` tries GraphQL at `now`.
 	fn allows(&self, kind: Kind, now: u64) -> bool {
-		self.slot(kind).load(Ordering::Relaxed) <= now
+		self.slot(kind).allows(now)
 	}
 
-	/// Sends `kind` to REST until `now + GQL_RETRY_AFTER`. True when this opened it, so a burst
-	/// of failing pages logs the switch once.
+	/// Sends `kind` to REST until `now + GQL_RETRY_AFTER`. True when this opened it.
 	fn trip(&self, kind: Kind, now: u64) -> bool {
-		self.slot(kind).swap(now + GQL_RETRY_AFTER, Ordering::Relaxed) <= now
+		self.slot(kind).trip(now, GQL_RETRY_AFTER)
 	}
 
-	/// GraphQL answered `kind`. True when it had failed before, i.e. this is the switch back.
+	/// GraphQL answered `kind`. True when this is the switch back.
 	fn close(&self, kind: Kind) -> bool {
-		self.slot(kind).swap(0, Ordering::Relaxed) != 0
+		self.slot(kind).close()
 	}
 
 	/// The Unix second `kind` reads from REST until, while its breaker is open.
 	fn open_until(&self, kind: Kind, now: u64) -> Option<u64> {
-		Some(self.slot(kind).load(Ordering::Relaxed)).filter(|until| *until > now)
+		self.slot(kind).open_until(now)
 	}
 }
 
@@ -74,30 +70,25 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 	.await
 }
 
-/// Each kind's current source, for /info: "GraphQL", or "REST until HH:MM UTC".
+/// Each kind's current source, for /info ("GraphQL", or "REST until HH:MM UTC"), then whether
+/// REST itself is being skipped (`client::rest_state`).
 pub fn status() -> Vec<(&'static str, String)> {
-	status_at(&BREAKERS, unix_now())
+	let now = unix_now();
+	let mut rows = status_at(&BREAKERS, now);
+	rows.push(("REST", rest_state(now)));
+	rows
 }
 
 fn status_at(breakers: &Breakers, now: u64) -> Vec<(&'static str, String)> {
-	let clock = format_description!("[hour]:[minute]");
 	Kind::ALL
 		.iter()
 		.map(|kind| {
-			let source = breakers.open_until(*kind, now).map_or_else(
-				|| "GraphQL".to_string(),
-				|until| {
-					let at = OffsetDateTime::from_unix_timestamp(until as i64).unwrap_or(OffsetDateTime::UNIX_EPOCH);
-					format!("REST until {} UTC", at.format(clock).unwrap_or_default())
-				},
-			);
+			let source = breakers
+				.open_until(*kind, now)
+				.map_or_else(|| "GraphQL".to_string(), |until| format!("REST until {}", clock(until)));
 			(kind.name(), source)
 		})
 		.collect()
-}
-
-fn unix_now() -> u64 {
-	SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs())
 }
 
 fn live_gql(body: Value) -> Boxed<Result<Value, String>> {
@@ -205,7 +196,7 @@ mod tests {
 	use super::*;
 	use crate::gql_fields::after_param;
 	use serde_json::json;
-	use std::sync::atomic::AtomicUsize;
+	use std::sync::atomic::{AtomicUsize, Ordering};
 	use std::sync::Mutex;
 
 	const T0: u64 = 1_800_000_000;

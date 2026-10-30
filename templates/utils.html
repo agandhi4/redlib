@@ -198,7 +198,8 @@
 					<span class="desktop_item">perma</span>link
 				</a>
 			</li>
-			{% if post.num_duplicates > 0 %}
+			{# GraphQL sends no duplicate count (num_duplicates stays 0), so a link post always offers the page; it says when there are none #}
+			{% if post.num_duplicates > 0 || post.post_type == "link" %}
 			<li>
 				<a href="/r/{{ post.community }}/duplicates/{{ post.id }}">
 					dup<span class="desktop_item">licat</span>es

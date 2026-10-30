@@ -4,8 +4,11 @@
 // body is discarded — this is a server-side cache warmer, not a browser
 // cache play (the service worker does keep the HTML for offline).
 //
-// Two triggers: hover/touch intent on any link, and an idle-time pass on
-// listing pages for the posts most likely to be opened next.
+// Two triggers: hover/touch intent on a post or the next page, and an
+// idle-time pass on listing pages for the posts most likely to be opened
+// next. Every warm is a real Reddit request (counted as cause=prefetch in
+// the server's upstream log), and since 2026-10-29 gql-fed is the only
+// source still answering, so intent is limited to the links readers open.
 (function () {
 	"use strict";
 
@@ -26,6 +29,15 @@
 		return true;
 	}
 
+	// Intent counts only on a post's comments page or the listing's next page:
+	// usernames (about 4 Reddit calls each), sort tabs and subreddit links were
+	// warmed on every pass of the pointer and rarely opened.
+	function intended(anchor) {
+		if (!eligible(anchor)) return false;
+		if (anchor.getAttribute("accesskey") === "N") return true;
+		return new URL(anchor.href, location.href).pathname.indexOf("/comments/") >= 0;
+	}
+
 	function prefetch(anchor) {
 		var key = anchor.href;
 		if (prefetched.has(key)) return;
@@ -38,21 +50,24 @@
 		});
 	}
 
-	// Desktop: brief hover intent (65ms) filters drive-by mouse passes
+	// Desktop: hover intent (150ms) filters drive-by mouse passes; 65ms
+	// warmed most links the pointer crossed.
+	var HOVER_INTENT_MS = 150;
 	document.addEventListener("mouseover", function (e) {
 		var a = e.target.closest && e.target.closest("a");
-		if (!eligible(a)) return;
+		if (!intended(a)) return;
 		clearTimeout(hoverTimer);
-		hoverTimer = setTimeout(function () { prefetch(a); }, 65);
+		hoverTimer = setTimeout(function () { prefetch(a); }, HOVER_INTENT_MS);
 	});
 	document.addEventListener("mouseout", function () {
 		clearTimeout(hoverTimer);
 	});
 
-	// Mobile: touchstart fires ~100ms before the tap completes
+	// Mobile: touchstart fires ~100ms before the tap completes. It also fires
+	// when a scroll starts on a link, hence the same intent filter.
 	document.addEventListener("touchstart", function (e) {
 		var a = e.target.closest && e.target.closest("a");
-		if (eligible(a)) prefetch(a);
+		if (intended(a)) prefetch(a);
 	}, { passive: true });
 
 	// Idle warm on listing pages: the first few posts by position, the most
