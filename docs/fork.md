@@ -105,3 +105,5 @@ Building on the Mac (since 2026-10-13): there is still no system Rust, but `devk
 Instance env changes are not live: `REDLIB_DEFAULT_FEEDS` is parsed once at startup (`utils::FEEDS`), so an edit to the compose file needs the container recreated, not just the file saved. And a browser's `subscriptions` cookie silently overrides `REDLIB_DEFAULT_SUBSCRIPTIONS` (`preferences::setting_list`), so a changed default is invisible in any browser that has ever saved settings — check with a fresh profile or curl.
 
 Measured on the instance (v0.42.0): cold page ~0.40s (one Reddit round-trip), fresh or stale cache hit ~0.02s, idle-prefetched post ~0.015s vs ~0.27s for an unpicked one.
+
+The server is HTTP/1.1 only (v0.44.2): `hyper` 0.14 is built without its `http2` feature (upstream uses `full`), because that feature is the only path to h2 0.3, whose RUSTSEC-2026-0258 is fixed only in h2 0.4 (hyper 1). Caddy's `reverse_proxy redlib:8080` speaks HTTP/1.1, and every outbound request goes through wreq, so nothing used it. Re-enable it only with hyper 1.
