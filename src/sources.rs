@@ -3,13 +3,15 @@
 //! page on every route while gql-fed's persisted queries still answer, so each REST path the
 //! pages build is parsed (`reddit_path`) and served by its GraphQL plan (`gql_plan`); REST
 //! (`client::fetch_json`) covers what has no plan and a kind whose plan fails, which is what
-//! Reddit retiring a persisted query looks like. A failure opens that kind's breaker for
-//! `GQL_RETRY_AFTER`, so a retired query costs one failed call per 5 minutes, not per page.
+//! Reddit retiring a persisted query looks like. A failure that REST then serves opens that
+//! kind's breaker for `GQL_RETRY_AFTER`, so a retired query costs one failed call per 5 minutes,
+//! not per page. The breaker is open only while REST serves: with both failing it stays shut, and
+//! an open breaker whose REST read fails closes and hands that read to GraphQL.
 //! Used by every page through `json`; /info shows `status`.
 
 use crate::client::{cached_json, fetch_gql, fetch_json};
 use crate::gql_plan::{run, GqlError, GqlFetch};
-use crate::reddit_path::{parse, without_gql_cursor, Kind};
+use crate::reddit_path::{parse, without_gql_cursor, Kind, Resource};
 use futures_lite::{future::Boxed, FutureExt};
 use log::{info, warn};
 use serde_json::Value;
@@ -17,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use time::{macros::format_description, OffsetDateTime};
 
-/// How long a kind reads from REST after its GraphQL plan failed, in seconds.
+/// How long a kind reads from REST after its GraphQL plan failed and REST served it, in seconds.
 const GQL_RETRY_AFTER: u64 = 300;
 
 /// REST errors the pages match on exactly (`subreddit::community` and others); never decorated.
@@ -113,20 +115,57 @@ async fn route(path: &str, quarantine: bool, now: u64, breakers: &Breakers, gql:
 		return rest(path.to_string(), quarantine).await;
 	};
 	if !breakers.allows(kind, now) {
-		return fallback(path, quarantine, rest).await;
+		return rest_while_open(path, &resource, kind, quarantine, breakers, gql, rest).await;
 	}
-	let gql_error = match run(&resource, quarantine, gql).await {
-		Ok(value) => return answered(kind, breakers, Ok(value)),
-		Err(GqlError::Refused(reason)) => return answered(kind, breakers, Err(reason)),
-		Err(GqlError::NotServed(e)) => e,
-		Err(GqlError::Failed(e)) => {
-			if breakers.trip(kind, now) {
-				warn!("[source] {}: GraphQL failed ({e}); REST for {} min", kind.name(), GQL_RETRY_AFTER / 60);
-			}
-			e
-		}
+	let (gql_error, failed) = match attempt(&resource, kind, quarantine, breakers, gql).await {
+		Attempt::Answered(answer) => return answer,
+		Attempt::Rest { error, failed } => (error, failed),
 	};
-	fallback(path, quarantine, rest).await.map_err(|rest_error| combined(rest_error, &gql_error))
+	match fallback(path, quarantine, rest).await {
+		Ok(value) => {
+			if failed && breakers.trip(kind, now) {
+				warn!("[source] {}: GraphQL failed ({gql_error}); REST for {} min", kind.name(), GQL_RETRY_AFTER / 60);
+			}
+			Ok(value)
+		}
+		// Both down: the breaker stays shut, since sending the kind to a failing REST would
+		// turn one GraphQL blip into five minutes of errors. The next read tries GraphQL again.
+		Err(rest_error) => Err(combined(rest_error, &gql_error)),
+	}
+}
+
+/// The breaker is open, so REST serves `path`. A failing REST means the open breaker is serving
+/// errors: it closes, and GraphQL gets this same read.
+async fn rest_while_open(path: &str, resource: &Resource, kind: Kind, quarantine: bool, breakers: &Breakers, gql: GqlFetch<'_>, rest: RestFetch<'_>) -> Result<Value, String> {
+	let rest_error = match fallback(path, quarantine, rest).await {
+		Ok(value) => return Ok(value),
+		Err(e) => e,
+	};
+	if breakers.close(kind) {
+		warn!("[source] {}: REST failed too ({rest_error}); back to GraphQL", kind.name());
+	}
+	match attempt(resource, kind, quarantine, breakers, gql).await {
+		Attempt::Answered(answer) => answer,
+		Attempt::Rest { error, .. } => Err(combined(rest_error, &error)),
+	}
+}
+
+/// What one GraphQL attempt leaves a read with.
+enum Attempt {
+	/// The page's answer: a document, or Reddit's refusal. GraphQL works, so the breaker closes.
+	Answered(Result<Value, String>),
+	/// REST has to serve the read. `failed` is a broken operation (`GqlError::Failed`), which
+	/// may open the breaker; otherwise GraphQL works but cannot serve this request.
+	Rest { error: String, failed: bool },
+}
+
+async fn attempt(resource: &Resource, kind: Kind, quarantine: bool, breakers: &Breakers, gql: GqlFetch<'_>) -> Attempt {
+	match run(resource, quarantine, gql).await {
+		Ok(value) => Attempt::Answered(answered(kind, breakers, Ok(value))),
+		Err(GqlError::Refused(reason)) => Attempt::Answered(answered(kind, breakers, Err(reason))),
+		Err(GqlError::NotServed(error)) => Attempt::Rest { error, failed: false },
+		Err(GqlError::Failed(error)) => Attempt::Rest { error, failed: true },
+	}
 }
 
 /// GraphQL answered (a document, or Reddit's refusal): its breaker closes.
@@ -276,12 +315,37 @@ mod tests {
 		let error = read(&next, T0, &breakers, &gql, &rest).await.unwrap_err();
 		assert_eq!(error, "Reddit refused this request (403 block page). (GraphQL: gql down)");
 		assert_eq!(*rest.last.lock().unwrap(), Some(json!("/r/rust/hot.json?raw_json=1")));
-		// While open, REST's error is the whole answer
-		assert_eq!(
-			read(FEED, T0 + 1, &breakers, &gql, &rest).await.unwrap_err(),
-			"Reddit refused this request (403 block page)."
-		);
 		assert_eq!(combined("quarantined".into(), "x"), "quarantined");
+	}
+
+	#[tokio::test]
+	async fn with_rest_failing_too_the_breaker_stays_shut() {
+		let (breakers, rest) = (Breakers::new(), Fake::failing("Reddit refused this request (403 block page)."));
+		let gql = Fake::failing("gql blip");
+		read(FEED, T0, &breakers, &gql, &rest).await.unwrap_err();
+		assert!(breakers.allows(Kind::Listing, T0 + 1));
+
+		// So the next read gets GraphQL, which is back
+		let healed = Fake::ok(feed());
+		assert_eq!(first_name(&read(FEED, T0 + 1, &breakers, &healed, &rest).await.unwrap()), "t3_g");
+		assert_eq!((healed.calls(), rest.calls()), (1, 1));
+	}
+
+	#[tokio::test]
+	async fn an_open_breaker_whose_rest_fails_hands_the_read_to_graphql() {
+		let (breakers, rest) = (Breakers::new(), Fake::failing("Reddit refused this request (403 block page)."));
+		assert!(breakers.trip(Kind::Listing, T0));
+		let gql = Fake::ok(feed());
+		assert_eq!(first_name(&read(FEED, T0 + 1, &breakers, &gql, &rest).await.unwrap()), "t3_g");
+		assert_eq!((gql.calls(), rest.calls()), (1, 1));
+		assert_eq!(status_at(&breakers, T0 + 1)[0].1, "GraphQL");
+
+		// Both failing: one call each, both errors, and the breaker stays shut
+		assert!(breakers.trip(Kind::Listing, T0 + 1));
+		let error = read(FEED, T0 + 2, &breakers, &Fake::failing("gql down"), &rest).await.unwrap_err();
+		assert_eq!(error, "Reddit refused this request (403 block page). (GraphQL: gql down)");
+		assert_eq!(rest.calls(), 2);
+		assert!(breakers.allows(Kind::Listing, T0 + 2));
 	}
 
 	#[tokio::test]
