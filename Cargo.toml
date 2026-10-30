@@ -3,7 +3,7 @@ name = "redlib"
 description = " Alternative private front-end to Reddit"
 license = "AGPL-3.0-only"
 repository = "https://github.com/redlib-org/redlib"
-version = "0.44.1"
+version = "0.44.2"
 authors = [
     "Matthew Esposito <matt+cargo@matthew.science>",
     "spikecodes <19519553+spikecodes@users.noreply.github.com>",
@@ -28,7 +28,9 @@ regex = "1.10.2"
 serde = { version = "1.0.193", features = ["derive"] }
 cookie = "0.18.0"
 futures-lite = "2.2.0"
-hyper = { version = "0.14.31", features = ["full"] }
+# No "http2": it is the only path to h2 0.3 (RUSTSEC-2026-0258, fixed only in h2 0.4 / hyper 1).
+# Caddy proxies to us over HTTP/1.1, and the outbound client is wreq, not hyper.
+hyper = { version = "0.14.31", features = ["http1", "server", "stream", "runtime"] }
 percent-encoding = "2.3.1"
 route-recognizer = "0.3.1"
 serde_json = "1.0.133"
