@@ -240,3 +240,8 @@ Consequence: when Reddit retires a hash, that kind goes to REST (blocked today) 
 Why: 0.44.0 opened a kind's breaker on any GraphQL failure. With REST blocked, one passing GraphQL blip sent that kind to a failing REST for 5 minutes: five minutes of error pages from a single bad call.
 Decision: the breaker is open only while REST serves the kind. GraphQL failing and REST serving opens it; both failing leaves it shut (the next read tries GraphQL); an open breaker whose REST read fails closes and hands that same read to GraphQL (`sources::rest_while_open`).
 Consequence: while both sources are down every read costs one call to each, instead of one REST call. That only happens in a full outage, where saving a call buys nothing.
+
+## 2026-10-29 — RustSec pass: four fixed, the zstd chain waits on wreq
+Why: `cargo audit` reported 6 vulnerabilities and 13 warnings, among them pulldown-cmark RUSTSEC-2026-0414 (high).
+Decision: lockfile updates fix pulldown-cmark 0.13.3 → 0.13.5 (0414), tokio 1.52.1 → 1.54.1 (0386) and zstd-sys 2.0.16 → 2.1.2 (0410). h2 0.3 (0258) has no 0.3 fix, so hyper 0.14 drops its unused `http2` feature and h2 leaves the tree (`docs/fork.md` Operational notes). No `ignore` entries.
+Consequence: left: zstd 0.13.3 (0391) and zstd-safe 7.2.4 (0395–0406, 12 advisories), because wreq requires `zstd ^0.13.3` through rc.31, so not even a wreq upgrade fixes them; bumping async-compression only adds a second zstd. Also left: bincode 1.3.3 (RUSTSEC-2025-0141, unmaintained; it is the settings-restore wire format) and unsafe-libyaml via serde_yaml (RUSTSEC-2024-0449, unmaintained; `/info.yaml`), each a replacement, not an update.
