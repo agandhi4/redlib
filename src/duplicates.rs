@@ -137,7 +137,9 @@ fn parse_cursor(query: &str) -> QueryCursor {
 /// in the JSON, in addition to missing the "before." So we will have to use the final post in
 /// the list of duplicates.
 ///
-/// With no duplicates all three stay empty, even when the query names a sort.
+/// With no duplicates all three stay empty, even when the query names a sort. GraphQL serves
+/// only the first page (`reddit_path` sends any `before=`/`after=` to REST) with `after: null`,
+/// so it gets no NEXT and never reaches the probe below.
 async fn paging_params(req: &Request<Body>, duplicates: &[Post], listing: &Value) -> Result<DuplicatesParams, String> {
 	let (Some(first), Some(last)) = (duplicates.first(), duplicates.last()) else {
 		return Ok(DuplicatesParams {

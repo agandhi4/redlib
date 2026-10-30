@@ -255,3 +255,8 @@ Consequence: one line per Reddit request (about 0.3 MB a day for one reader). A 
 Why: `init_oauth_client` spawned `token_daemon()` inside `OnceCell::get_or_init`, before the cell held the session; the daemon's first `oauth_session()` could run first on another worker and panic. Loki shows it on 5 of 16 boots in October. A panicked tokio task is silent, so those boots never refreshed their token until Reddit refused it.
 Decision: spawn the daemon after `get_or_init` returns, only on the call that bootstrapped.
 Consequence: every boot refreshes its token on schedule; the "OAuth client used before init_oauth_client() completed" panic should never appear in the logs again.
+
+## 2026-10-30 — Wiki and other discussions read from GraphQL
+Why: with REST blocked (2026-10-29), wiki pages and "other discussions" were the last content pages with no GraphQL plan, so both showed the block-page error.
+Decision: SubredditWiki and GetDuplicatePosts (hashes from Littux-Dustux/new-reddit-com) get plans and their own kinds and breakers (`wiki`, `duplicates`). A missing wiki page lists the wiki's existing pages; an unknown page status is Refused (Reddit's answer, shown), not NotServed (REST is blocked) or Failed (one page would open the breaker). Duplicates come as one unpaged page sorted locally, num_comments by default as REST did. A user's controversial posts are NotServed: UserSubmittedPosts answers them empty.
+Consequence: no NEXT on GraphQL duplicates; a REST `before=`/`after=` duplicates link stays REST. Controversial user posts show REST's error until REST returns. Moderators stay unwired (GetModeratorList is empty logged out).
