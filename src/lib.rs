@@ -34,5 +34,6 @@ pub mod subreddit_rss;
 pub mod swr_cache;
 pub mod thread;
 pub mod transport;
+pub mod upstream_log;
 pub mod user;
 pub mod utils;

@@ -30,7 +30,9 @@
 		var key = anchor.href;
 		if (prefetched.has(key)) return;
 		prefetched.add(key);
-		fetch(key, { credentials: "same-origin" }).catch(function () {
+		// Purpose marks it for the server's upstream log (src/upstream_log.rs), so a reader's
+		// pages and the prefetcher's warming are counted apart.
+		fetch(key, { credentials: "same-origin", headers: { Purpose: "prefetch" } }).catch(function () {
 			// Allow retry on transient failure
 			prefetched.delete(key);
 		});

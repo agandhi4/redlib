@@ -1660,7 +1660,7 @@ dependencies = [
 
 [[package]]
 name = "redlib"
-version = "0.44.2"
+version = "0.44.3"
 dependencies = [
  "arc-swap",
  "askama",
