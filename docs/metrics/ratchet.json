@@ -20,7 +20,7 @@
     "source": "rust-app"
   },
   "coverage.app.lines": {
-    "bound": 64.31,
+    "bound": 64.71,
     "direction": "higher",
     "source": "cov-app"
   },
@@ -35,7 +35,7 @@
     "source": "dup"
   },
   "tests.unit.cargo": {
-    "bound": 175,
+    "bound": 181,
     "direction": "higher",
     "source": "tier-unit"
   }
