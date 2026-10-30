@@ -1016,7 +1016,7 @@ IMAGE group), and every first-parent commit since `latest` is a PR whose head pa
 on its parent (a Renovate PR whose diff only moves image digests, `_dependency_pr.py
 digest-only`, passes on the smoke where the plan says `GATE_RENOVATE_AUTOMERGE=digest`). Then it builds `ci-image` + `ci-smoke` at main as
 `<image>:sha-<7>`, pushes it, points `latest` at it, ship-tags main and prunes (`registry_prune.sh
---keep 10`). An ungated commit is refused; the owner's escape is `devkit/bin/publish.sh .
+--keep 10`), every docker call authenticated by gh's token through a per-run credential helper. An ungated commit is refused; the owner's escape is `devkit/bin/publish.sh .
 --ungated '<reason>'` on linux-box, and the reason lands in the ship tag.
 
 A repo opts in with the contract devkit-check holds: `PUBLISH_IMAGE=ghcr.io/<owner>/<name>` as

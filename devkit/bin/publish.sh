@@ -18,6 +18,8 @@
 #      DOCKER_DEFAULT_PLATFORM=linux/amd64 and the default (docker-driver) builder: an arm64
 #      image from the Mac crash-looped the NAS (instalite-relay, 2026-10-18). The Mac never
 #      publishes. The docker driver pushes one manifest, no attestation, so keep-10 is 10 images.
+#   1b. Every docker call runs with a per-run DOCKER_CONFIG whose credential helper answers with
+#      gh's token (docker_as_gh): no docker login, no token on disk, nothing to go stale.
 #   2. A flock per repo ($XDG_STATE_HOME/devkit-publish/<name>.lock), then everything below
 #      inside it, so two runs can never move `latest` out of order.
 #   3. M = origin/main (fetched), L = the commit `latest` was built from (its OCI revision
@@ -113,6 +115,8 @@ check_host() {
   arch=$(uname -m)
   [ "$arch" = x86_64 ] \
     || env_error "this host is $arch; images publish only from a native amd64 host (linux-box), never the Mac: an arm64 image crash-looped the NAS (instalite-relay, 2026-10-18)"
+  SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/publish.XXXXXX") || env_error "mktemp failed"
+  docker_as_gh
   devkit_docker_guard publish
   daemon=$(docker info --format '{{.OSType}}/{{.Architecture}}') || env_error "docker info failed (above)"
   [ "$daemon" = linux/x86_64 ] || env_error "the docker daemon is $daemon, not linux/x86_64; an emulated build is never published"
@@ -125,7 +129,6 @@ read_main() {
   fetch_main "$ROOT" || fail "git fetch of origin main failed (above)"
   M=$(git -C "$ROOT" rev-parse --verify -q refs/remotes/origin/main) || fail "no origin/main after the fetch"
   SHA7=${M:0:7}
-  SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/publish.XXXXXX") || fail "mktemp failed"
   mkdir -p "$SCRATCH/tree/scripts/ci"
   plan=$SCRATCH/tree/scripts/ci/gate_plan.sh
   git -C "$ROOT" show "$M:scripts/ci/gate_plan.sh" >"$plan" 2>/dev/null || env_error "main $SHA7 has no scripts/ci/gate_plan.sh"
@@ -135,8 +138,27 @@ read_main() {
   IMAGE=$(gate_plan_literal "$plan" PUBLISH_IMAGE)
   [ -n "$IMAGE" ] || env_error "main's plan has no PUBLISH_IMAGE= line: $SLUG publishes no image"
   [[ "$IMAGE" =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+$ ]] || env_error "PUBLISH_IMAGE=$IMAGE is not ghcr.io/<owner>/<name>"
+  ghcr_user
   echo "PUBLISH main: $SHA7 ($IMAGE)"
 }
+
+# docker_as_gh: every docker call from here on (the daemon checks, the build make runs, inspect,
+# push, imagetools, the prune's manifest reads, the cleanup's image rm) runs with a docker config
+# private to this run whose only content routes ghcr.io to docker_credential_gh.sh, which answers
+# with gh's current token. No token is written anywhere, and the host's ~/.docker/config.json is
+# never read: on 2026-10-29 its month-old login still pushed to existing packages but was denied
+# creating kitchen's first one. Set before the daemon checks, so every call sees the same
+# (default) context; the host's config has no other context, proxy or registry login to lose.
+docker_as_gh() {
+  export DOCKER_CONFIG=$SCRATCH/docker
+  mkdir -p "$DOCKER_CONFIG" "$SCRATCH/bin" || env_error "cannot create $DOCKER_CONFIG"
+  echo '{"credHelpers":{"ghcr.io":"devkit-gh"}}' >"$DOCKER_CONFIG/config.json"
+  ln -s "$HERE/docker_credential_gh.sh" "$SCRATCH/bin/docker-credential-devkit-gh" || env_error "cannot link the credential helper"
+  PATH=$SCRATCH/bin:$PATH
+}
+
+# The helper's Username: the image's owner, the account gh's token is issued to (read_main).
+ghcr_user() { local owner=${IMAGE#ghcr.io/}; export DEVKIT_GHCR_USER=${owner%%/*}; }
 
 # read_latest: LATEST_DIGEST and the label naming its commit (LATEST_LABEL), "" when there is no
 # `latest` tag. Any other registry error is a failure, never "no latest".
@@ -307,6 +329,8 @@ ship_and_prune() {
 }
 
 parse_args "$@"
+# bash runs the EXIT trap on a fatal TERM too (systemd's TimeoutStartSec, a stop), so the run's
+# scratch dir and worktree never outlive it (tests/publish_contract.bats).
 trap cleanup EXIT
 check_host
 mkdir -p "$STATE" || env_error "cannot create $STATE"
