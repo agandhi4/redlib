@@ -6,9 +6,11 @@
 //! its query text, never the text itself, and anything else is refused ("Authentication
 //! required"). The hashes are the Android app's, taken from frap129/stealth
 //! (GraphQlOperation.kt, RedditSource.kt for the variables) and Amqx/reddit-gql
-//! (src/operations.ts), and verified live on 2026-10-29. Reddit retires hashes with app
-//! releases: a retired one answers `PersistedQueryNotFound`, `sources` then serves that kind of
-//! page from REST, and the fix is a new hash here.
+//! (src/operations.ts), with SubredditWiki and GetDuplicatePosts from
+//! Littux-Dustux/new-reddit-com (src/apiMigrate/gql/mapping.ts at 1c33f46236), all verified live
+//! on 2026-10-29. Reddit retires hashes with app releases: a retired one answers
+//! `PersistedQueryNotFound`, `sources` then serves that kind of page from REST, and the fix is a
+//! new hash here.
 
 use crate::reddit_path::{Page, SearchPage};
 use serde_json::{json, Value};
@@ -69,6 +71,16 @@ const SEARCH_POSTS: Operation = Operation {
 const SEARCH_COMMUNITIES: Operation = Operation {
 	name: "SearchCommunities",
 	hash: "a3333069c1ead3ceec6d9bf4da4185ff584f69d0ba8b586e545b32ea62170932",
+};
+/// One wiki page and the wiki's page tree (`index.pageTree`), which a missing page lists.
+const SUBREDDIT_WIKI: Operation = Operation {
+	name: "SubredditWiki",
+	hash: "4f446702368bfcd945efe732576160a017ebf73dc24cab7e7d31de91c6bf5dcc",
+};
+/// A post and the other posts of its link (`otherDiscussions`), in one unsorted, unpaged page.
+const DUPLICATE_POSTS: Operation = Operation {
+	name: "GetDuplicatePosts",
+	hash: "fd557fdc121760c37dc2957d4cc103dd0eefa95926952c0adf6aad8afea1e54a",
 };
 
 const PAGE_SIZE: u32 = 25;
@@ -151,6 +163,25 @@ pub(crate) fn search_communities(query: &str, limit: u32) -> Value {
 	body(&SEARCH_COMMUNITIES, json!({ "query": query, "pageSize": limit, "productSurface": "" }))
 }
 
+pub(crate) fn subreddit_wiki(sub: &str, page: &str) -> Value {
+	let variables = json!({
+		"subredditName": sub,
+		"pageName": page,
+		"includePage": true,
+		"includeMediaFragment": true,
+		"includeIsRevisable": true,
+		"includePageTitle": true,
+		"includePageContent": true,
+		"includeRevisionsCount": true,
+	});
+	body(&SUBREDDIT_WIKI, variables)
+}
+
+/// `id` without its `t3_`.
+pub(crate) fn duplicate_posts(id: &str) -> Value {
+	body(&DUPLICATE_POSTS, json!({ "id": format!("t3_{id}"), "includeSubredditInPosts": true }))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -167,6 +198,21 @@ mod tests {
 		assert_eq!(posts_by_ids(&["t3_a".to_string()])["variables"]["ids"], json!(["t3_a"]));
 		assert_eq!(comments_by_ids(&["t1_a".to_string()])["operationName"], "LiveCommentsByIds");
 		assert_eq!(search_communities("rust", 3)["variables"]["pageSize"], 3);
+	}
+
+	#[test]
+	fn wiki_and_duplicates_bodies() {
+		let wiki = subreddit_wiki("rust", "config/sidebar");
+		assert_eq!(wiki["operationName"], "SubredditWiki");
+		assert_eq!(wiki["extensions"]["persistedQuery"]["sha256Hash"], SUBREDDIT_WIKI.hash);
+		assert_eq!(
+			(wiki["variables"]["subredditName"].as_str(), wiki["variables"]["pageName"].as_str()),
+			(Some("rust"), Some("config/sidebar"))
+		);
+		assert_eq!(wiki["variables"]["includePageContent"], true);
+		let dups = duplicate_posts("abc");
+		assert_eq!(dups["operationName"], "GetDuplicatePosts");
+		assert_eq!(dups["variables"], json!({ "id": "t3_abc", "includeSubredditInPosts": true }));
 	}
 
 	#[test]

@@ -1,6 +1,6 @@
-//! GraphQL subreddits, redditors and profile comments converted to the JSON API's `t5`, `t2` and
-//! `t1` things, so `subreddit.rs`, `search.rs`, `user.rs` and `Post::fetch` read them unchanged.
-//! Pure. Used by `gql_plan`.
+//! GraphQL subreddits, wiki pages, redditors and profile comments converted to the JSON API's
+//! `t5`, `wikipage`, `t2` and `t1` things, so `subreddit.rs`, `search.rs`, `user.rs` and
+//! `Post::fetch` read them unchanged. Pure. Used by `gql_plan`.
 
 use crate::gql_fields::{awards, content_html, edited, flair, lowercase, timestamp};
 use serde_json::{json, Value};
@@ -38,6 +38,34 @@ pub(crate) fn subreddit_about(info: &Value) -> Value {
 	data["banner_background_image"] = info["styles"]["bannerBackgroundImage"].clone();
 	data["primary_color"] = info["styles"]["primaryColor"].clone();
 	about
+}
+
+/// A `SubredditWiki` page as `/r/<sub>/wiki/<page>.json`; `subreddit::wiki` reads `content_html`.
+pub(crate) fn wiki_page(page: &Value) -> Value {
+	wikipage(Some(format!("<div class=\"md wiki\">{}</div>", content_html(&page["content"]))))
+}
+
+/// The answer for a missing wiki page: the wiki's existing pages (`wiki.index.pageTree`), as links
+/// under a heading that says so. With none, no `content_html`, which `subreddit::wiki` shows as
+/// "Wiki not found".
+pub(crate) fn wiki_missing(sub: &str, page: &str, wiki: &Value) -> Value {
+	let links: String = wiki["index"]["pageTree"]
+		.as_array()
+		.into_iter()
+		.flatten()
+		.filter(|node| node["isPagePresent"] == true)
+		.filter_map(|node| node["path"].as_str())
+		.map(|path| {
+			let path = htmlescape::encode_minimal(path);
+			format!("<li><a href=\"/r/{sub}/wiki/{path}\">{path}</a></li>")
+		})
+		.collect();
+	let html = (!links.is_empty()).then(|| format!("<h3>No {} page; this wiki's pages:</h3><ul>{links}</ul>", htmlescape::encode_minimal(page)));
+	wikipage(html)
+}
+
+fn wikipage(content_html: Option<String>) -> Value {
+	json!({ "kind": "wikipage", "data": { "content_html": content_html } })
 }
 
 /// A subreddit node (`SubredditInfoByName`, `SearchCommunities`) as the `t5` fields both share.
@@ -141,6 +169,38 @@ mod tests {
 		assert_eq!(unavailable_reason(&unavailable("BANNED")), Some("banned"));
 		assert_eq!(unavailable_reason(&unavailable("SOMETHING_NEW")), None);
 		assert_eq!(unavailable_reason(&json!({"__typename": "Subreddit"})), None);
+	}
+
+	#[test]
+	fn a_wiki_page_renders_its_richtext() {
+		let page = json!({ "status": "VALID", "content": { "richtext": r#"{"document":[{"e":"h","l":1,"c":[{"e":"raw","t":"Rules"}]},{"e":"par","c":[{"e":"img","id":"i1"}]}]}"#, "richtextMedia": [{ "id": "i1", "url": "https://i.redd.it/x.png" }] } });
+		assert_eq!(
+			wiki_page(&page),
+			json!({ "kind": "wikipage", "data": { "content_html": concat!(
+				r#"<div class="md wiki"><h1>Rules</h1>"#,
+				r#"<figure><a href="/img/x.png"><img src="/img/x.png" loading="lazy"></a></figure></div>"#,
+			) } })
+		);
+	}
+
+	#[test]
+	fn a_missing_wiki_page_lists_the_pages_that_exist() {
+		let tree = json!({ "index": { "pageTree": [
+			{ "depth": 0, "name": "config", "path": "config", "parent": null, "isPagePresent": false },
+			{ "depth": 1, "name": "sidebar", "path": "config/sidebar", "parent": "config", "isPagePresent": true },
+			{ "depth": 0, "name": "rules", "path": "rules<b>", "parent": null, "isPagePresent": true },
+		] } });
+		assert_eq!(
+			wiki_missing("rust", "index", &tree)["data"]["content_html"],
+			concat!(
+				"<h3>No index page; this wiki's pages:</h3><ul>",
+				r#"<li><a href="/r/rust/wiki/config/sidebar">config/sidebar</a></li>"#,
+				r#"<li><a href="/r/rust/wiki/rules&lt;b&gt;">rules&lt;b&gt;</a></li></ul>"#,
+			)
+		);
+		// No page to list: the handler's own "Wiki not found"
+		assert!(wiki_missing("rust", "index", &json!({ "index": { "pageTree": [] } }))["data"]["content_html"].is_null());
+		assert!(wiki_missing("rust", "index", &Value::Null)["data"]["content_html"].is_null());
 	}
 
 	#[test]

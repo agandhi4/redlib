@@ -1,7 +1,7 @@
 //! The REST paths redlib's pages build (`/r/<sub>/<sort>.json?…`, `/by_id/…`, `/user/…`,
 //! `/search.json?…`) parsed into the `Resource` they read, so `sources` can serve it from
 //! GraphQL. Pure. Anything it does not recognise, and any page reached through a REST cursor, is
-//! `Resource::Other`: REST only (wiki, duplicates, a REST fallback's next page).
+//! `Resource::Other`: REST only (`random`, a user's upvoted or saved, a REST fallback's next page).
 
 use crate::gql_fields::cursor_from_after;
 use log::debug;
@@ -15,10 +15,12 @@ pub(crate) enum Kind {
 	About,
 	User,
 	Search,
+	Wiki,
+	Duplicates,
 }
 
 impl Kind {
-	pub(crate) const ALL: [Self; 5] = [Self::Listing, Self::Post, Self::About, Self::User, Self::Search];
+	pub(crate) const ALL: [Self; 7] = [Self::Listing, Self::Post, Self::About, Self::User, Self::Search, Self::Wiki, Self::Duplicates];
 
 	pub(crate) fn name(self) -> &'static str {
 		match self {
@@ -27,6 +29,8 @@ impl Kind {
 			Self::About => "about",
 			Self::User => "user",
 			Self::Search => "search",
+			Self::Wiki => "wiki",
+			Self::Duplicates => "duplicates",
 		}
 	}
 }
@@ -172,6 +176,13 @@ pub(crate) struct SearchPage {
 	pub after: Option<String>,
 }
 
+/// A duplicates listing's sort. GetDuplicatePosts takes none, so the plan sorts locally.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DuplicateSort {
+	NumComments,
+	New,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UserListing {
 	Overview,
@@ -217,6 +228,16 @@ pub(crate) enum Resource {
 		query: String,
 		limit: u32,
 	},
+	/// A wiki page; `page` may hold `/` (`config/sidebar`).
+	Wiki {
+		sub: String,
+		page: String,
+	},
+	/// A post (`id`, no `t3_`) and the other posts of its link. `sort` None keeps Reddit's order.
+	Duplicates {
+		id: String,
+		sort: Option<DuplicateSort>,
+	},
 	Other,
 }
 
@@ -229,6 +250,8 @@ impl Resource {
 			Self::About { .. } => Kind::About,
 			Self::UserAbout { .. } | Self::UserListing { .. } => Kind::User,
 			Self::Search { .. } | Self::SubredditSearch { .. } => Kind::Search,
+			Self::Wiki { .. } => Kind::Wiki,
+			Self::Duplicates { .. } => Kind::Duplicates,
 			Self::Other => return None,
 		})
 	}
@@ -240,6 +263,11 @@ struct Query(Vec<(String, String)>);
 impl Query {
 	fn get(&self, key: &str) -> Option<&str> {
 		self.0.iter().find(|(k, v)| k == key && !v.is_empty()).map(|(_, v)| v.as_str())
+	}
+
+	/// Whether `key` is present at all, even empty.
+	fn has(&self, key: &str) -> bool {
+		self.0.iter().any(|(k, _)| k == key)
 	}
 
 	/// The GraphQL cursor this page continues from. Err for a page REST must serve: one reached
@@ -278,6 +306,8 @@ pub(crate) fn parse(path: &str) -> Resource {
 	let parsed = match segments.as_slice() {
 		["r", sub, "about"] => about(sub),
 		["r", sub, "search"] => search(Some(sub), &query),
+		["r", sub, "wiki", page @ ..] => wiki(sub, page),
+		["r", _, "duplicates", id] | ["r", _, "duplicates", id, _] | ["duplicates", id] | ["duplicates", id, _] => duplicates(id, &query),
 		["r", sub, sort] => listing(sub, sort, &query),
 		["r", sub] => listing(sub, "hot", &query),
 		["by_id", ids] => by_id(ids),
@@ -324,6 +354,30 @@ fn listing(sub: &str, sort: &str, query: &Query) -> Option<Resource> {
 			},
 		},
 	})
+}
+
+/// `/r/<sub>/wiki/<page>`. The site-wide `/wiki` reads `r/reddit.com`, no subreddit name: REST.
+fn wiki(sub: &str, page: &[&str]) -> Option<Resource> {
+	let valid = valid_name(sub) && !is_random(sub) && !page.is_empty() && page.iter().all(|segment| valid_name(segment));
+	valid.then(|| Resource::Wiki {
+		sub: sub.to_string(),
+		page: page.join("/"),
+	})
+}
+
+/// `/r/<sub>/duplicates/<id>`. GetDuplicatePosts has no paging, so a page reached through
+/// `before=`/`after=` (only REST makes those links) stays REST.
+fn duplicates(id: &str, query: &Query) -> Option<Resource> {
+	if query.has("before") || query.has("after") || id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+		return None;
+	}
+	let sort = match query.get("sort") {
+		// REST's default, and the template's
+		None | Some("num_comments") => Some(DuplicateSort::NumComments),
+		Some("new") => Some(DuplicateSort::New),
+		Some(_) => None,
+	};
+	Some(Resource::Duplicates { id: id.to_string(), sort })
 }
 
 fn by_id(ids: &str) -> Option<Resource> {
@@ -439,7 +493,7 @@ pub(crate) mod tests {
 			Resource::Popular(page(Sort::Rising, None, None))
 		);
 		assert_eq!(parse("/r/all/new.json"), Resource::All(page(Sort::New, None, None)));
-		for other in ["/r/pics/gilded.json", "/r/random/hot.json", "/r/pi cs/hot.json", "/r/pics/wiki/index.json?raw_json=1"] {
+		for other in ["/r/pics/gilded.json", "/r/random/hot.json", "/r/pi cs/hot.json"] {
 			assert_eq!(parse(other), Resource::Other, "{other}");
 		}
 	}
@@ -531,7 +585,45 @@ pub(crate) mod tests {
 			}
 		);
 		assert_eq!(parse("/subreddits/search.json?q=x").kind(), Some(Kind::Search));
-		assert_eq!(parse("/r/rust/duplicates/abc.json").kind(), None);
+	}
+
+	#[test]
+	fn wiki_pages() {
+		let wiki = |page: &str| Resource::Wiki {
+			sub: "rust".into(),
+			page: page.into(),
+		};
+		assert_eq!(parse("/r/rust/wiki/index.json?raw_json=1"), wiki("index"));
+		assert_eq!(parse("/r/rust/wiki/config/sidebar.json?raw_json=1"), wiki("config/sidebar"));
+		assert_eq!(parse("/r/rust/wiki/rules/.json?raw_json=1"), wiki("rules"));
+		assert_eq!(parse("/r/rust/wiki/rules.json").kind(), Some(Kind::Wiki));
+		for other in [
+			"/r/random/wiki/index.json",
+			"/r/randnsfw/wiki/index.json",
+			"/r/reddit.com/wiki/index.json",
+			"/r/rust/wiki/a b.json",
+			"/r/rust/wiki/a//b.json",
+		] {
+			assert_eq!(parse(other), Resource::Other, "{other}");
+		}
+	}
+
+	#[test]
+	fn duplicates_with_their_sort_and_no_rest_cursor() {
+		let dups = |sort| Resource::Duplicates { id: "abc".into(), sort };
+		assert_eq!(parse("/r/news/duplicates/abc.json?&raw_json=1"), dups(Some(DuplicateSort::NumComments)));
+		assert_eq!(parse("/r/news/duplicates/abc/a_title.json?sort=new&raw_json=1"), dups(Some(DuplicateSort::New)));
+		assert_eq!(parse("/duplicates/abc.json?sort=num_comments"), dups(Some(DuplicateSort::NumComments)));
+		assert_eq!(parse("/duplicates/abc/t.json?sort=top"), dups(None));
+		assert_eq!(parse("/r/news/duplicates/abc.json").kind(), Some(Kind::Duplicates));
+		for other in [
+			"/r/news/duplicates/abc.json?after=t3_x&sort=new",
+			"/r/news/duplicates/abc.json?before=t3_x&sort=num_comments&limit=1",
+			"/r/news/duplicates/abc.json?before=",
+			"/r/news/duplicates/a-c.json",
+		] {
+			assert_eq!(parse(other), Resource::Other, "{other}");
+		}
 	}
 
 	#[test]

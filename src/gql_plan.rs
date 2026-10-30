@@ -5,12 +5,12 @@
 
 use crate::gql_ops;
 use crate::gql_posts::{connection, is_post, listing, post};
-use crate::gql_users::{comment, community, redditor, subreddit_about, unavailable_reason};
-use crate::reddit_path::{Page, Resource, SearchPage, Sort, UserListing};
+use crate::gql_users::{comment, community, redditor, subreddit_about, unavailable_reason, wiki_missing, wiki_page};
+use crate::reddit_path::{DuplicateSort, Page, Resource, SearchPage, Sort, UserListing};
 use futures_lite::future::Boxed;
 use log::warn;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 static NULL: Value = Value::Null;
 
@@ -42,6 +42,8 @@ pub(crate) async fn run(resource: &Resource, quarantine: bool, gql: GqlFetch<'_>
 		Resource::UserListing { name, listing: kind, page } => user_listing(name, *kind, page, gql).await,
 		Resource::Search { query, page } => search(query, page, gql).await,
 		Resource::SubredditSearch { query, limit } => communities(query, *limit, gql).await,
+		Resource::Wiki { sub, page } => wiki(sub, page, quarantine, gql).await,
+		Resource::Duplicates { id, sort } => duplicates(id, *sort, quarantine, gql).await,
 		Resource::Other => Err(GqlError::NotServed("no GraphQL plan".to_string())),
 	}
 }
@@ -103,6 +105,71 @@ async fn about(sub: &str, quarantine: bool, gql: GqlFetch<'_>) -> Result<Value, 
 		return Ok(subreddit_about(info));
 	}
 	Err(refusal(sub, quarantine, info).unwrap_or_else(|| failed("SubredditInfoByName", "returned no subreddit")))
+}
+
+async fn wiki(sub: &str, page: &str, quarantine: bool, gql: GqlFetch<'_>) -> Result<Value, GqlError> {
+	let response = call(gql, gql_ops::subreddit_wiki(sub, page)).await?;
+	let info = &response["data"]["subredditInfoByName"];
+	if info["__typename"] != "Subreddit" {
+		return Err(refusal(sub, quarantine, info).unwrap_or_else(|| failed("SubredditWiki", "returned no subreddit")));
+	}
+	let wiki = &info["wiki"];
+	match wiki["page"]["status"].as_str() {
+		Some("VALID") => Ok(wiki_page(&wiki["page"])),
+		Some("PAGE_NOT_FOUND") => Ok(wiki_missing(sub, page, wiki)),
+		// Any other status is still Reddit's answer about this one page (the operation worked), so
+		// Refused, with the status for the error page. NotServed would only send it to REST, which
+		// answers anonymous tokens with the block page; Failed would open the wiki breaker for
+		// every sub over one odd page.
+		Some(status) => {
+			warn!("[source] r/{sub} wiki {page}: page status {status}");
+			Err(GqlError::Refused(format!("r/{sub}'s wiki page {page} is unavailable ({status})")))
+		}
+		None => Err(failed("SubredditWiki", "returned no wiki page")),
+	}
+}
+
+/// A post and its duplicates as REST's `[Listing(post), Listing(duplicates)]`. GetDuplicatePosts
+/// has no sort or paging, so the page is sorted here and has no `after`.
+async fn duplicates(id: &str, sort: Option<DuplicateSort>, quarantine: bool, gql: GqlFetch<'_>) -> Result<Value, GqlError> {
+	let response = call(gql, gql_ops::duplicate_posts(id)).await?;
+	let Some(node) = response["data"].get("postInfoById") else {
+		return Err(failed("GetDuplicatePosts", "returned no post"));
+	};
+	if !is_post(node) {
+		// A post GraphQL cannot see may be one the reader opted into, which only REST carries.
+		return Err(if quarantine {
+			GqlError::NotServed(format!("t3_{id} is not visible to GraphQL; the opt-in needs REST"))
+		} else {
+			GqlError::Refused("Post not found".to_string())
+		});
+	}
+	// Absent (not null) is a changed operation; null is a post with no other discussions.
+	let Some(others) = node.get("otherDiscussions") else {
+		return Err(failed("GetDuplicatePosts", "returned no other discussions"));
+	};
+	let (nodes, _) = connection(others);
+	let mut others: Vec<Value> = nodes.into_iter().filter(|n| is_post(n)).map(post).collect();
+	sort_duplicates(&mut others, sort);
+	// Feed posts carry no `num_duplicates`; this answer is all of them, and duplicates.html lists
+	// none while it reads 0.
+	let mut original = post(node);
+	original["data"]["num_duplicates"] = others.len().into();
+	Ok(json!([listing(vec![original], None), listing(others, None)]))
+}
+
+fn num_comments(thing: &Value) -> f64 {
+	thing["data"]["num_comments"].as_f64().unwrap_or_default()
+}
+
+/// Highest first; `None` keeps GraphQL's order. Stable, so ties keep it too.
+fn sort_duplicates(things: &mut [Value], sort: Option<DuplicateSort>) {
+	let rank: Rank = match sort {
+		Some(DuplicateSort::NumComments) => num_comments,
+		Some(DuplicateSort::New) => created,
+		None => return,
+	};
+	things.sort_by(|a, b| rank(b).total_cmp(&rank(a)));
 }
 
 /// Popular and r/all always have posts; an empty first page is a broken operation.
@@ -249,8 +316,18 @@ fn hot(thing: &Value) -> f64 {
 	score.signum() * score.abs().max(1.0).log10() + (created(thing) - 1_134_028_003.0) / 45_000.0
 }
 
+/// UserSubmittedPosts takes CONTROVERSIAL but answers logged-out tokens with an empty connection
+/// (verified 2026-10-29), which would read as "no posts": REST serves it, or shows why it cannot.
+/// Controversial comments (SubmittedComments) do work.
+fn posts_sort_served(sort: Sort) -> Result<(), GqlError> {
+	match sort {
+		Sort::Controversial => Err(GqlError::NotServed("Reddit's GraphQL serves no controversial sort for a user's posts".to_string())),
+		_ => Ok(()),
+	}
+}
+
 /// The rank the overview merges a sort by; None for a sort whose rank GraphQL does not carry
-/// (controversial needs the vote split), which REST serves.
+/// (controversial needs the vote split, and has no posts: `posts_sort_served`), which REST serves.
 fn overview_rank(sort: Sort) -> Option<Rank> {
 	match sort {
 		Sort::New => Some(created),
@@ -311,6 +388,7 @@ async fn side(name: &str, kind: UserListing, page: Option<&Page>, gql: GqlFetch<
 }
 
 async fn user_posts(name: &str, page: &Page, gql: GqlFetch<'_>) -> Result<Side, GqlError> {
+	posts_sort_served(page.sort)?;
 	let response = call(gql, gql_ops::user_posts(name, page)).await?;
 	let posts = &response["data"]["postFeed"]["posts"];
 	if !posts.is_object() {
@@ -348,6 +426,7 @@ async fn user_comments(name: &str, page: &Page, gql: GqlFetch<'_>) -> Result<Sid
 /// more), so the order holds across pages. A side cut at the boundary resumes on the same page,
 /// past what showed; both resume points travel in one `after`, so nothing repeats or is skipped.
 async fn overview(name: &str, page: &Page, gql: GqlFetch<'_>) -> Result<Side, GqlError> {
+	posts_sort_served(page.sort)?;
 	let Some(rank) = overview_rank(page.sort) else {
 		return Err(GqlError::NotServed(format!("the overview cannot merge by {:?}", page.sort)));
 	};
@@ -668,10 +747,12 @@ mod tests {
 			ids(&fake.run("/user/spez/overview.json?sort=top&t=all", false).await.unwrap()),
 			vec!["t3_a", "t1_c", "t3_b"]
 		);
-		assert!(matches!(
-			Fake::new(Vec::new()).run("/user/spez/overview.json?sort=controversial", false).await,
-			Err(GqlError::NotServed(_))
-		));
+		let controversial = Fake::new(Vec::new());
+		assert_eq!(
+			controversial.run("/user/spez/overview.json?sort=controversial", false).await,
+			Err(GqlError::NotServed("Reddit's GraphQL serves no controversial sort for a user's posts".into()))
+		);
+		assert!(controversial.operations().is_empty());
 
 		let foreign = after_param("not json");
 		assert!(matches!(
@@ -681,7 +762,120 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn controversial_user_posts_are_not_served_but_comments_are() {
+		let fake = Fake::new(vec![submitted(vec![node("t3_a", "")], None)]);
+		assert_eq!(
+			fake.run("/user/spez/submitted.json?sort=controversial&raw_json=1", false).await,
+			Err(GqlError::NotServed("Reddit's GraphQL serves no controversial sort for a user's posts".into()))
+		);
+		assert!(fake.operations().is_empty());
+		let fake = Fake::new(vec![summaries(None), bodies()]);
+		assert!(fake.run("/user/spez/comments.json?sort=controversial", false).await.is_ok());
+		assert_eq!(fake.sent.lock().unwrap()[0]["variables"]["sort"], "CONTROVERSIAL");
+	}
+
+	fn wiki(info: Value) -> (&'static str, Value) {
+		("SubredditWiki", json!({ "data": { "subredditInfoByName": info } }))
+	}
+
+	fn wiki_of(page: Value) -> Value {
+		let tree = json!([{ "depth": 0, "name": "rules", "path": "rules", "parent": null, "isPagePresent": true }]);
+		json!({ "__typename": "Subreddit", "name": "rust", "wiki": { "index": { "pageTree": tree, "status": "VALID" }, "page": page } })
+	}
+
+	#[tokio::test]
+	async fn a_wiki_page_is_its_content_or_the_pages_there_are() {
+		let rules = wiki_of(json!({ "status": "VALID", "content": { "richtext": r#"{"document":[{"e":"par","c":[{"e":"text","t":"Be kind"}]}]}"#, "richtextMedia": [] } }));
+		let fake = Fake::new(vec![wiki(rules)]);
+		let page = fake.run("/r/rust/wiki/rules.json?raw_json=1", false).await.unwrap();
+		assert_eq!(page["data"]["content_html"], "<div class=\"md wiki\"><p>Be kind</p></div>");
+		let variables = fake.sent.lock().unwrap()[0]["variables"].clone();
+		assert_eq!((variables["subredditName"].as_str(), variables["pageName"].as_str()), (Some("rust"), Some("rules")));
+
+		let missing = Fake::new(vec![wiki(wiki_of(json!({ "status": "PAGE_NOT_FOUND", "content": null })))]);
+		let page = missing.run("/r/rust/wiki/index.json", false).await.unwrap();
+		assert!(page["data"]["content_html"].as_str().unwrap().starts_with("<h3>No index page; this wiki's pages:</h3>"));
+
+		// An unknown status is Reddit's answer about this page; no status at all is a broken operation
+		let odd = Fake::new(vec![wiki(wiki_of(json!({ "status": "WIKI_DISABLED" })))]);
+		assert_eq!(
+			odd.run("/r/rust/wiki/rules.json", false).await,
+			Err(GqlError::Refused("r/rust's wiki page rules is unavailable (WIKI_DISABLED)".into()))
+		);
+		let broken = Fake::new(vec![wiki(json!({ "__typename": "Subreddit", "wiki": null }))]);
+		assert!(matches!(broken.run("/r/rust/wiki/rules.json", false).await, Err(GqlError::Failed(_))));
+	}
+
+	#[tokio::test]
+	async fn an_unavailable_subreddits_wiki_is_its_refusal() {
+		let private = Fake::new(vec![wiki(unavailable("PRIVATE"))]);
+		assert_eq!(private.run("/r/x/wiki/index.json", false).await, Err(GqlError::Refused("private".into())));
+		let opted_in = Fake::new(vec![wiki(unavailable("QUARANTINED"))]);
+		assert!(matches!(opted_in.run("/r/x/wiki/index.json", true).await, Err(GqlError::NotServed(_))));
+		let gone = Fake::new(vec![wiki(Value::Null)]);
+		assert_eq!(gone.run("/r/x/wiki/index.json", false).await, Err(GqlError::Refused("r/x does not exist".into())));
+	}
+
+	fn counted(id: &str, comments: i64, created: &str) -> Value {
+		let mut post = node(id, created);
+		post["commentCount"] = comments.into();
+		post
+	}
+
+	fn duplicate_posts(post: Value) -> (&'static str, Value) {
+		("GetDuplicatePosts", json!({ "data": { "postInfoById": post } }))
+	}
+
+	#[tokio::test]
+	async fn duplicates_are_two_listings_sorted_here() {
+		let others = vec![
+			counted("t3_few_new", 1, "2026-10-03T00:00:00+0000"),
+			counted("t3_many_old", 9, "2026-10-01T00:00:00+0000"),
+			json!({ "id": "ad" }),
+			counted("t3_some_mid", 5, "2026-10-02T00:00:00+0000"),
+		];
+		let mut original = node("t3_abc", "2026-09-30T00:00:00+0000");
+		original["otherDiscussions"] = edges(others, Some("unused"));
+		let answer = duplicate_posts(original);
+		let read = |path: &'static str| {
+			let fake = Fake::new(vec![answer.clone()]);
+			async move { fake.run(path, false).await.unwrap() }
+		};
+
+		let page = read("/r/news/duplicates/abc.json?&raw_json=1").await;
+		assert_eq!(ids(&page[0]), vec!["t3_abc"]);
+		assert_eq!(ids(&page[1]), vec!["t3_many_old", "t3_some_mid", "t3_few_new"]);
+		// The count the template gates the list on, the ad left out
+		assert_eq!(page[0]["data"]["children"][0]["data"]["num_duplicates"], 3);
+		// No paging: neither listing has a next page, so the handler probes nothing
+		assert!(page[0]["data"]["after"].is_null() && page[1]["data"]["after"].is_null());
+		assert_eq!(
+			ids(&read("/r/news/duplicates/abc.json?sort=new").await[1]),
+			vec!["t3_few_new", "t3_some_mid", "t3_many_old"]
+		);
+		assert_eq!(ids(&read("/duplicates/abc.json?sort=top").await[1]), vec!["t3_few_new", "t3_many_old", "t3_some_mid"]);
+	}
+
+	#[tokio::test]
+	async fn a_missing_post_has_no_duplicates() {
+		let fake = Fake::new(vec![duplicate_posts(Value::Null)]);
+		assert_eq!(fake.run("/r/news/duplicates/gone.json", false).await, Err(GqlError::Refused("Post not found".into())));
+		assert_eq!(fake.sent.lock().unwrap()[0]["variables"]["id"], "t3_gone");
+		// The reader's quarantine opt-in may show REST what GraphQL cannot see
+		assert!(matches!(fake.run("/r/edgy/duplicates/gone.json", true).await, Err(GqlError::NotServed(_))));
+		// A post with no other discussions has an empty second listing; one without the field is a broken operation
+		let alone = Fake::new(vec![duplicate_posts(json!({ "__typename": "SubredditPost", "id": "t3_a", "otherDiscussions": null }))]);
+		let page = alone.run("/r/news/duplicates/a.json", false).await.unwrap();
+		assert!(ids(&page[1]).is_empty());
+		assert_eq!(page[0]["data"]["children"][0]["data"]["num_duplicates"], 0);
+		let changed = Fake::new(vec![duplicate_posts(node("t3_a", ""))]);
+		assert!(matches!(changed.run("/r/news/duplicates/a.json", false).await, Err(GqlError::Failed(_))));
+		let broken = Fake::new(vec![("GetDuplicatePosts", json!({ "data": null }))]);
+		assert!(matches!(broken.run("/r/news/duplicates/a.json", false).await, Err(GqlError::Failed(_))));
+	}
+
+	#[tokio::test]
 	async fn other_resources_have_no_plan() {
-		assert!(matches!(Fake::new(Vec::new()).run("/r/rust/wiki/index.json", false).await, Err(GqlError::NotServed(_))));
+		assert!(matches!(Fake::new(Vec::new()).run("/user/spez/upvoted.json", false).await, Err(GqlError::NotServed(_))));
 	}
 }
