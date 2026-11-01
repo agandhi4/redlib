@@ -4,11 +4,13 @@
 // body is discarded — this is a server-side cache warmer, not a browser
 // cache play (the service worker does keep the HTML for offline).
 //
-// Two triggers: hover/touch intent on a post or the next page, and an
-// idle-time pass on listing pages for the posts most likely to be opened
-// next. Every warm is a real Reddit request (counted as cause=prefetch in
-// the server's upstream log), and since 2026-10-29 gql-fed is the only
-// source still answering, so intent is limited to the links readers open.
+// One trigger: hover/touch intent on a listed post or the next page. Every
+// warm is a real Reddit request (cause=prefetch in the server's upstream
+// log; a post costs ~3 with its comments, sidebar and later refresh), and
+// since 2026-10-29 gql-fed is the only source still answering. There is no
+// idle pass: it warmed 6 posts + the next page per listing load, reran on
+// every back-navigation, and 87% of its calls were never opened (2026-11-01
+// measurement, docs/decisions.md). Don't add guessing back.
 (function () {
 	"use strict";
 
@@ -29,12 +31,15 @@
 		return true;
 	}
 
-	// Intent counts only on a post's comments page or the listing's next page:
-	// usernames (about 4 Reddit calls each), sort tabs and subreddit links were
-	// warmed on every pass of the pointer and rarely opened.
+	// Intent counts only on a listed post's link to its thread or the
+	// listing's next page. Usernames (about 4 Reddit calls each), sort tabs and
+	// subreddit links were warmed on every pass of the pointer and rarely
+	// opened; a thread's own permalink/context links also contain /comments/,
+	// hence the listed-post scope (`.post` minus a post page's `.highlighted`).
 	function intended(anchor) {
 		if (!eligible(anchor)) return false;
 		if (anchor.getAttribute("accesskey") === "N") return true;
+		if (!anchor.closest(".post:not(.highlighted)")) return false;
 		return new URL(anchor.href, location.href).pathname.indexOf("/comments/") >= 0;
 	}
 
@@ -69,43 +74,4 @@
 		var a = e.target.closest && e.target.closest("a");
 		if (intended(a)) prefetch(a);
 	}, { passive: true });
-
-	// Idle warm on listing pages: the first few posts by position, the most
-	// commented posts, and the next page. Staggered so the server (and
-	// Reddit's per-token budget) sees a trickle, not a burst; abandoned if
-	// the tab is hidden. Each `.post` carries `a.post_comments` whose title
-	// is "<n> comments" with the untruncated count.
-	var IDLE_BY_POSITION = 3;
-	var IDLE_BY_COMMENTS = 3;
-	var IDLE_STAGGER_MS = 400;
-
-	function idleWarm() {
-		var posts = document.querySelectorAll(".post:not(.highlighted)");
-		if (posts.length < 2) return; // a thread page, or nothing to warm
-		var candidates = [];
-		for (var i = 0; i < posts.length; i++) {
-			var a = posts[i].querySelector("a.post_comments");
-			if (a) candidates.push({ a: a, comments: parseInt(a.title, 10) || 0 });
-		}
-		var picks = candidates.slice(0, IDLE_BY_POSITION);
-		candidates.slice().sort(function (x, y) { return y.comments - x.comments; })
-			.slice(0, IDLE_BY_COMMENTS)
-			.forEach(function (c) { if (picks.indexOf(c) < 0) picks.push(c); });
-		var queue = picks.map(function (c) { return c.a; });
-		var next = document.querySelector('a[accesskey="N"]');
-		if (next) queue.push(next);
-
-		var idx = 0;
-		(function step() {
-			if (document.hidden || idx >= queue.length) return;
-			if (eligible(queue[idx])) prefetch(queue[idx]);
-			idx++;
-			setTimeout(step, IDLE_STAGGER_MS);
-		})();
-	}
-
-	window.addEventListener("load", function () {
-		if (window.requestIdleCallback) requestIdleCallback(idleWarm, { timeout: 3000 });
-		else setTimeout(idleWarm, 1500);
-	});
 })();
