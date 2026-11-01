@@ -18,6 +18,17 @@ ENV RUST_TARGET=x86_64-unknown-linux-musl
 FROM ghcr.io/rust-cross/rust-musl-cross:aarch64-musl AS builder-arm64
 ENV RUST_TARGET=aarch64-unknown-linux-musl
 
+# Cargo.toml and Cargo.lock with redlib's own version pinned to 0.0.0, so the dependency layer's
+# cache key changes only when a dependency does. BuildKit keys `COPY --from` on file content: this
+# stage reruns on every bump (milliseconds) and its output stays byte-identical. The real
+# manifests arrive with `COPY . ./`, which recompiles the redlib crate alone.
+FROM alpine:${ALPINE_VERSION} AS dep-manifests
+WORKDIR /m
+COPY Cargo.toml Cargo.lock ./
+RUN awk '!done && /^version = /{print "version = \"0.0.0\""; done=1; next} {print}' Cargo.toml > t && mv t Cargo.toml \
+    && awk 'prev == "name = \"redlib\"" && /^version = /{print "version = \"0.0.0\""; prev = ""; next} {print; prev = $0}' Cargo.lock > t && mv t Cargo.lock \
+    && test "$(grep -c '^version = "0.0.0"$' Cargo.toml)" = 1 && test "$(grep -c '^version = "0.0.0"$' Cargo.lock)" = 1
+
 # Any other TARGETARCH fails here ("builder-<arch>" not found), which is the honest answer.
 FROM builder-${TARGETARCH} AS builder
 
@@ -36,8 +47,10 @@ WORKDIR /redlib
 COPY rust-toolchain.toml ./
 RUN rustup toolchain install && rustup target add "$RUST_TARGET" && rustc --version
 
-# download (most) dependencies in their own layer
-COPY Cargo.lock Cargo.toml ./
+# Build (most) dependencies in their own layer, from the version-free manifests (stage
+# `dep-manifests` below): every PR bumps redlib's own version (the ?v= asset cache-buster), and
+# copying the real files here rebuilt ~270 crates cold on each PR's first gate and each publish.
+COPY --from=dep-manifests /m/Cargo.lock /m/Cargo.toml ./
 RUN mkdir src && echo "fn main() { panic!(\"why am i running?\") }" > src/main.rs
 RUN cargo build --release --locked --bin redlib --target "$RUST_TARGET"
 RUN rm ./src/main.rs && rmdir ./src
