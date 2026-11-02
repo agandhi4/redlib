@@ -49,7 +49,7 @@ declare -F metrics_conf_parse >/dev/null || . "$(dirname "${BASH_SOURCE[0]}")/_m
 # publish.sh with ship_tag.sh, registry_prune.sh and _cadence_lib.sh, the nightly dependency merge and its vuln_watch.py), machine setup (install_gh_shim.sh, whose --check
 # the scorecard reads; install_dependency_merge.sh, install_monthly_audit.sh, _launchd_job_lib.sh,
 # install_publisher_deadman.sh with the hourly publisher_deadman.sh it installs, install_apple_check.sh
-# with the apple_check.sh it schedules,
+# with the apple_check.sh it schedules, _checkouts_lib.sh, the scan both scheduled jobs share,
 # and job_launcher.sh, the launchd entry they install), and
 # ios_device.sh, which only a person's `make ios-install` runs against a phone.
 DEVKIT_TOOLING_BIN="gate.sh _paths_lib.sh
@@ -60,7 +60,7 @@ DEVKIT_TOOLING_BIN="gate.sh _paths_lib.sh
   devkit-sync.sh devkit-new.sh monthly_audit.sh dead_alert_audit.py ship_tag.sh publish.sh check_tree.sh _cadence_lib.sh _issue_lib.sh docker_credential_gh.sh registry_prune.sh scorecard.py agent_cost.py secrets_check.sh migration_check.py
   pr_merge.sh merge_rules.sh pr_create.sh _gh_repo_lib.sh codex_review.py review_rules.sh pr_review.sh _merge_carry.sh decisions_merge.py bite.py _repo_identity.py _renovate.py install_gh_shim.sh
   dependency_merge.sh _dependency_pr.py vuln_watch.py install_dependency_merge.sh install_monthly_audit.sh _launchd_job_lib.sh job_launcher.sh
-  publisher_deadman.sh install_publisher_deadman.sh apple_check.sh install_apple_check.sh
+  publisher_deadman.sh install_publisher_deadman.sh apple_check.sh install_apple_check.sh _checkouts_lib.sh
   ios_check.py ios_device.sh bats_assert_check.py"
 # What the image group exercises (ci-smoke/ci-image boot through them): tooling, but a change
 # to one runs the image group even when nothing else would.

@@ -32,6 +32,8 @@ it may not, 2 when gh failed or answered in a shape this does not know (the merg
   latest      <codex|local>  <commit sha>  <reviewer>        when count > 0
   unreviewed                                                 count is 0 (merge_rules.sh then
                                                              asks whether the PR is exempt)
+  unjudged    <n>        <head> has no local round, and `prior` lists n older commits'
+                         findings for one to judge: merge_rules.sh runs one `make review` first
   blocking    <unresolved|latest>  <priority>  <where>  <title>  <url|->
   unaddressed <priority>  <where>  <title>  <url|->  <key>
 The rules: rounds count once per reviewer per commit. Below the cap, an unresolved Codex thread
@@ -47,7 +49,9 @@ the latest round dropped was fixed, and is not filed). An older commit's finding
 filed unless the latest local round of <head> (the PR's, which merge_rules.sh read before the
 rounds) judged it fixed (`prior` in its record:
 review_rules.sh hands the reviewer those findings with the diff); one it never judged (no local
-round of the head, a finding added after it ran, a record without `prior`) is filed.
+round of the head, a finding added after it ran, a record without `prior`) is filed. Such a
+head is what `unjudged` names: merge_rules.sh reviews it once before deciding, so in practice
+only a failed review leaves them unjudged.
 Gotcha: REST names the bot `chatgpt-codex-connector[bot]`, GraphQL `chatgpt-codex-connector`.
 """
 
@@ -275,6 +279,11 @@ def verdict(rounds: list[Round], codex: list[Finding], filed: set[str], cap: int
     open_codex = [f for f in codex if f.priority not in blocks and not f.resolved]
     head = latest.sha if latest else "-"
     judged = head_judgment(rounds, pr_head)
+    # Only a head no local round has reviewed: a rerun of the same commit counts no round, and
+    # a judgment it skipped stays the reviewer's (filed), as #354 has it.
+    if not any(r.source == "local" and same_commit(r.sha, pr_head) for r in rounds):
+        if unjudged := prior_findings(rounds, filed, pr_head):
+            lines.append(f"unjudged\t{len(unjudged)}")
     unaddressed = open_codex + open_local(rounds, filed, blocks, head, judged)
     lines += [f"unaddressed\t{f.line()}\t{f.thread or f.key}" for f in unaddressed]
     return lines, unaddressed

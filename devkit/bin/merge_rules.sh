@@ -42,6 +42,15 @@
 #     merge of main is committed onto the head, pushed and merged. Any other conflict, or a
 #     cross-repository PR's, is a real conflict: rebase it. A main whose protection wants the
 #     branch up to date is answered by GitHub's update-branch, then the merge of the new head.
+# Before deciding, a head with no local round, that older commits' local findings would be
+# filed against unjudged (codex_review.py `unjudged`), gets one `make review` round
+# (review_rules.sh), and the verdict is that round's: below the cap its P0/P1 blocks, at it only
+# P0. Why (2026-11-02): a lane pushed its fix with no round, and #354 then filed every fixed
+# finding (#358, #360, homelab #192-194 closed by hand). It is a new commit, so it counts; the
+# count only ever reaches or passes the cap, where only P0 still blocks, so the round can refuse
+# only what a round of the fix should. An unresolved Codex P0/P1 refuses first, with no round;
+# a review that fails (no claude) is one note line and the old filing, never a refusal, though
+# a record it posted before failing still counts (#362).
 # Never refused for those: unaddressed P2-and-below findings (codex_review.py `unaddressed`) are
 # each filed as an issue in the repo just before the merge (an issue already naming the finding
 # is reused) and answered on the PR, `merge: filed …` per issue; that read of the rounds is fresh,
@@ -247,16 +256,40 @@ sync_exempt() {
     || { not_sync="its .devkit-rev names no commit on devkit main, forward of main's, whose vendored tree it records"; return 1; }
 }
 
-# check_rounds: refuse unless the rounds allow the merge (header); set $round_status, the line
-# codex-review records. codex_review.py's lines are its docstring's.
-round_status=""
-check_rounds() {
-  local verdict rc count latest source sha reviewer blocking
+# read_verdict: codex_review.py's verdict on the rounds of $rounds_head, into the caller's $verdict.
+read_verdict() {
+  local rc
   verdict=$("$DEVKIT_PYTHON" -I "$HERE/codex_review.py" rounds "$SLUG" "$PR" "$CAP" "$rounds_head")
   rc=$?
   # Python's own uncaught-exception exit is 1 too: 1 with no verdict line is a crash, not a refusal.
   { [ "$rc" = 0 ] || { [ "$rc" = 1 ] && grep -q '^rounds' <<<"$verdict"; }; } \
     || { echo "merge: cannot read PR #$PR's review rounds (above)" >&2; exit 2; }
+}
+
+# review_head: the one `make review` round of the head an `unjudged` verdict owes (header), main's
+# review_rules.sh beside this script, under the same plan. Its exit decides nothing: the caller
+# reads the rounds again either way, since a review can post its record and still fail after
+# (#362: a P0/P1 it posted must block). A failure is one note line, never a refusal.
+review_head() {
+  local rc
+  echo "merge: $(awk -F'\t' '$1 == "unjudged" { print $2 }' <<<"$verdict") older commits' finding(s) and no local round of ${rounds_head:0:12} to judge them; one make review round of it first"
+  "$HERE/review_rules.sh" "$ROOT" "$PR"
+  rc=$?
+  [ "$rc" = 0 ] \
+    || echo "merge: note: the review round of ${rounds_head:0:12} failed (exit $rc, above); the rounds are read again: a record it posted counts, else its older commits' findings are filed unjudged"
+}
+
+# check_rounds: refuse unless the rounds allow the merge (header); set $round_status, the line
+# codex-review records. codex_review.py's lines are its docstring's.
+round_status=""
+check_rounds() {
+  local verdict count latest source sha reviewer blocking
+  read_verdict
+  # An unresolved Codex P0/P1 refuses whatever a new round says: no round for it.
+  if grep -q $'^unjudged\t' <<<"$verdict" && ! grep -q $'^blocking\tunresolved\t' <<<"$verdict"; then
+    review_head
+    read_verdict
+  fi
   count=$(awk -F'\t' '$1 == "rounds" { print $2 }' <<<"$verdict")
   latest=$(grep $'^latest\t' <<<"$verdict")
   IFS=$'\t' read -r _ source sha reviewer <<<"$latest"
