@@ -27,6 +27,10 @@
 #                                  ($SECONDS), the one clock every elapsed time a budget, a
 #                                  watchdog or a queue wait judges is read from (tier_guard.sh,
 #                                  _slot_lib.sh)
+#   devkit_epoch                   wall seconds since the epoch (`date +%s`), for what is judged
+#                                  against the time of day, not an elapsed span (_cadence_lib.sh's
+#                                  windows); DEVKIT_CLOCK_CMD stands in for it too, so a test's one
+#                                  clock steps both
 #   devkit_loadavg                 "<1m> <5m>", or nothing when the load cannot be read
 #   devkit_ncpu                    the online core count, or nothing: a count of things (the
 #                                  admission pool's default size), never a load divisor
@@ -54,6 +58,10 @@
 
 devkit_now() {
   if [ -n "${DEVKIT_CLOCK_CMD:-}" ]; then bash -c "$DEVKIT_CLOCK_CMD"; else echo "$SECONDS"; fi
+}
+
+devkit_epoch() {
+  if [ -n "${DEVKIT_CLOCK_CMD:-}" ]; then bash -c "$DEVKIT_CLOCK_CMD"; else date +%s; fi
 }
 
 devkit_loadavg() {

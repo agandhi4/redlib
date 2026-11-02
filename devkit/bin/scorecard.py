@@ -876,6 +876,55 @@ def wired_codex_review(repo: Repo) -> None:
         repo.add("codex_review", False, f"GATE_CODEX_REVIEW={value}: make merge exits 2")
 
 
+# What proves main for each deploy kind a plan declares (README "Publish", "Deploy kinds"). Read
+# as gate_plan_literal reads it (bin/apple_check.sh does, for ios and mac): unquoted, commas.
+DEPLOY_KINDS_LINE = re.compile(r"^DEPLOY_KINDS=([A-Za-z0-9._,/-]*)[ \t]*(?:#.*)?$", re.M)
+PUBLISH_IMAGE_LINE = re.compile(r"^PUBLISH_IMAGE=[A-Za-z0-9._,/-]+[ \t]*(?:#.*)?$", re.M)
+APPLE_PROOF = "apple_check.sh on the Mac (check_tree.sh at each new main, hourly)"
+DEPLOY_KINDS = {
+    "image": "publish.sh on linux-box (check_tree.sh before latest moves)",
+    "ios": APPLE_PROOF,
+    "mac": APPLE_PROOF,
+    "hosted": "its host applies main itself (homelab's hosts, Vercel); nothing re-checks main",
+    "library": "no deploy; nothing re-checks main after merge",
+    "tooling": "no deploy; nothing re-checks main after merge",
+}
+NO_DEPLOY_KINDS = frozenset({"library", "tooling"})
+
+
+def wired_deploy_kinds(repo: Repo) -> None:
+    """The plan names how its main reaches use (devkit decisions 2026-11-02, deploy kinds), so an
+    iOS-only change no publisher builds is still checked somewhere. Evidence is the readout:
+    each kind and what proves main for it."""
+    plan = repo.root / identity.PLAN
+    if not plan.is_file():
+        repo.na("deploy_kinds", f"no {identity.PLAN} (the gate_plan check)")
+        return
+    text = plan.read_text(errors="replace")
+    lines = DEPLOY_KINDS_LINE.findall(text)
+    kinds = [k for k in (lines[0].split(",") if lines else []) if k]
+    image_line = bool(PUBLISH_IMAGE_LINE.search(text))
+    if len(lines) > 1 or len(set(kinds)) < len(kinds):
+        # bash would take the last line, gate_plan_literal the first: one line, each kind once.
+        problem = f"DEPLOY_KINDS must be one line naming each kind once (got {' / '.join(lines)})"
+    elif not kinds:
+        problem = (f"no DEPLOY_KINDS=<kind>[,<kind>] line ({', '.join(DEPLOY_KINDS)}): "
+                   "nothing says what proves main")
+    elif unknown := [k for k in kinds if k not in DEPLOY_KINDS]:
+        problem = (f"DEPLOY_KINDS names {', '.join(unknown)}; "
+                   f"the kinds are {', '.join(DEPLOY_KINDS)}")
+    elif ("image" in kinds) != image_line:
+        problem = ("the plan sets PUBLISH_IMAGE but DEPLOY_KINDS has no image" if image_line
+                   else "DEPLOY_KINDS has image but the plan has no PUBLISH_IMAGE= line")
+    elif len(kinds) > 1 and NO_DEPLOY_KINDS & set(kinds):
+        problem = (f"DEPLOY_KINDS={','.join(kinds)}: "
+                   "library and tooling deploy nothing, so stand alone")
+    else:
+        problem = ""
+    repo.add("deploy_kinds", not problem,
+             problem or "; ".join(f"{k} → {DEPLOY_KINDS[k]}" for k in kinds))
+
+
 def wired_process(repo: Repo, state_home: Path, conf: dict[str, float]) -> None:
     hooks_conf = (repo.root / "scripts/ci/hooks.conf").is_file()
     tracked_hooks = any(f.startswith(".githooks/") for f in repo.tracked)
@@ -921,6 +970,7 @@ def wired_process(repo: Repo, state_home: Path, conf: dict[str, float]) -> None:
         ),
     )
     wired_codex_review(repo)
+    wired_deploy_kinds(repo)
     repo.add("scorecard_file", *scorecard_file(repo.root / "docs/metrics/scorecard.json"))
     workflow = "\n".join(section_lines(agents_text(repo), r"workflow"))
     named = "make merge" in workflow

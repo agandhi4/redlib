@@ -1,5 +1,6 @@
 # shellcheck shell=bash
-# Put a tree's pinned toolchains first on PATH: Node from .nvmrc (node_toolchain.sh), Rust from
+# Put a tree's pinned toolchains first on PATH: Node from .nvmrc (node_toolchain.sh), pnpm from a
+# package.json packageManager (package_manager_toolchain.sh), Rust from
 # rust-toolchain.toml or rust-toolchain (rust_toolchain.sh), and devkit's python3 and uv
 # (_toolchain_lib.sh) for the vendored tools and a repo's own bare python3 and uv calls. Sourced;
 # defines toolchain_path and runs nothing. Used by
@@ -9,11 +10,11 @@
 #   toolchain_path <tree>    # 0 ok; 1 a declared toolchain cannot be provided
 #
 # On 0 it exports PATH, DEVKIT_PYTHON, DEVKIT_TOOLCHAIN_TREE (the tree's physical path:
-# toolchain_shell.sh skips a tree already on its pins) and COREPACK_ENABLE_DOWNLOAD_PROMPT=0 with
-# Node (a corepack prompt hangs an unattended run) and sets TOOLCHAIN_NOTES ("node v22.23.3 from
+# toolchain_shell.sh skips a tree already on its pins) and sets TOOLCHAIN_NOTES ("node v22.23.3 from
 # .nvmrc; rust 1.99.0 from rust-toolchain.toml", led by "python 3.14.3 from mise; uv 0.9.5 from
-# python" for each that PATH lacked; empty when nothing was provided). On 1 it sets
-# TOOLCHAIN_FAILED (each of "Python", "Node", "Rust toolchain" that failed, comma-separated: every
+# python" for each that PATH lacked; "pnpm 10.32.1 from packageManager" when a package.json
+# declares it: package_manager_toolchain.sh; empty when nothing was provided). On 1 it sets
+# TOOLCHAIN_FAILED (each of "Python", "Node", "pnpm", "Rust toolchain" that failed, comma-separated: every
 # step runs, so one error names them all) and TOOLCHAIN_ERROR (one clause per failure, naming the
 # declaration, or every place Python was looked for); a provisioning script's own reason is
 # already on stderr. A uv not found is no failure here (CI jobs and hooks run without one);
@@ -50,8 +51,17 @@ toolchain_path() {
       _toolchain_fail Node "cannot provide node $(tr -d '[:space:]' <"$tree/.nvmrc") declared in .nvmrc"
     else
       [ -z "$bin" ] || export PATH="$bin:$PATH"
-      export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
       TOOLCHAIN_NOTES="${TOOLCHAIN_NOTES:+$TOOLCHAIN_NOTES; }node $(node --version) from .nvmrc"
+    fi
+  fi
+
+  # After Node: the pinned Node's npm installs it. Never a PATH corepack (Node 25+ ships none).
+  if [[ "$TOOLCHAIN_FAILED" != *Node* ]]; then
+    if ! bin=$("$here/package_manager_toolchain.sh" "$tree"); then
+      _toolchain_fail pnpm "cannot provide the pnpm a package.json packageManager declares"
+    elif [ -n "$bin" ]; then
+      export PATH="$bin:$PATH"
+      TOOLCHAIN_NOTES="${TOOLCHAIN_NOTES:+$TOOLCHAIN_NOTES; }pnpm $(basename "$(dirname "$bin")") from packageManager"
     fi
   fi
 
