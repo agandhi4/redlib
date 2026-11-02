@@ -6,7 +6,8 @@
 #          Prints the bin directory to prepend to PATH, or nothing when PATH's cargo already matches.
 #        devkit/bin/rust_toolchain.sh --declared <repo-root>
 #          Prints the declared version only (toolchain_check.sh uses this: one parser).
-#   Exit 0 ok, 1 cannot provide (no declaration, inexact channel, install failure), 2 usage.
+#   Exit 0 ok, 1 cannot provide (no declaration, an install failure), 2 usage, 3 the tree's own
+#   fault: two declarations, no channel or an inexact one (check_tree.sh calls that commit red).
 #
 # Declaration: `rust-toolchain.toml` (`[toolchain] channel = "1.83.0"`, optional `components`),
 # or a legacy `rust-toolchain` file holding either that TOML or the bare version. The channel
@@ -31,10 +32,11 @@ if [ "${1:-}" = --declared ]; then DECLARED_ONLY=1; shift; fi
 [ $# -eq 1 ] || usage
 ROOT=$1
 die() { echo "rust_toolchain: $*" >&2; exit 1; }
+bad_decl() { echo "rust_toolchain: $*" >&2; exit 3; }
 
 # ---- declaration ------------------------------------------------------------------------------
 if [ -f "$ROOT/rust-toolchain.toml" ] && [ -f "$ROOT/rust-toolchain" ]; then
-  die "both rust-toolchain and rust-toolchain.toml exist in $ROOT; keep one"
+  bad_decl "both rust-toolchain and rust-toolchain.toml exist in $ROOT; keep one"
 elif [ -f "$ROOT/rust-toolchain.toml" ]; then DECL=rust-toolchain.toml
 elif [ -f "$ROOT/rust-toolchain" ]; then DECL=rust-toolchain
 else die "no rust-toolchain.toml or rust-toolchain in $ROOT"
@@ -69,12 +71,12 @@ if grep -q '^[[:space:]]*\[toolchain\]' "$ROOT/$DECL"; then
       component) COMPONENTS+=("$value") ;;
     esac
   done < <(toml_fields "$ROOT/$DECL")
-  [ -n "$VERSION" ] || die "$DECL has no [toolchain] channel"
+  [ -n "$VERSION" ] || bad_decl "$DECL has no [toolchain] channel"
 else
   VERSION=$(grep -v '^[[:space:]]*\(#\|$\)' "$ROOT/$DECL" | head -n1 | tr -d '[:space:]')
 fi
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-  || die "$DECL must pin an exact channel like 1.83.0 (got '$VERSION'); stable/nightly/MAJOR.MINOR drift between machines"
+  || bad_decl "$DECL must pin an exact channel like 1.83.0 (got '$VERSION'); stable/nightly/MAJOR.MINOR drift between machines"
 
 if [ "$DECLARED_ONLY" = 1 ]; then echo "$VERSION"; exit 0; fi
 

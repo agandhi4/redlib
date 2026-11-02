@@ -107,21 +107,32 @@ devkit_timeout_stop() {
 
 # _devkit_stop_tree <pid> <grace>: STOP <pid> and every descendant, walking again until a walk
 # finds none new (a stopped process cannot fork, and none exits mid-walk to orphan its children
-# out of reach), then TERM and CONT them all, and KILL whichever is still alive after <grace> s.
+# out of reach), then TERM and CONT them all, and KILL whichever is still the same process after
+# <grace> s: each is kept as `<pid> <start time>`, so a pid that exited and was reused meanwhile
+# is never signalled (#375).
 _devkit_stop_tree() {
-  local root=$1 grace=$2 all='' found p deadline=$((SECONDS + $2)) _
+  local root=$1 all='' pids found p start deadline=$((SECONDS + $2)) _
   for _ in 1 2 3 4 5 6 7 8; do
-    found=$(_devkit_tree "$root" | grep -vxF -e "${all:-x}" -e x) || :
+    pids=$(cut -d ' ' -f 1 <<<"$all")
+    found=$(_devkit_tree "$root" | grep -vxF -e "${pids:-x}" -e x) || :
     [ -n "$found" ] || break
-    for p in $found; do kill -STOP "$p" 2>/dev/null || :; done
-    all=$(printf '%s\n%s' "$all" "$found" | grep .)
+    for p in $found; do
+      kill -STOP "$p" 2>/dev/null || continue
+      all=$(printf '%s\n%s %s' "$all" "$p" "$(_devkit_start "$p")" | grep .)
+    done
   done
   [ -n "$all" ] || return 0
-  for p in $all; do kill -TERM "$p" 2>/dev/null || :; done
-  for p in $all; do kill -CONT "$p" 2>/dev/null || :; done
-  while [ "$SECONDS" -lt "$deadline" ] && _devkit_any_alive "$all"; do sleep 0.2; done
-  for p in $all; do kill -KILL "$p" 2>/dev/null || :; done
+  pids=$(cut -d ' ' -f 1 <<<"$all")
+  for p in $pids; do kill -TERM "$p" 2>/dev/null || :; done
+  for p in $pids; do kill -CONT "$p" 2>/dev/null || :; done
+  while [ "$SECONDS" -lt "$deadline" ] && _devkit_any_alive "$pids"; do sleep 0.2; done
+  while read -r p start; do
+    [ "$(_devkit_start "$p")" != "$start" ] || kill -KILL "$p" 2>/dev/null || :
+  done <<<"$all"
 }
+
+# _devkit_start <pid>: its start time, which a reused pid does not share (_slot_lib.sh's way).
+_devkit_start() { TZ=UTC LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//'; }
 
 # _devkit_tree <pid>: <pid> and its descendants, one per line, from one ps snapshot.
 _devkit_tree() {

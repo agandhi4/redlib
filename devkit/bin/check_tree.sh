@@ -48,6 +48,7 @@
 #   CHECK <job> FAIL ([[retry ]timed out after <n>s; ]<n>s; log: <path>)  then its last 15 lines
 #   CHECK <job> REPORTED (<n>s; log: <path>)                      a ratchet job's failure
 #   CHECK plan FAIL (<why>)                                       the commit's plan is broken
+#   CHECK toolchain FAIL (<why>)    the commit's own toolchain pin is invalid (toolchain_path's 3)
 #   CHECK <job> SKIPPED (<reason>), CHECK note: <text>, CHECK areas: <areas>
 #   CHECK docker|toolchain ERROR (<why>)   the box, not the commit: exit 2, no verdict, so
 #                                           publish.sh never calls the commit red for it
@@ -56,7 +57,7 @@
 # Job seconds go to $WT/build/metrics/gate.json (`gate.<job>.seconds`), rewritten after every
 # job, for a plan's `job:<name>` metrics collector (bin/metrics_collect.sh).
 # Exit: 0 pass, 1 fail (a job, or the commit's plan: none, no gate_plan(), a bad job name:
-# `CHECK plan FAIL (<why>)`), 2 usage or environment (no such commit, a missing tool, no Docker
+# `CHECK plan FAIL (<why>)`; or its toolchain pin: `CHECK toolchain FAIL (<why>)`), 2 usage or environment (no such commit, a missing tool, no Docker
 # for a plan that needs it, a toolchain the box cannot provide, an ENV_CAUSES failure).
 # shellcheck disable=SC2329,SC2317  # helpers are called by the sourced plan and the EXIT trap
 set -uo pipefail
@@ -279,10 +280,15 @@ require_docker() {
 }
 
 # ---- the tree's toolchain, then the plan decides what runs ----------------------------------
-if ! toolchain_path "$WT"; then
-  echo "CHECK toolchain ERROR ($TOOLCHAIN_ERROR)"
-  exit 2
-fi
+# A pin the commit got wrong is red like its plan (devkit #321): exit 2 would record nothing, so
+# the publisher would stall on it every window instead of filing main-red and walking past it.
+TC_RC=0
+toolchain_path "$WT" || TC_RC=$?
+case $TC_RC in
+  0) ;;
+  3) echo "CHECK toolchain FAIL ($TOOLCHAIN_ERROR)"; FAILED_JOBS=toolchain; verdict FAIL ;;
+  *) echo "CHECK toolchain ERROR ($TOOLCHAIN_ERROR)"; exit 2 ;;
+esac
 [ -z "$TOOLCHAIN_NOTES" ] || note "$TOOLCHAIN_NOTES"
 # shellcheck disable=SC2034  # read by _paths_lib.sh; the plan's alone, never the environment's
 GATE_CODE_PATHS=
