@@ -30,6 +30,8 @@ GATE_JOBS_METRICS="metrics ci-metrics"
 GATE_JOBS_IMAGE="image ci-image CI_IMAGE=$IMAGE CI_BUILD_VERSION=gate-$PR|smoke ci-smoke CI_IMAGE=$IMAGE CI_BUILD_VERSION=gate-$PR"
 # What devkit/bin/publish.sh pushes to (read as this literal line, never sourced).
 PUBLISH_IMAGE=ghcr.io/agandhi4/redlib
+# How main ships, and so what proves it (devkit README "Deploy kinds").
+DEPLOY_KINDS=image
 # Every app path builds the image (devkit 2026-10-17: a plan excludes paths, never areas). These
 # reach no stage's output: `COPY . ./` copies them, but neither cargo build nor the release stage
 # reads them (only src/, static/, templates/, build.rs, Cargo.* and rust-toolchain.toml are). The
