@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Keep the machine awake while a timed run or Docker work is alive. Sourced; defines
 # devkit_stay_awake, devkit_wake_user, devkit_sleep_forced and devkit_on_battery and runs nothing.
-# Used by local_gate.sh (the whole gate), tier_guard.sh (a tier run by hand), _timeout_lib.sh's
+# Used by tier_guard.sh (a tier run by hand), _timeout_lib.sh's
 # devkit_docker_guard (every devkit entry point that talks to Docker: throwaway_pg.sh,
 # boot_image.sh, docker_bounded.sh), dependency_merge.sh (devkit_sleep_forced) and
 # tests/shards.sh --measure (devkit_on_battery).
@@ -22,8 +22,7 @@
 # macOS: `caffeinate -i -s -w $$` in the background holds the idle-sleep and (on AC power)
 # system-sleep assertions until this process exits, then exits by itself. It waits on the pid
 # rather than re-exec'ing the caller under caffeinate, so the caller keeps its pid, its signals
-# (remote_gate.sh TERMs the gate's pid) and its exit code. Its fds are /dev/null, so it never
-# holds a pipe open (remote_gate.sh reads the gate's output to EOF). A closed lid on battery
+# and its exit code. Its fds are /dev/null, so it never holds a pipe open. A closed lid on battery
 # still sleeps: no assertion can stop that (devkit_sleep_forced).
 # Linux: nothing is done. The equivalent is to run the gate under
 # `systemd-inhibit --what=idle:sleep --who=devkit --why=gate make gate PR=<n>`, which needs a

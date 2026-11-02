@@ -55,9 +55,9 @@ schema 1 envelope (finplat's `make metrics`) and a bare flat file, which carry n
 | `tier` | lower | `tier.unit.seconds`, `tier.db.seconds` (wall-clock seconds of the guarded command) |
 | `tests` | higher | `tests.unit.pytest`, `tests.e2e.playwright` (tests that ran, per tier and runner) |
 
-**Gate seconds** come from `local_gate.sh`, not a repo collector: after every job it rewrites
-`build/metrics/gate.json` in the merged worktree with `gate.<job>.seconds` for the jobs run so
-far, and adds `gate.total.seconds` after the last one (a copy stays in the gate's log dir). A
+**Gate seconds** come from the plan runner, not a repo collector: after every job it rewrites
+`build/metrics/gate.json` in its worktree with `gate.<job>.seconds` for the jobs run so
+far, and adds `gate.total.seconds` after the last one. A
 metrics job the plan runs last therefore merges every earlier job's seconds, but never its own
 or the total. They are the one timing domain allowed into a snapshot (owner directive
 2026-10-13: job seconds only ever get faster); the hard limits are the gate's budgets
@@ -102,7 +102,7 @@ Exactly the keys each emits, per flag; `<s>` is `--scope`. CLIs: devkit README, 
 | | `--fan` | `coupling.<s>.fan_in_max` (report-only), `coupling.<s>.fan_out_max` over the same graph (the python.py definition) |
 | `shell.py` | `--shellcheck` | `lint.<s>.shellcheck_errors`, `lint.<s>.shellcheck_warnings` (shellcheck's `error` and `warning` comments, once each, from `bin/shellcheck.sh`: the release `bin/release_tool.sh` pins, over `lint/shellcheckrc` plus the repo's `.shellcheckrc`; `info` and `style` are not counted) |
 | | `--complexity` | `complexity.<s>.branches_max`, `complexity.<s>.branches_over_15` (decision points per function: `if`, `elif`, `case` (once, however many arms), `for`, `while`, `until` in command position and every `&&`/`||`; a file's top level is one more unit, `<main>`; a guard, a branch whose only side ends in `exit`/`return`/`continue`/`break` or a function of the set that ends in `exit` (`|| die "…"`, `if …; then exit 2; fi`), is not counted. Lexical: the scanner in the collector's header) |
-| | `--dead` | `dead.<s>.unused` (functions of the `--src` set whose name appears nowhere in the set's code outside their own body; strings and `trap` count as uses; the plan hooks `local_gate.sh` calls are entry points, and so is each `--entry NAME` the repo's line declares for a function called from outside the set; one naming no function is exit 2) |
+| | `--dead` | `dead.<s>.unused` (functions of the `--src` set whose name appears nowhere in the set's code outside their own body; strings and `trap` count as uses; the plan hooks its runner calls are entry points, and so is each `--entry NAME` the repo's line declares for a function called from outside the set; one naming no function is exit 2) |
 
 | | `--cycles` | `coupling.<s>.cycles` (files of the `--src` set that `source` each other: strongly connected components of the source graph, python.py's Tarjan. An edge is a `source X`/`. X` in command position naming a measured file: a `# shellcheck source=` directive right above first, else the argument's literal `/…` tail after its last expansion, looked up beside the file, then at the root. Lexical: the collector's header lists what it cannot see) |
 | | `--fan` | `coupling.<s>.fan_in_max` (report-only), `coupling.<s>.fan_out_max` over the same graph (the python.py definition) |

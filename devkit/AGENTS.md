@@ -19,24 +19,26 @@ agent more than it catches is overhead, not standardization.
   test, unless it is its function's last line. ci-lint holds it
   (`bin/bats_assert_check.py`, a line-level form, not a parser: grow its grammar, never a
   lexer; `--fix` appends the handler).
-- A bats file's git fixture (bare origin, clones, commits, fakes) is built once in `setup_file`
-  and copied per test (`tests/fixture_template.bash`): built per test it was a fifth of the unit
-  tier's CPU. Every `tests/*.bats` is in `tests/shard_costs.tsv`, at its share: `tests/shards.sh`
-  fails the run otherwise (`make shard-costs`, on a quiet box). A share is judged only on an
-  uncontended run (no pool units held by others, the load less the run's own running shards
-  within capacity, at every file boundary; one `shards: drift …` line says which it was);
-  beside other work drift is a `shards: note:`, never a failure. A test steps a polling loop by
-  hand (a tick command, a faked `sleep`), never by sleeping and counting lines.
+- A bats file's git fixture (bare origin, clones, commits, fakes), and a `devkit new` scaffold,
+  is built once in `setup_file` and copied per test (`tests/fixture_template.bash`): built per
+  test it was a fifth of the unit tier's CPU. Every `tests/*.bats` is in `tests/shard_costs.tsv`,
+  at its share: `tests/shards.sh` fails the run otherwise (`make shard-costs`, on a quiet box).
+  A share is judged only on an uncontended run (no pool units held by others, the load less the
+  run's own running shards within capacity, at every file boundary; one `shards: drift …` line
+  says which it was); beside other work drift is a `shards: note:`, never a failure. A test steps
+  a polling loop by hand (a tick command, a faked `sleep`), never by sleeping and counting lines.
+  A test never reads the box's live load or sizes a wait by it: seconds a budget, watchdog or
+  queue judges come from `devkit_now`'s clock (`DEVKIT_CLOCK_CMD`, `tests/clock_helpers.bash`),
+  a stand-in holder ends on a signal the test sends once it has seen the waiter wait, and the one
+  real sleep in a file is the one that proves the default clock is wall time, with a comment
+  saying so.
 
 ## Architecture
 Scripts in `bin/` and the shared metrics collectors in `metrics/`, vendored by consumers (the
 paths in `VENDOR_PATHS`); fleet operations in `github/`; `devkit new` scaffolds in `templates/new/`; contract tests in `tests/`. The path map
 is README.md "Architecture". Invariants of the design:
-- Output contracts are APIs. `bin/local_gate.sh` prints `GATE <job> PASS|FAIL|SKIPPED|WATCHDOG|OVERBUDGET …` and
-  `VERDICT PASS|FAIL head=<sha> main=<sha>`; `finplat_merge_queue.sh`, `mac_merge_queue.sh`
-  and `worker.py` parse them. `bin/tier_guard.sh` prints `TIER <tier>: …|FAIL|FLOOR|OVERBUDGET|NOSHIFT …`
-  and exits with the command's code, 1 for its own verdict, 2 for a bad call. The gate's outcome
-  record (`logs/<pr>/gate.json`, `runs.tsv`; README "Gate record") is an API too. `.devkit-rev` is `<upstream commit> <tree sha>`,
+- Output contracts are APIs. `bin/tier_guard.sh` prints `TIER <tier>: …|FAIL|FLOOR|OVERBUDGET|NOSHIFT …`
+  and exits with the command's code, 1 for its own verdict, 2 for a bad call. `.devkit-rev` is `<upstream commit> <tree sha>`,
   the tree filtered to `VENDOR_PATHS`. A new file consumers run must sit under a listed path.
   The lint bases' exports are APIs too (`lint/exports.txt`): one leaves only after 30 days marked
   deprecated there, since repo-owned configs import them and devkit-sync cannot edit those.
@@ -61,23 +63,37 @@ is README.md "Architecture". Invariants of the design:
   resolver and never an interpreter's whole bin/. The gate preflight (`devkit_preflight`) names
   every missing tool in one error.
 - `make merge` runs origin/main's `merge_rules.sh` and plan (`bin/pr_merge.sh` extracts them), never
-  the checkout's: a rule a branch changes governs merges only once it is on main.
+  the checkout's: a rule a branch changes governs merges only once it is on main. `make review`
+  runs main's `review_rules.sh` the same way.
+- No pre-merge gate (owner 2026-11-02): `make merge` decides on review rounds (`codex_review.py`
+  docstring), never on `local-gate`, a moved main or a running Codex review. The cap is the plan's
+  `DEVKIT_REVIEW_ROUNDS` (default 3), never an environment value. Below the cap, P0/P1
+  findings block; at the cap only P0 does, and P1 and below are filed as issues at the merge. A local round is only
+  ever `make review`'s record (the gh shim refuses the marker without `DEVKIT_REVIEW_VERIFIED`);
+  never hand-post one. `OWNER=` is the owner's, at a terminal; an agent never tries it.
+- Main is proven at deploy: `bin/publish.sh` runs `bin/check_tree.sh` (every job of the commit's
+  plan, clean worktree) and publishes only the newest green commit, never a red one, filing one
+  `main-red` issue per first bad commit. Only correctness fails a check: a flake is retried once
+  and files `flaky`; ratchets and budgets report or file issues, never fail it. `--ungated` is the
+  owner's alone. check_tree prints `CHECK <job> PASS|FAIL|REPORTED|SKIPPED …` and `CHECK VERDICT
+  PASS|FAIL head=<sha>` (an API, like the gate's).
+- A problem with the box never reads as a bad commit: docker down, or a job failing its run and
+  retry with a cause in check_tree's one `ENV_CAUSES` list, is exit 2 and records nothing. A red
+  record expires after 24 h (`publish.sh --recheck <sha>` sooner), a green commit closes
+  `main-red`, a job is a FAIL after `CHECK_JOB_SECONDS` (1800), and the Mac's hourly
+  `publisher_deadman.sh` (GitHub only) files `publisher stalled` when linux-box stops publishing.
 - A launchd job runs devkit main's copy of itself: its plist starts the job dir's `launcher.sh`
   (`bin/job_launcher.sh`, installed by `bin/_launchd_job_lib.sh`), never a path in a checkout, so
   a devkit merge reaches the next run with no fast-forward. A new job goes through the same lib.
-- Every repo's `gate` target is `devkit/bin/gate.sh "$(PR)" $(GATE_ARGS)`. Where gates run is
-  per machine (`GATE_REMOTE_HOST` in `~/.config/devkit/gate.env`), never per repo, except a plan's
-  literal `GATE_REMOTE=0` for a gate only a Mac can run.
+- `bin/gate.sh` is the retired gate's stub (2026-11-02): one line naming `make review` and
+  `make merge`, exit 0, so a consumer's old `gate` target never fails. Never grow it back.
 - Fail loudly on a missing tool (`flock`, `gh`) with the install hint; never degrade silently.
-- Time budgets (gate.total, a job's, a tier's) report and never fail a PR's gate (owner 2026-10-29); correctness
-  (tests, floors, ratchets) still fails, and the silence watchdog still stops a hung job as an error naming it. A
-  real slowdown is caught by the nightly budget watch (`bin/budget_watch.sh`, budgets enforced on an idle box, one
-  `performance` issue per repo). Never make a budget fail a PR again; tighten the watch instead.
-- Test work on the box queues in one place: `bin/_slot_lib.sh`'s pool at its fixed path, every gate
-  job and hand-run tier admitted for its cost. A new entry point that runs suites goes through it
-  (`slot_acquire`), never its own lock. A gate job's cost is measured (its CPU, `job-costs`); the
-  table is the floor for work its rusage cannot see (Docker, a simulator), and a plan
-  `GATE_JOB_COSTS` entry is for what neither prices. `make gate-queue` shows the pool live.
+- Time budgets (a job's, a tier's) report and never fail (owner 2026-10-29); correctness (tests, floors,
+  ratchets) still fails. Never make a budget fail a PR again.
+- Test work on the box queues in one place: `bin/_slot_lib.sh`'s pool at its fixed path, every
+  tier admitted for its cost. A new entry point that runs suites goes through it (`slot_acquire`),
+  never its own lock. A job's cost is the table's (`_slot_word_cost`); a plan `GATE_JOB_COSTS`
+  entry is for what the table misprices.
 - A pytest or vitest tier must not rot with real time: the plan reruns it shifted (`GATE_JOBS_CLOCK`, README
   "Clock shift"), and what a shift cannot reach is a `scripts/ci/clock_shift.conf` line with its reason.
 - `ci-metrics` is `bin/metrics_collect.sh` over the repo's `scripts/ci/metrics.conf`, run as
@@ -90,10 +106,10 @@ is README.md "Architecture". Invariants of the design:
 make ci-quick                  # shellcheck, python + template unit tests (npm), devkit's own guards and ruff (ci-lint) on itself
 make ci-unit                   # bats tests/ (~2 min)
 make ci-metrics                # the ratchet over devkit's own shell (scripts/ci/metrics.conf, docs/metrics/ratchet.json)
-make gate PR=<n>               # all three, on the PR merged into origin/main; posts `local-gate`
-make merge PR=<n>              # squash-merge, refused unless the current head has local-gate success
+make review PR=<n>             # one local review round: claude -p over the diff, its record posted on the PR
+make merge PR=<n>              # squash-merge once the review rounds allow it (DEVKIT_REVIEW_ROUNDS, default 3)
 bin/docs_check.sh --report .   # the docs numbers behind the diet rules; --fix does the mechanical moves
-python3 -I bin/gate_bite.py --days 30 <repo>   # BITE: gate fails by rule, hook fails, unguarded merges
+python3 -I bin/bite.py --days 30 <repo>   # BITE: hook runs and fails by step
 make scorecard REPOS='~/projects/solo/finplat …'   # the fleet scorecard (bin/scorecard.py)
 make agent-cost                # append this project's merged-PR costs to docs/agent-cost.tsv (bin/agent_cost.py)
 ```
@@ -102,9 +118,9 @@ make agent-cost                # append this project's merged-PR costs to docs/a
 - `make install` once per checkout (core.hooksPath=.githooks): pre-commit runs ci-lint (ruff
   and changed_lint.py's held rules), shellcheck, the guards and the staged secrets scan,
   pre-push the python tests (scripts/ci/hooks.conf).
-- Branch, PR, `make gate PR=<n>` green (the `local-gate` status is the merge signal; Actions is
-  a second opinion and has been billing-blocked), `make merge PR=<n>` with a descriptive
-  sentence title. Consumers pick it up with
+- Branch, PR, a review round (`@codex review`, or `make review PR=<n>` when Codex is out of
+  budget), answer its findings once (push fixes, or reply and resolve), then `make merge PR=<n>`
+  with a descriptive sentence title. Consumers pick it up with
   their `devkit-sync` target; a devkit change that needs plan changes ships as devkit PR first, then
   one PR per consumer.
 - A lane's worktree lives at `.claude/worktrees/<branch>`, never beside the checkout; run

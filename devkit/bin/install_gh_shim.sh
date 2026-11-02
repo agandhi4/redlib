@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 # Install the devkit gh shim on this machine: a `gh` ahead of the real one on PATH that refuses
-# `gh pr merge` unless DEVKIT_MERGE_VERIFIED equals its --match-head-commit value, and passes
-# every other call to the real gh unchanged.
+# `gh pr merge` unless DEVKIT_MERGE_VERIFIED equals its --match-head-commit value, refuses any
+# call whose arguments or body files carry a local review record's marker unless
+# DEVKIT_REVIEW_VERIFIED names the head the record does, and passes every other call to the real
+# gh unchanged.
 #
-# Why (owner, 2026-10-18): no paid GitHub features, so nothing on GitHub requires the gate.
-# `make merge PR=<n>` (bin/pr_merge.sh) checks the head's local-gate success and sets
+# Why (owner, 2026-10-18): no paid GitHub features, so nothing on GitHub requires a check.
+# `make merge PR=<n>` (bin/pr_merge.sh) checks the PR's review rounds and sets
 # DEVKIT_MERGE_VERIFIED=<head> for its one `gh pr merge --match-head-commit <head>` call; the
-# shim makes that the only merge that works from this machine. The scorecard's WIRED reads
-# `gh_shim` from the marker line below in the first gh on PATH.
+# shim makes that the only merge that works from this machine. A local review record counts as a
+# round (owner, 2026-11-02), so only `make review PR=<n>` (bin/review_rules.sh), which runs the
+# reviewer itself, may post one: it sets DEVKIT_REVIEW_VERIFIED=<head> for that one post. The
+# body is read where gh would read it: the arguments (`--body`, `-f body=…`), a file they name
+# (`--body-file F`, `-F F` for pr/issue comment, `-F k=@F` and `--field=k=@F` for api,
+# `--input F`), or stdin for `-`; a source read once (stdin, a pipe) is copied and the copy
+# passed on. A `\u` escape in a `gh api` body is refused too: JSON and GraphQL could spell the
+# marker through one. The scorecard's WIRED reads `gh_shim` from the marker line below in the first gh on PATH.
 #
 # Usage: bin/install_gh_shim.sh [--dir DIR] | --check
 #   --check  exit 0 when the first gh on PATH is the shim, else 1; one line either way (the
@@ -108,10 +116,59 @@ if [ "\${1:-}" = pr ] && [ "\${2:-}" = merge ]; then
     prev=\$a
   done
   if [ -z "\$head_arg" ] || [ "\${DEVKIT_MERGE_VERIFIED:-}" != "\$head_arg" ]; then
-    echo "gh (devkit shim): refused \\\`gh pr merge\\\`: merge with \\\`make merge PR=<n>\\\`, which checks the head's local-gate success (DEVKIT_MERGE_VERIFIED must equal --match-head-commit)" >&2
+    echo "gh (devkit shim): refused \\\`gh pr merge\\\`: merge with \\\`make merge PR=<n>\\\`, which checks the PR's review rounds (DEVKIT_MERGE_VERIFIED must equal --match-head-commit)" >&2
     exit 1
   fi
 fi
+# A review record's marker, wherever gh reads a body from (header). A source that is not a
+# regular file (stdin, a <(…) pipe) can be read once only, so it is copied and the copy passed on.
+record_token='devkit-review-record:v1'
+body=\$*
+args=()
+copies=""
+prev=""
+for a in "\$@"; do
+  f="" val=""
+  case "\$prev" in
+    --body-file|--input) f=\$a ;;
+    -F|--field) val=\$a ;;
+  esac
+  case "\$a" in
+    --body-file=*|--input=*) f=\${a#*=} ;;
+    --field=*) val=\${a#--field=} ;;
+    -F?*) val=\${a#-F} ;;
+  esac
+  # gh api's -F is a field, a file only as key=@path; pr and issue comment's is --body-file.
+  case "\$val" in
+    *=@*) f=\${val#*=@} ;;
+    *=*|'') ;;
+    *) [ "\${1:-}" = api ] || f=\$val ;;
+  esac
+  if [ -n "\$f" ] && [ ! -f "\$f" ] && { [ "\$f" = - ] || [ -e "\$f" ]; }; then
+    copy=\$(mktemp "\${TMPDIR:-/tmp}/gh-shim.XXXXXX") || exit 1
+    [ -n "\$copies" ] || trap 'rm -f \$copies' EXIT
+    copies="\$copies \$copy"
+    if [ "\$f" = - ]; then cat >"\$copy"; exec <"\$copy"; else cat "\$f" >"\$copy"; a=\${a%"\$f"}\$copy; fi
+    f=\$copy
+  fi
+  [ -z "\$f" ] || [ ! -f "\$f" ] || body="\$body \$(cat "\$f")"
+  args+=("\$a")
+  prev=\$a
+done
+if [ -z "\${DEVKIT_REVIEW_VERIFIED:-}" ] || [[ "\$body" != *"\\"sha\\": \\"\$DEVKIT_REVIEW_VERIFIED\\""* ]]; then
+  case "\$body" in
+    *"\$record_token"*)
+      echo "gh (devkit shim): refused: this body carries a local review record's marker; only \\\`make review PR=<n>\\\` posts one, after it runs the reviewer (DEVKIT_REVIEW_VERIFIED must name the record's head)" >&2
+      exit 1 ;;
+  esac
+  # A \\u escape in a JSON or GraphQL body could spell the marker past the match above.
+  if [ "\${1:-}" = api ]; then
+    case "\$body" in
+      *'\\u'*) echo "gh (devkit shim): refused: a \\\\u escape in a gh api body, which could hide a review record's marker; write the character itself" >&2; exit 1 ;;
+    esac
+  fi
+fi
+[ -z "\$copies" ] || { "\$real" \${args[@]+"\${args[@]}"}; exit \$?; }
 exec "\$real" "\$@"
 SHIM
 chmod 755 "$tmp"

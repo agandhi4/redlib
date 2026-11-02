@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# The fleet's one image publisher: move `latest` to origin/main when main is gated, booted and
-# changes the image. Every app's `make publish` calls it; on linux-box the homelab unit
+# The fleet's one image publisher: move `latest` to the newest commit of origin/main that passes
+# every check (check_tree.sh), boots and changes the image. Every app's `make publish` calls it; on linux-box the homelab unit
 # devkit-publish@<repo>.timer runs that every 5 min (homelab hosts/linux-box/README.md).
 # Design: ~/projects/solo/standardization/local-publish-design.md (owner answers 2026-10-27).
 #
-# Usage: devkit/bin/publish.sh <repo-checkout> [--ungated <reason>]
-#   --ungated  the owner's escape for commits no gate passed (a hand merge); the reason goes
-#              into the ship tag's message. Never in the unit.
+# Usage: devkit/bin/publish.sh <repo-checkout> [--ungated <reason> | --recheck <commit>]
+#   --ungated  the owner's escape: publish main without checking it; the reason is logged and
+#              goes into the ship tag's message. Never in the unit.
+#   --recheck  forget <commit>'s red record, then publish as usual: the walk (step 5) checks it
+#              again when it reaches it (a newer green commit makes it moot).
 # Output: one `PUBLISH <stage>: …` line per stage, then exactly one summary line
 #   `PUBLISH <name> <sha7> published|up-to-date|skipped|refused|failed <secs>s` (the summary is
 #   the API; stage lines are for journald). Exit 0 ok or nothing to do, 1 refused or failed
 #   (published with a failed prune too: the image is out, the alert still fires), 2 usage or
-#   environment (not native amd64, a missing tool, no PUBLISH_IMAGE).
+#   environment (not native amd64, a missing tool, no PUBLISH_IMAGE, the docker daemon down, a
+#   check that could not run): the box, never a red commit.
 #
 # In order, and why:
 #   1. Native amd64 only (`uname -m` and the daemon both x86_64), and the build runs with
@@ -29,15 +32,16 @@
 #      publish, M alone is checked.
 #   4. No path in L..M the gate's IMAGE group would run for (devkit_image_group_runs: main's
 #      .dockerignore and plan GATE_IMAGE_* lines): skipped, so a docs merge redeploys nothing.
-#   5. Every first-parent commit in L..M is a merged PR whose head has `local-gate` success on
-#      main = that commit's parent (`on main <sha7>` in its description, as merge_rules.sh reads
-#      it). A Renovate PR whose diff only moves image digests (_dependency_pr.py digest-only)
-#      passes on the smoke alone where main's plan says GATE_RENOVATE_AUTOMERGE=digest (the
-#      documented hole, renovate/automerge-digest). Anything else is refused unless --ungated.
-#   6. One admission from the box's pool (_slot_lib.sh, cost of an image job), taken only now so
-#      a no-op run never queues behind a gate. `make ci-image`, then `make ci-smoke`, in a fresh worktree at M
-#      with CI_IMAGE=<image>:sha-<7> CI_BUILD_VERSION=<7>: never a gate image (its version is
-#      gate-<pr>), and nothing reaches the registry unless it booted reporting <7>.
+#   5. No pre-merge gate exists (devkit decisions 2026-11-02), so main is proven here: walk the
+#      first-parent commits of L..M newest first and run check_tree.sh (every job of that
+#      commit's plan, a flake retried once, ratchets report-only) on each until one passes; that
+#      commit is P, the one published. A red commit is remembered ($STATE/<name>.red/<sha>) and
+#      not rechecked for RED_HOURS (24; then once more, so a red the box caused heals) or until
+#      --recheck; the oldest red one above P (the first bad commit) gets one `main-red` issue,
+#      and every other open one is closed naming P. None green: refused, `latest` stays.
+#   6. `make ci-image`, then `make ci-smoke`, in a fresh worktree at P with
+#      CI_IMAGE=<image>:sha-<7> CI_BUILD_VERSION=<7>: never a check image (its version is
+#      check-<pid>), and nothing reaches the registry unless it booted reporting <7>.
 #   7. Push sha-<7>; re-read `latest` and refuse if it moved since step 3 (a second mover); then
 #      point `latest` at sha-<7> (`imagetools create`: one digest).
 #   8. ship_tag.sh, 9. registry_prune.sh --keep 10. The local sha-<7> tag is removed on exit.
@@ -46,27 +50,25 @@
 set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck source=bin/_gate_env.sh  # gate_plan_literal, fetch_main, gate_env_load
+# shellcheck source=bin/_gate_env.sh  # gate_plan_literal, fetch_main
 . "$HERE/_gate_env.sh"
-# shellcheck source=bin/_load_lib.sh  # devkit_ncpu, which slot_pool_init reads
-. "$HERE/_load_lib.sh"
-# shellcheck source=bin/_slot_lib.sh  # run_lock_acquire, slot_acquire
-. "$HERE/_slot_lib.sh"
-# shellcheck source=bin/_paths_lib.sh  # devkit_gate_areas, devkit_image_group_runs
+# shellcheck source=bin/_issue_lib.sh  # devkit_issue_file, devkit_issue_close
+. "$HERE/_issue_lib.sh"
+# shellcheck source=bin/_paths_lib.sh  # devkit_image_inputs_changed
 . "$HERE/_paths_lib.sh"
-# shellcheck source=bin/_timeout_lib.sh  # devkit_docker_guard
+# shellcheck source=bin/_timeout_lib.sh  # devkit_docker_check, devkit_docker_guard
 . "$HERE/_timeout_lib.sh"
 
 KEEP_IMAGES=10
+RED_HOURS=24
 T0=$SECONDS
-NAME=- SHA7=- ROOT='' UNGATED_REASON='' SLUG='' IMAGE='' M='' L='' LATEST_DIGEST=''
+NAME=- SHA7=- ROOT='' UNGATED_REASON='' RECHECK='' SLUG='' IMAGE='' M='' L='' P='' LATEST_DIGEST=''
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}/devkit-publish
 SCRATCH=''
 BUILD_WT=''
-DIGEST_WHY=''
 BUILT_TAG=''
 
-usage() { echo "usage: $0 <repo-checkout> [--ungated <reason>]" >&2; exit 2; }
+usage() { echo "usage: $0 <repo-checkout> [--ungated <reason> | --recheck <commit>]" >&2; exit 2; }
 finish() { # <outcome> <exit code>
   echo "PUBLISH $NAME $SHA7 $1 $((SECONDS - T0))s"
   exit "$2"
@@ -77,7 +79,6 @@ env_error() { echo "PUBLISH refused: $*" >&2; finish refused 2; }
 
 # shellcheck disable=SC2329  # the EXIT trap's, set before the first stage
 cleanup() {
-  slot_release 2>/dev/null
   # The registry holds the image; a sha-<7> tag left on the daemon would pin its layers forever
   # (docker image prune spares tagged images). The build cache the gate shares is not an image.
   [ -z "$BUILT_TAG" ] || docker image rm -f "$BUILT_TAG" >/dev/null 2>&1
@@ -91,6 +92,9 @@ parse_args() {
       --ungated)
         [ $# -ge 2 ] && [ -n "$2" ] || { echo "publish: --ungated needs a reason" >&2; usage; }
         UNGATED_REASON=$2; shift ;;
+      --recheck)
+        [ $# -ge 2 ] && [ -n "$2" ] || { echo "publish: --recheck needs a commit" >&2; usage; }
+        RECHECK=$2; shift ;;
       -h|--help) usage ;;
       -*) echo "publish: unknown option $1" >&2; usage ;;
       *) [ -z "$ROOT" ] || usage; ROOT=$1 ;;
@@ -98,6 +102,7 @@ parse_args() {
     shift
   done
   [ -n "$ROOT" ] || usage
+  [ -z "$UNGATED_REASON" ] || [ -z "$RECHECK" ] || { echo "publish: --ungated checks nothing to recheck" >&2; usage; }
   ROOT=$(cd "$ROOT" && pwd) || usage
 }
 
@@ -117,6 +122,8 @@ check_host() {
     || env_error "this host is $arch; images publish only from a native amd64 host (linux-box), never the Mac: an arm64 image crash-looped the NAS (instalite-relay, 2026-10-18)"
   SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/publish.XXXXXX") || env_error "mktemp failed"
   docker_as_gh
+  # Down is exit 2 with the summary line; the guard alone would exit 1 without it.
+  devkit_docker_check publish || env_error "$DEVKIT_DOCKER_ERROR"
   devkit_docker_guard publish
   daemon=$(docker info --format '{{.OSType}}/{{.Architecture}}') || env_error "docker info failed (above)"
   [ "$daemon" = linux/x86_64 ] || env_error "the docker daemon is $daemon, not linux/x86_64; an emulated build is never published"
@@ -195,22 +202,13 @@ judge_position() {
     || refuse "latest ${L:0:7} is not behind main $SHA7; latest never moves backward"
 }
 
-# Step 4 (header). The plan is sourced the way the gate sources it, in a subshell with the
-# skeleton's helpers absent: only its declarations matter here.
+# Step 4 (header).
 judge_inputs() {
   local changed n rc=0
   [ -n "$L" ] || return 0
   changed=$(git -C "$ROOT" diff --no-renames --name-only "$L" "$M") || fail "git diff ${L:0:7} $SHA7 failed"
   n=$(grep -c . <<<"$changed")
-  (
-    set +eu
-    # shellcheck disable=SC2034  # read by the plan (gate image names) and _paths_lib.sh
-    PR=publish WT=$SCRATCH/tree CHANGED=$changed GATE_CODE_PATHS=
-    # shellcheck source=/dev/null  # main's plan, as local_gate.sh sources it
-    . "$SCRATCH/tree/scripts/ci/gate_plan.sh"
-    devkit_gate_areas "$CHANGED"
-    devkit_image_group_runs
-  ) || rc=$?
+  devkit_image_inputs_changed "$SCRATCH/tree" "$changed" || rc=$?
   case $rc in
     0) echo "PUBLISH inputs: $n paths changed in ${L:0:7}..$SHA7, image inputs among them" ;;
     1) echo "PUBLISH skipped: none of the $n paths changed in ${L:0:7}..$SHA7 is an image input"; finish skipped 0 ;;
@@ -218,88 +216,105 @@ judge_inputs() {
   esac
 }
 
-# ungated <commit> <why>: refused, or let through with the owner's --ungated reason.
-ungated() {
-  [ -n "$UNGATED_REASON" ] \
-    || refuse "${1:0:7} is ungated: $2. Merge through make merge; only the owner overrides, with publish.sh --ungated '<reason>'"
-  echo "PUBLISH gate: ${1:0:7} UNGATED ($2); --ungated: $UNGATED_REASON"
-}
-
-# renovate_digest_only <pr> <author>: exit 0 when PR <pr> is Renovate's, every commit its, and
-# its diff only moves image digests (_dependency_pr.py digest-only, the one definition of the
-# hole renovate/automerge-digest opens); exit 1 with DIGEST_WHY saying why not. A gh or
-# classifier error fails the run (so never call it inside $(...), where fail cannot exit).
-renovate_digest_only() {
-  local authors files rc=0
-  authors=$(gh api --paginate "repos/$SLUG/pulls/$1/commits" --jq '.[] | .author.login // ""' | paste -sd, -) \
-    || fail "cannot read PR #$1's commits (gh above)"
-  files=$(gh api --paginate "repos/$SLUG/pulls/$1/files" --jq '.[]') || fail "cannot read PR #$1's files (gh above)"
-  DIGEST_WHY=$("$HERE/python.sh" -I "$HERE/_dependency_pr.py" digest-only "$2" "$authors" <<<"$files") || rc=$?
-  [ "$rc" -le 1 ] || fail "_dependency_pr.py digest-only failed on PR #$1 (above)"
-  return "$rc"
-}
-
-# Step 5 for one first-parent commit (header).
-check_commit() { # <commit> <plan GATE_RENOVATE_AUTOMERGE>
-  local c=$1 parent pr num head login status state desc why
-  parent=$(git -C "$ROOT" rev-parse --verify -q "$c^1") || { ungated "$c" "a root commit"; return; }
-  pr=$(gh api "repos/$SLUG/commits/$c/pulls" \
-    --jq ".[] | select(.merge_commit_sha == \"$c\") | [.number, .head.sha, .user.login] | @tsv") \
-    || fail "cannot read the PR of ${c:0:7} (gh above)"
-  [ -n "$pr" ] || { ungated "$c" "no merged PR has it as its merge commit"; return; }
-  IFS=$'\t' read -r num head login <<<"$(head -n 1 <<<"$pr")"
-  status=$(gh api "repos/$SLUG/commits/$head/status" \
-    --jq '.statuses[] | select(.context == "local-gate") | .state + "\t" + .description') \
-    || fail "cannot read PR #$num's local-gate status (gh above)"
-  IFS=$'\t' read -r state desc <<<"$status"
-  if [ "$state" = success ] && [[ "$desc" =~ on\ main\ ${parent:0:7}([^0-9a-f]|$) ]]; then
-    echo "PUBLISH gate: ${c:0:7} PR #$num, local-gate on main ${parent:0:7}"
-    return
+# --recheck <commit> (header): after the fetch, so a commit only origin has resolves too.
+forget_red() {
+  local c
+  [ -n "$RECHECK" ] || return 0
+  c=$(git -C "$ROOT" rev-parse --verify -q "$RECHECK^{commit}") || env_error "--recheck $RECHECK is no commit of $SLUG"
+  if [ -f "$STATE/$NAME.red/$c" ]; then
+    rm -f "$STATE/$NAME.red/$c"
+    echo "PUBLISH recheck: forgot ${c:0:7}'s red record; the walk checks it again"
+  else
+    echo "PUBLISH recheck: ${c:0:7} has no red record"
   fi
-  why="PR #$num head ${head:0:7} has local-gate '${state:-none}' (${desc:-no description}), not success on main ${parent:0:7}"
-  if [ "$2" = digest ]; then
-    if renovate_digest_only "$num" "$login"; then
-      echo "PUBLISH gate: ${c:0:7} PR #$num, Renovate digest-only (GATE_RENOVATE_AUTOMERGE=digest): the smoke gates it"
-      return
-    fi
-    why="$why; not a digest-only Renovate PR: $DIGEST_WHY"
-  fi
-  ungated "$c" "$why"
 }
 
-check_gates() {
-  local renovate c
-  renovate=$(gate_plan_literal "$SCRATCH/tree/scripts/ci/gate_plan.sh" GATE_RENOVATE_AUTOMERGE)
-  if [ -z "$L" ]; then check_commit "$M" "$renovate"; return; fi
-  for c in $(git -C "$ROOT" rev-list --first-parent --reverse "$L..$M"); do
-    check_commit "$c" "$renovate"
+# Step 5 (header). check_commit <commit>: 0 green, 1 red. A red verdict is kept in
+# $STATE/<name>.red/<sha> (check_tree's output, the main-red issue's evidence), so a red commit is
+# checked once per RED_HOURS, not on every timer run; --recheck forgets it sooner. check_tree's
+# exit 2 (the box: no docker, no disk, no network) is this run's exit 2 and records nothing.
+check_commit() {
+  local c=$1 red=$STATE/$NAME.red/$1 out=$SCRATCH/check.out rc=0
+  if [ -f "$red" ] && [ -n "$(find "$red" -mmin +$((RED_HOURS * 60)))" ]; then
+    rm -f "$red"
+    echo "PUBLISH check: ${c:0:7}'s red record is over ${RED_HOURS}h old; checking it again"
+  fi
+  if [ -f "$red" ]; then echo "PUBLISH check: ${c:0:7} red (kept in $red; recheck: publish.sh --recheck ${c:0:7})"; return 1; fi
+  echo "PUBLISH check: ${c:0:7}, every job of its plan (check_tree.sh)"
+  "$HERE/check_tree.sh" "$c" --repo "$ROOT" ${L:+--base "$L"} --log-dir "$STATE/$NAME.check/${c:0:7}" >"$out" 2>&1 7>&- || rc=$?
+  grep -E '^CHECK [^ ]+ (FAIL|REPORTED|PASS on retry)|^CHECK note: (flaky|ratchet)' "$out" | sed 's/^/PUBLISH   /'
+  case $rc in
+    0) echo "PUBLISH check: ${c:0:7} green"; return 0 ;;
+    1) mkdir -p "$STATE/$NAME.red" && cp "$out" "$red"
+       echo "PUBLISH check: ${c:0:7} red ($(sed -n 's/^CHECK VERDICT FAIL .*failed=//p' "$out"))"
+       return 1 ;;
+    2) cat "$out" >&2; env_error "check_tree.sh could not check ${c:0:7} (exit 2: the box, not the commit; above)" ;;
+    *) cat "$out" >&2; fail "check_tree.sh could not check ${c:0:7} (exit $rc, above)" ;;
+  esac
+}
+
+# red_title <commit>: the main-red issue's title, its dedup key (_issue_lib.sh).
+red_title() { echo "main is red at ${1:0:7}: $(sed -n 's/^CHECK VERDICT FAIL .*failed=//p' "$STATE/$NAME.red/$1")"; }
+
+# main_red <first bad commit>: one open main-red issue per first bad commit, with check_tree's
+# failing jobs and log tail.
+main_red() {
+  local c=$1 said
+  said=$(devkit_issue_file "$SLUG" main-red "$(red_title "$c")" "publish.sh on $(hostname) checked ${c:0:7} (\`$(git -C "$ROOT" log -1 --format=%s "$c")\`), the first red commit since the last green one, and published nothing newer than that green one. It is checked again after ${RED_HOURS}h, or now: \`devkit/bin/publish.sh <checkout> --recheck ${c:0:7}\`. This issue closes itself once a commit passes.
+
+\`\`\`
+$(grep -vE '^CHECK (.* PASS|.* SKIPPED|areas:|tree:)' "$STATE/$NAME.red/$c" | tail -n 40)
+\`\`\`") || said="gh failed (above); not filed"
+  echo "PUBLISH main-red: ${c:0:7}: $said"
+}
+
+# heal_main_red [<keep title>]: P passed, so every open main-red issue but the current first bad
+# commit's is over. A gh error is a line, never the outcome.
+heal_main_red() {
+  local said
+  said=$(devkit_issue_close "$SLUG" main-red "publish.sh on $(hostname): ${P:0:7} (\`$(git -C "$ROOT" log -1 --format=%s "$P")\`) passes every check, so main is green there; closing." "${1:-}") \
+    || said="gh failed (above); none closed"
+  echo "PUBLISH main-red: green at ${P:0:7}: $said"
+}
+
+# Step 5 (header): P, the newest first-parent commit in L..M that check_tree passes.
+pick_commit() {
+  local c candidates first_bad=''
+  if [ -n "$UNGATED_REASON" ]; then
+    echo "PUBLISH check: ${M:0:7} UNCHECKED; --ungated: $UNGATED_REASON"
+    P=$M; return
+  fi
+  if [ -z "$L" ]; then candidates=$M; else candidates=$(git -C "$ROOT" rev-list --first-parent "$L..$M"); fi
+  for c in $candidates; do
+    if check_commit "$c"; then P=$c; break; fi
+    first_bad=$c
   done
+  [ -z "$first_bad" ] || main_red "$first_bad"
+  [ -n "$P" ] || refuse "no commit in ${L:+${L:0:7}..}$SHA7 passes its checks (main-red above); latest stays. Only the owner overrides, with publish.sh --ungated '<reason>'"
+  heal_main_red "${first_bad:+$(red_title "$first_bad")}"
+  [ "$P" = "$M" ] || echo "PUBLISH check: publishing ${P:0:7}, the newest green commit; main $SHA7 is red"
+  SHA7=${P:0:7}
 }
 
 in_worktree_make() { # <target> <tag>
   BUILDX_BUILDER=default DOCKER_DEFAULT_PLATFORM=linux/amd64 \
-    make -C "$BUILD_WT" --no-print-directory "$1" CI_IMAGE="$2" CI_BUILD_VERSION="$SHA7"
+    make -C "$BUILD_WT" --no-print-directory "$1" CI_IMAGE="$2" CI_BUILD_VERSION="$SHA7" 7>&-
 }
 
 # Step 6 (header).
 build_image() {
   local tag=$IMAGE:sha-$SHA7 built
-  gate_env_load publish GATE_CAPACITY "$GATE_LOCAL_KEYS|$GATE_REMOTE_KEYS"
-  slot_pool_init publish
-  slot_acquire PUBLISH "$NAME:publish" "$(slot_cost publish ci-image)"
-  export DEVKIT_SLOT_HOLDER=$$
   BUILD_WT=$STATE/$NAME.wt
   git -C "$ROOT" worktree remove --force "$BUILD_WT" >/dev/null 2>&1
   rm -rf "$BUILD_WT"
   git -C "$ROOT" worktree prune
-  git -C "$ROOT" worktree add -q --detach "$BUILD_WT" "$M" || fail "git worktree add at $SHA7 failed (above)"
+  git -C "$ROOT" worktree add -q --detach "$BUILD_WT" "$P" || fail "git worktree add at $SHA7 failed (above)"
   echo "PUBLISH build: make ci-image, then ci-smoke, CI_IMAGE=$tag CI_BUILD_VERSION=$SHA7"
   BUILT_TAG=$tag
   # Two make calls, never one with both goals: under an inherited -j they would run at once and
   # the smoke could boot a previous build of the same tag (Codex, devkit #273).
   in_worktree_make ci-image "$tag" || fail "make ci-image failed at $SHA7 (above); nothing was pushed"
   in_worktree_make ci-smoke "$tag" || fail "make ci-smoke failed at $SHA7 (above); nothing was pushed"
-  slot_release
   built=$(docker image inspect --format '{{.Os}}/{{.Architecture}} {{index .Config.Labels "org.opencontainers.image.version"}}' "$tag") \
     || fail "cannot inspect the built $tag"
   [ "$built" = "linux/amd64 $SHA7" ] || fail "$tag is '$built', not 'linux/amd64 $SHA7'; not pushed"
@@ -321,8 +336,8 @@ push_image() {
 ship_and_prune() {
   local note=() tag
   [ -z "$UNGATED_REASON" ] || note=(--note "Published ungated: $UNGATED_REASON")
-  tag=$("$HERE/ship_tag.sh" "$SLUG" "$M" ${note[@]+"${note[@]}"}) \
-    || fail "latest moved to $SHA7 but the ship tag failed (above); rerun: devkit/bin/ship_tag.sh $SLUG $M"
+  tag=$("$HERE/ship_tag.sh" "$SLUG" "$P" ${note[@]+"${note[@]}"}) \
+    || fail "latest moved to $SHA7 but the ship tag failed (above); rerun: devkit/bin/ship_tag.sh $SLUG $P"
   echo "PUBLISH ship: ${tag#SHIP_TAG=}"
   "$HERE/registry_prune.sh" "$IMAGE" --keep "$KEEP_IMAGES" \
     || { echo "PUBLISH prune: failed (above); $SHA7 is published" >&2; finish published 1; }
@@ -334,11 +349,18 @@ parse_args "$@"
 trap cleanup EXIT
 check_host
 mkdir -p "$STATE" || env_error "cannot create $STATE"
-run_lock_acquire PUBLISH "$STATE/$NAME.lock" "another publish of $NAME"
+# fd 7 is the lock; check_tree's jobs and the builds close it, so a leftover child never holds it.
+exec 7>>"$STATE/$NAME.lock" || env_error "cannot open $STATE/$NAME.lock"
+if ! flock -n 7; then
+  echo "PUBLISH waiting for another publish of $NAME ($(head -n 1 "$STATE/$NAME.lock" 2>/dev/null))"
+  flock 7 || env_error "flock on $STATE/$NAME.lock failed (exit $?)"
+fi
+printf 'pid %s since %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STATE/$NAME.lock"
 read_main
+forget_red
 judge_position
 judge_inputs
-check_gates
+pick_commit
 build_image
 push_image
 ship_and_prune

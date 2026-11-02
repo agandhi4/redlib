@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 # THE fleet path classification, and the default gate plan built on it. Sourced; defines
-# functions and runs nothing. Used by: hook_steps.sh (which steps a commit or push needs) and
-# local_gate.sh (GATE_AREAS before gate_plan, and devkit_default_gate_plan for the repo's plan).
-# One table for both, so a hook and the gate can never disagree about what a path is.
+# functions and runs nothing. Used by: hook_steps.sh (which steps a commit or push needs),
+# publish.sh (devkit_gate_areas, devkit_image_group_runs) and metrics_collect.sh (the plan probe).
+# One table for all, so a hook and the plan can never disagree about what a path is.
 #
 #   devkit_classify_path <path>     print its area: docs|backend|frontend|native|tooling|other
 #   devkit_areas <paths>            DEVKIT_AREAS=" a b " ("" for none), areas in DEVKIT_AREA_ORDER
@@ -29,7 +29,7 @@
 #
 # A devkit/bin file is tooling only when it is listed in DEVKIT_TOOLING_BIN or DEVKIT_IMAGE_BIN;
 # DEVKIT_JOB_BIN names the files a gate job executes beyond ci-quick (other, so they run
-# everything). An unlisted file is other until someone decides: tests/gate_contract.bats fails
+# everything). An unlisted file is other until someone decides: tests/paths_contract.bats fails
 # when a bin/ file is in none of the three lists. devkit/metrics/* (the shared collectors the
 # metrics job runs) is other by the default case, like DEVKIT_JOB_BIN.
 
@@ -46,18 +46,18 @@ declare -F metrics_conf_parse >/dev/null || . "$(dirname "${BASH_SOURCE[0]}")/_m
 # checkout, main's copy), the guards ci-quick runs (devkit-check, docs/toolchain/workflows/
 # release/ci-targets checks, own-commit, ios-check, hooks_check, bats_assert_check and their libs), and fleet
 # operations run from a devkit checkout or after merge (sync, new, monthly audit, the publisher
-# publish.sh with ship_tag.sh and registry_prune.sh, the nightly dependency merge and its vuln_watch.py and budget_watch.sh), machine setup (install_gh_shim.sh, whose --check
+# publish.sh with ship_tag.sh and registry_prune.sh, the nightly dependency merge and its vuln_watch.py), machine setup (install_gh_shim.sh, whose --check
 # the scorecard reads; install_dependency_merge.sh, install_monthly_audit.sh, _launchd_job_lib.sh,
 # and job_launcher.sh, the launchd entry they install), and
 # ios_device.sh, which only a person's `make ios-install` runs against a phone.
-DEVKIT_TOOLING_BIN="local_gate.sh gate.sh remote_gate.sh _paths_lib.sh
+DEVKIT_TOOLING_BIN="gate.sh _paths_lib.sh
   hook_steps.sh quiet_run.sh push_ranges.sh hooks_check.sh
   devkit-check.sh _vendor_paths.sh docs_check.sh toolchain_check.sh ci_targets_check.sh
   _makefile_lib.sh workflows_check.sh _workflows_lib.sh release_check.sh _dockerfile_lib.sh
   _gitattributes_lib.sh _trailer_lib.sh own_commit_check.py _dockerignore.py py_cognitive_lint.py changed_lint.py _changed_files.py
-  devkit-sync.sh devkit-new.sh monthly_audit.sh dead_alert_audit.py ship_tag.sh publish.sh docker_credential_gh.sh registry_prune.sh scorecard.py agent_cost.py secrets_check.sh migration_check.py
-  gate_record.py gate_queue.sh pr_merge.sh merge_rules.sh pr_create.sh _gh_repo_lib.sh codex_review.py _codex_rules.sh _merge_carry.sh decisions_merge.py gate_bite.py _repo_identity.py _renovate.py install_gh_shim.sh
-  dependency_merge.sh _dependency_pr.py vuln_watch.py budget_watch.sh install_dependency_merge.sh install_monthly_audit.sh _launchd_job_lib.sh job_launcher.sh
+  devkit-sync.sh devkit-new.sh monthly_audit.sh dead_alert_audit.py ship_tag.sh publish.sh check_tree.sh _issue_lib.sh docker_credential_gh.sh registry_prune.sh scorecard.py agent_cost.py secrets_check.sh migration_check.py
+  pr_merge.sh merge_rules.sh pr_create.sh _gh_repo_lib.sh codex_review.py review_rules.sh pr_review.sh _merge_carry.sh decisions_merge.py bite.py _repo_identity.py _renovate.py install_gh_shim.sh
+  dependency_merge.sh _dependency_pr.py vuln_watch.py install_dependency_merge.sh install_monthly_audit.sh _launchd_job_lib.sh job_launcher.sh
   ios_check.py ios_device.sh bats_assert_check.py"
 # What the image group exercises (ci-smoke/ci-image boot through them): tooling, but a change
 # to one runs the image group even when nothing else would.
@@ -74,7 +74,7 @@ DEVKIT_IMAGE_BIN="boot_image.sh contract_probe.sh"
 # slot pool, gate.env parser and metrics.conf reader (_metrics_conf_lib.sh) tier_guard.sh
 # sources; npm_tool.sh, jscpd.mjs's pinned jscpd): other. Only
 # a record of the decision; the classification needs no lookup for other.
-# shellcheck disable=SC2034  # read by tests/gate_contract.bats (every bin/ file listed once)
+# shellcheck disable=SC2034  # read by tests/paths_contract.bats (every bin/ file listed once)
 DEVKIT_JOB_BIN="tier_guard.sh throwaway_pg.sh playwright_browsers.sh node_toolchain.sh
   rust_toolchain.sh toolchain_path.sh toolchain_exec.sh toolchain_shell.sh cargo_tool.sh metrics_ratchet.py metrics_collect.sh layer_check.py
   guard_check.py _source_tree.py _ts_lex.py _guard_rules.py _compose.py _timeout_lib.sh _load_lib.sh
@@ -210,9 +210,35 @@ devkit_gate_areas() {
     GATE_HAS_TOOLING GATE_HAS_OTHER GATE_ONLY_TOOLING_OR_DOCS
 }
 
+# ---- the plan contract -----------------------------------------------------------------------
+# What a runner of scripts/ci/gate_plan.sh provides and what the plan declares (bin/check_tree.sh
+# runs it; moved here from the retired local_gate.sh, 2026-11-02). The plan:
+#   GATE_SLUG=owner/repo                   required (a literal line; make merge and publish read it)
+#   GATE_JOB_COSTS="<job>=<units> ..."     optional; a job's admission cost where the
+#                                          _slot_lib.sh table guesses wrong
+#   GATE_DOCKER_GROUPS="IMAGE E2E"         optional (that is the default); the default plan's
+#                                          groups whose jobs need Docker: when one will run, the
+#                                          daemon is checked before the first job
+#                                          (require_docker). A plan whose db tiers run a
+#                                          throwaway Postgres adds BACKEND and CLOCK; "" for none
+#   gate_plan()                            required; called with the worktree ready
+#   gate_cleanup()                         optional; the runner's EXIT trap (containers, images)
+# Available to the plan: $PR $WT $ROOT $CHANGED $HEAD_SHA $MAIN_SHA, the areas above
+# (devkit_gate_areas) and the runner's helpers:
+#   job <name> <make target> [VAR=val...]  run `make -C $WT <target>`
+#   skip <name> <reason>, note <text>      a skipped job, a note line
+#   changed <ERE>                          true if any changed path matches (anchor it)
+#   pr_has_label <label>                   true only if gh confirms the label (fails closed)
+#   require_docker <what needs it>         the daemon answers (a stopped OrbStack is started
+#                                          once, _timeout_lib.sh devkit_docker_ensure), else a
+#                                          failure before any job; the default plan calls it
+#   nothing_to_run <reason>                no job applies
+# Every job must be a Makefile target the CI workflows also call: parity is structural. Change a
+# check in the Makefile, never in the plan.
+#
 # ---- the default plan ------------------------------------------------------------------------
 # A repo's gate_plan() declares its jobs per group and calls devkit_default_gate_plan, which runs
-# inside the skeleton (job, skip, note, changed, nothing_to_run, $CHANGED, GATE_AREAS above):
+# inside the runner (job, skip, note, changed, nothing_to_run, $CHANGED, GATE_AREAS above):
 #
 #   GATE_JOBS_<GROUP>="<name> <make target> [VAR=val...]|<name> <target> ..."   jobs, in order
 #   GATE_AREAS_<GROUP>="<areas>"   which areas run the group; set (even to "") to override the
@@ -367,7 +393,7 @@ _devkit_quick_jobs() {
 }
 
 # The METRICS group (header table). The label is read only when the group will run: a
-# docs-only PR asks gh nothing. pr_has_label is the skeleton's (local_gate.sh); a harness that
+# docs-only PR asks gh nothing. pr_has_label is the plan runner's; a harness that
 # runs a plan without it (tests/new_contract.bats) gets no label, the fail-closed answer.
 _devkit_metrics_group() {
   local jobs=${GATE_JOBS_METRICS:-}
@@ -514,6 +540,23 @@ _devkit_image_areas() {
 # tree's root .dockerignore). Exit 0 yes, 1 no, 2 a bad plan ERE. Used by publish.sh: a merge
 # that changes no image input publishes nothing.
 devkit_image_group_runs() { _devkit_group_runs IMAGE; }
+
+# devkit_image_inputs_changed <tree> <changed paths>: whether <tree>'s plan
+# (scripts/ci/gate_plan.sh, beside the tree's root .dockerignore) would run its IMAGE group for
+# <changed>. The plan is sourced as the gate sources it, in a subshell with the skeleton's helpers
+# absent: only its declarations matter. Exit 0 yes, 1 no, else the plan or a match failed (stderr).
+# Used by publish.sh (a docs merge redeploys nothing) and publisher_deadman.sh (nor is it owed).
+devkit_image_inputs_changed() {
+  # shellcheck disable=SC2034  # read by the plan (gate image names) and devkit_gate_areas
+  local PR=publish WT=$1 CHANGED=$2 GATE_CODE_PATHS=
+  (
+    set +eu
+    # shellcheck source=/dev/null  # a commit's plan, as check_tree.sh sources it
+    . "$WT/scripts/ci/gate_plan.sh"
+    devkit_gate_areas "$CHANGED"
+    devkit_image_group_runs
+  )
+}
 
 _devkit_image_input_changed() {
   local path

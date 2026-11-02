@@ -4,8 +4,8 @@
 # of the caller's PATH. Sourced; defines functions and runs nothing. Used by: python.sh (Makefiles,
 # the metrics merge driver), toolchain_path.sh (puts them first on PATH for the gate's jobs, the
 # hooks and every toolchain_shell.sh recipe, so a consumer's own bare python3 and uv get them too),
-# install_dependency_merge.sh (bakes them into the plist), the gate preflights (local_gate.sh,
-# pr_merge.sh, remote_gate.sh, dependency_merge.sh) and every bin/*.sh that runs a devkit .py
+# install_dependency_merge.sh (bakes them into the plist), the preflights (pr_merge.sh,
+# dependency_merge.sh) and every bin/*.sh that runs a devkit .py
 # (tests/toolchain_resolver.bats fails on a bare python3 there).
 #
 #   devkit_python       0: export DEVKIT_PYTHON (an absolute interpreter >= DEVKIT_PYTHON_FLOOR)

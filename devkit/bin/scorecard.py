@@ -17,8 +17,8 @@
          matched. An unlabelled worsen of a bound is an enforcement failure. "Largest debts"
          lists the keys past the scorecard.conf thresholds (the former T2 bands), with no
          pass/fail.
-  BITE   does enforcement act: gate runs and fails by rule, hook fails, unguarded merges, from
-         gate_bite.measure (the numbers `gate_bite.py --json` prints).
+  BITE   does enforcement act: hook runs and fails by step, from bite.measure (the numbers
+         `bite.py --json` prints).
 
 Why v2 (owner, 2026-10-18): after a day in which four repos halved complexity and clones, no
 letter moved. Binary checks against absolute thresholds were insensitive to work, and tracks
@@ -97,10 +97,10 @@ def _load_sibling(filename: str, module_name: str) -> ModuleType:
 
 
 # metrics_ratchet.py is the one definition of report-only keys, domain directions and the
-# lock-in tolerance; _repo_identity.py names the repo and its state; gate_bite.py is BITE.
+# lock-in tolerance; _repo_identity.py names the repo and its state; bite.py is BITE.
 ratchet_mod = _load_sibling("metrics_ratchet.py", "devkit_metrics_ratchet")
 identity = _load_sibling("_repo_identity.py", "devkit_repo_identity")
-bite_mod = _load_sibling("gate_bite.py", "devkit_gate_bite")
+bite_mod = _load_sibling("bite.py", "devkit_bite")
 compose_mod = _load_sibling("_compose.py", "devkit_compose")  # its compose file names
 renovate_mod = _load_sibling("_renovate.py", "devkit_renovate")  # devkit-check's Renovate audit
 BOUNDS_FILE = "docs/metrics/ratchet.json"
@@ -108,11 +108,10 @@ REPORT_ONLY_FILE = "docs/metrics/report-only.json"
 TREND_FILES = (BOUNDS_FILE, REPORT_ONLY_FILE)
 TREND_WINDOWS = (7, 30)
 BITE_DAYS = 30
-UNGUARDED_SHOWN = 10  # the newest; a backlog of pre-gate merges would bury the table
 SCOPES = ("repo", "machine", "fleet")
 # The owner's, not a repo's or devkit's: listed apart from every n/m (scorecard-design.md §5).
 FLEET_OWNER_ITEMS = (
-    "Actions billing: GitHub Actions is billing-blocked; the local gate is the merge signal",
+    "Actions billing: GitHub Actions is billing-blocked; review rounds are the merge signal",
 )
 
 
@@ -848,7 +847,7 @@ def scorecard_file(path: Path) -> tuple[bool, str]:
     return True, "docs/metrics/scorecard.json"
 
 
-# The two lines as merge_rules.sh reads them (_gate_env.sh gate_plan_literal, gate_plan_text):
+# The two lines as merge_rules.sh read them until 2026-11-02 (gate_plan_literal, quoted form):
 # the first match of each, so a form the merge never reads cannot pass here (#224 review).
 CODEX_REVIEW_LINE = re.compile(r"^GATE_CODEX_REVIEW=([A-Za-z0-9._,/-]*)[ \t]*(?:#.*)?$", re.M)
 CODEX_REASON_LINE = re.compile(r'^GATE_CODEX_REVIEW_REASON="([^"$`\\#]*)"[ \t]*(?:#.*)?$', re.M)
@@ -1496,9 +1495,7 @@ def repo_doc(repo: Repo, conf: dict[str, float], state_home: Path, now: datetime
         "trend_keys": len(longest.keys),
         "trend_moved": sorted(moved),
         "debts": largest_debts(repo.metrics, conf),
-        "bite": bite_mod.as_json(
-            bite.repo, bite.days, bite.since, bite.gates, bite.hooks, bite.merges
-        ),
+        "bite": bite_mod.as_json(bite.repo, bite.days, bite.since, bite.hooks),
     }
 
 
@@ -1508,23 +1505,14 @@ def trend_part(doc: dict, days: int) -> str:
 
 
 def bite_part(bite: dict) -> str:
-    gates = bite["gates"]
-    merges = bite["merges"]
-    g = (
-        "gates unmeasured"
-        if "unmeasured" in gates
-        else f"gates {gates['runs']}, fails {gates['fail']}"
-    )
-    m = (
-        "unguarded merges unmeasured"
-        if "unmeasured" in merges
-        else f"unguarded merges {merges['unguarded']}"
-    )
-    return f"{g}, {m}"
+    hooks = bite["hooks"]
+    if "unmeasured" in hooks:
+        return "hooks unmeasured"
+    return f"hooks {hooks['runs']}, fails {hooks['fail']}"
 
 
 def summary_line(doc: dict) -> str:
-    """`wired n/m · 7d: a↓ b= c↑(l labelled) · 30d: … · gates g, fails f, unguarded merges u`"""
+    """`wired n/m · 7d: a↓ b= c↑(l labelled) · 30d: … · hooks h, fails f`"""
     w = doc["wired"]
     parts = [
         f"wired {w['wired']}/{w['measured']}",
@@ -1586,36 +1574,11 @@ def repo_lines(doc: dict) -> list[str]:
     ] or ["- none"]
     b = doc["bite"]
     lines += ["", f"BITE ({b['days']} d since {b['since']})"]
-    bite_rows: list[tuple[str, str, str]] = []
-    for section, part, key in (
-        ("rule", "gates", "rules"),
-        ("job", "gates", "jobs"),
-        ("hook-step", "hooks", "steps"),
-    ):
-        bite_rows += [(section, k, str(n)) for k, n in b[part].get(key, {}).items()]
-    unguarded = b["merges"].get("unguarded_prs", [])
-    bite_rows += [
-        ("unguarded", f"#{u['pr']}", f"{str(u['head'])[:12]} merged {u['merged_at']}")
-        for u in unguarded[-UNGUARDED_SHOWN:]
-    ]
-    if len(unguarded) > UNGUARDED_SHOWN:
-        bite_rows.append(
-            (
-                "unguarded",
-                "older",
-                f"{len(unguarded) - UNGUARDED_SHOWN} more (--json lists every one)",
-            )
-        )
-    bite_rows += [
-        ("unmeasured", part, b[part]["unmeasured"])
-        for part in ("gates", "hooks", "merges")
-        if "unmeasured" in b[part]
-    ]
-    lines += (
-        _table(("section", "key", "count"), bite_rows)
-        if bite_rows
-        else ["- no failures, no unguarded merges"]
-    )
+    hooks = b["hooks"]
+    bite_rows = [("hook-step", k, str(n)) for k, n in hooks.get("steps", {}).items()]
+    if "unmeasured" in hooks:
+        bite_rows.append(("unmeasured", "hooks", hooks["unmeasured"]))
+    lines += _table(("section", "key", "count"), bite_rows) if bite_rows else ["- no failures"]
     return lines
 
 
@@ -1658,9 +1621,6 @@ def fleet_markdown(docs: list[dict]) -> str:
         for d in docs
         if d["debts"]
     ] or ["- none"]
-    lines += ["", "## BITE: unguarded merges (30 d)", ""]
-    ung = [(d["repo"], u) for d in docs for u in d["bite"]["merges"].get("unguarded_prs", [])]
-    lines += [f"- {r} #{u['pr']} merged {u['merged_at']}" for r, u in ung] or ["- none"]
     lines += ["", "## Devkit backlog (UNMEASURED, by repos unblocked)", ""]
     backlog: dict[str, set[str]] = {}
     for d in docs:
