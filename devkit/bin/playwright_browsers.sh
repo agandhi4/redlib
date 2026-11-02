@@ -9,7 +9,7 @@
 #   --project-dir   the package dir holding the lockfile; default: cwd
 #   --with-deps     also install system packages; Linux only, ignored with a warning on macOS
 #                   so CI steps and the Mac can pass the same flags
-#   Exit 0 ok, 1 install, version or Node provisioning failure, 2 usage or no lockfile.
+#   Exit 0 ok, 1 install, version or Node/pnpm provisioning failure, 2 usage or no lockfile.
 #
 # The runner follows the lockfile (pnpm-lock.yaml, package-lock.json, yarn.lock, bun.lock[b]), so
 # the playwright that runs is the one the project pins. PLAYWRIGHT_RUNNER overrides it with a
@@ -19,6 +19,8 @@
 # cache of its own and never inspects Playwright's.
 # Node comes from the nearest .nvmrc between the project dir and the git toplevel, via
 # node_toolchain.sh, the same way hook_steps.sh provisions it; without one, PATH's node is used.
+# pnpm comes from the toplevel's packageManager (package_manager_toolchain.sh), never corepack:
+# Node 25 and later ship none.
 set -euo pipefail
 
 usage() { echo "usage: $0 [--with-deps] [--project-dir <dir>] [browser...]" >&2; exit 2; }
@@ -45,7 +47,7 @@ PROJECT_DIR=$(cd "$PROJECT_DIR" && pwd -P)
 if [ -n "${PLAYWRIGHT_RUNNER:-}" ]; then
   read -r -a RUNNER <<<"$PLAYWRIGHT_RUNNER"
 elif [ -f "$PROJECT_DIR/pnpm-lock.yaml" ]; then
-  RUNNER=(corepack pnpm exec playwright)
+  RUNNER=(pnpm exec playwright)
 elif [ -f "$PROJECT_DIR/package-lock.json" ]; then
   RUNNER=(npx --no-install playwright)
 elif [ -f "$PROJECT_DIR/yarn.lock" ]; then
@@ -75,7 +77,15 @@ if [ -n "$NODE_ROOT" ]; then
   fi
   [ -n "$NODE_BIN" ] && export PATH="$NODE_BIN:$PATH"
 fi
-export COREPACK_ENABLE_DOWNLOAD_PROMPT=0   # a corepack prompt would hang an unattended run
+# The pnpm the repo's package.json packageManager pins, as toolchain_path.sh provides it; only
+# for the pnpm runner, so a yarn, npx or PLAYWRIGHT_RUNNER project never depends on it.
+if [ "${RUNNER[0]}" = pnpm ]; then
+  if ! PM_BIN=$("$(dirname "${BASH_SOURCE[0]}")/package_manager_toolchain.sh" "$TOP"); then
+    echo "playwright_browsers: cannot provide the pnpm a package.json packageManager declares in $TOP" >&2
+    exit 1
+  fi
+  [ -z "$PM_BIN" ] || export PATH="$PM_BIN:$PATH"
+fi
 
 INSTALL_FLAGS=()
 if [ "$WITH_DEPS" = 1 ]; then

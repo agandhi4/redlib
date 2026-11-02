@@ -5,11 +5,16 @@
 #
 # Usage: bin/publisher_deadman.sh [--repos a,b] [--hours <n>]
 #   --repos  repos.json keys (default: all); a repo whose main plan has no PUBLISH_IMAGE is skipped
-#   --hours  how long an unpublished image input may wait (default 6)
+#   --hours  how long an unpublished image input may wait (default 6), past the repo's check
+#            window: publish.sh starts a check at most once per MAIN_CHECK_MINUTES (default 180,
+#            bin/_cadence_lib.sh), so a repo waits up to that long by design and is allowed
+#            --hours plus its window, in whole hours rounded up (9 by default: a 3 h wait and a
+#            check's length never page)
 # A repo is stalled when main has commits past its newest sha-* image, the newest of them is
-# older than --hours (the newest, not the oldest: docs merges the publisher skips pile up past
-# the image, and a fresh code merge after them is no stall yet), they change an image input (devkit_image_inputs_changed: the publisher's
-# own test, so a docs merge is owed nothing); an open main-red issue is named beside it, never a
+# older than that (the newest, not the oldest: docs and tests merges the publisher checks but
+# never builds pile up past the image, and a fresh code merge after them is no stall yet), they
+# change an image input (devkit_image_inputs_changed: the publisher's own test, so a run that
+# ended `checked` is alive and a docs merge is owed nothing); an open main-red issue is named beside it, never a
 # reason to stay quiet. One `publisher stalled` issue (label publisher-stalled) in
 # <owner>/devkit names every stalled repo: filed, or its body updated; closed with a comment once
 # a run finds none and could read every repo.
@@ -25,6 +30,10 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
 . "$HERE/_issue_lib.sh"
 # shellcheck source=bin/_paths_lib.sh  # devkit_image_inputs_changed
 . "$HERE/_paths_lib.sh"
+# shellcheck source=bin/_load_lib.sh  # devkit_epoch, which _cadence_lib.sh needs sourced
+. "$HERE/_load_lib.sh"
+# shellcheck source=bin/_cadence_lib.sh  # cadence_minutes
+. "$HERE/_cadence_lib.sh"
 
 readonly TITLE='publisher stalled'
 usage() { echo "usage: publisher_deadman.sh [--repos a,b] [--hours <n>]" >&2; exit 2; }
@@ -53,7 +62,7 @@ raw_file() {
 
 # judge <repo>: one DEADMAN line; appends to STALLED; 1 on a read error.
 judge() {
-  local repo=$1 slug=$OWNER/$1 tree=$SCRATCH/$1 image owner pkg built age files rc=0 reds plan_slug
+  local repo=$1 slug=$OWNER/$1 tree=$SCRATCH/$1 image owner pkg built age files rc=0 reds plan_slug hours
   mkdir -p "$tree/scripts/ci"
   raw_file "$slug" scripts/ci/gate_plan.sh "$tree/scripts/ci/gate_plan.sh" || rc=$?
   case $rc in
@@ -63,6 +72,9 @@ judge() {
   esac
   image=$(gate_plan_literal "$tree/scripts/ci/gate_plan.sh" PUBLISH_IMAGE)
   [ -n "$image" ] || { echo "DEADMAN $repo skipped (publishes no image)"; return 0; }
+  cadence_minutes "$tree/scripts/ci/gate_plan.sh" \
+    || { echo "DEADMAN $repo error (${CADENCE_ERROR#"$tree/"})"; return 1; }
+  hours=$(( HOURS + (CADENCE_MINUTES + 59) / 60 ))
   # publish.sh files main-red in the plan's slug.
   plan_slug=$(gate_plan_literal "$tree/scripts/ci/gate_plan.sh" GATE_SLUG)
   raw_file "$slug" .dockerignore "$tree/.dockerignore" || rc=$?
@@ -79,7 +91,7 @@ judge() {
     || { echo "DEADMAN $repo error (comparing ${built#sha-}...main; gh above)"; return 1; }
   age=$(head -n 1 <<<"$files")
   if [ "$age" -lt 0 ]; then echo "DEADMAN $repo ok (main is $built)"; return 0; fi
-  if [ "$age" -lt "$HOURS" ]; then echo "DEADMAN $repo ok (the newest commit past $built is ${age}h old)"; return 0; fi
+  if [ "$age" -lt "$hours" ]; then echo "DEADMAN $repo ok (the newest commit past $built is ${age}h old)"; return 0; fi
   rc=0
   devkit_image_inputs_changed "$tree" "$(tail -n +2 <<<"$files")" >/dev/null || rc=$?
   case $rc in
@@ -99,7 +111,7 @@ judge() {
 
 for repo in $REPOS; do judge "$repo" || ERRORS=$((ERRORS + 1)); done
 if [ -n "$STALLED" ]; then
-  said=$(devkit_issue_upsert "$OWNER/devkit" publisher-stalled "$TITLE" "publisher_deadman.sh on $(hostname), $(date -u +%Y-%m-%dT%H:%MZ): nothing was published for over ${HOURS}h while these repos had image inputs to publish. The publisher (devkit-publish@<repo>.timer on linux-box, bin/publish.sh) is down, stopped or stuck: check \`systemctl list-timers 'devkit-publish@*'\` and \`journalctl -u 'devkit-publish@*'\` there.
+  said=$(devkit_issue_upsert "$OWNER/devkit" publisher-stalled "$TITLE" "publisher_deadman.sh on $(hostname), $(date -u +%Y-%m-%dT%H:%MZ): nothing was published for over ${HOURS}h past their check windows while these repos had image inputs to publish. The publisher (devkit-publish@<repo>.timer on linux-box, bin/publish.sh) is down, stopped or stuck: check \`systemctl list-timers 'devkit-publish@*'\` and \`journalctl -u 'devkit-publish@*'\` there.
 
 $STALLED
 This issue closes itself once every repo is published or owed nothing.") || said="gh failed (above); not filed"

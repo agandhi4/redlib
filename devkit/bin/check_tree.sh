@@ -31,10 +31,15 @@
 #     unset here). A hung job does: each run of a job is stopped after CHECK_JOB_SECONDS (default
 #     1800, whole seconds) and is a FAIL naming it, not retried (devkit decisions 2026-11-02).
 #   - The box, not the commit: a job failing its run and its retry with a cause in ENV_CAUSES
-#     (no disk, no network, no docker daemon) stops the check with exit 2 and no verdict, as a
+#     (no disk, no network, no docker daemon, a build script's host tool such as cmake) stops the check with exit 2 and no verdict, as a
 #     plan's require_docker does before its first Docker job, so publish.sh never calls it red.
 #   Issues go to the plan's GATE_SLUG through _issue_lib.sh (deduplicated by title); a gh error
 #   is a `CHECK note:` and never changes the verdict.
+# Capacity: each job (its run and its retry) is first admitted to the box's pool (bin/_slot_lib.sh,
+# GATE_CAPACITY from the environment or gate.env) for its cost, holder `<repo>:<job>`, so two
+# repos' checks, or a check beside a lane's tiers, queue instead of overlapping; a tier inside
+# the job runs on its units. Waiting prints `CHECK waiting for capacity: …`. Inside a holder
+# (DEVKIT_SLOT_HOLDER live) it asks for nothing.
 #
 # Output contract (an API: publish.sh keeps it as the main-red issue's evidence):
 #   CHECK <job> PASS (<n>s)
@@ -68,6 +73,8 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
 . "$HERE/_gate_env.sh"
 # shellcheck source=bin/_issue_lib.sh  # devkit_issue_file
 . "$HERE/_issue_lib.sh"
+# shellcheck source=bin/_slot_lib.sh  # slot_pool_init, slot_cost, slot_acquire, slot_release
+. "$HERE/_slot_lib.sh"
 
 usage() { echo "usage: $0 <sha> [--repo <checkout>] [--base <commit>] [--log-dir <dir>]"; }
 die() { echo "check_tree: $*" >&2; exit 2; }
@@ -162,8 +169,12 @@ run_make() { devkit_with_timeout "$JOB_SECS" _make_once "$@"; }
 # The one list of failures that are the box's, not the commit's: "<cause>: <ERE>" per line,
 # matched against the retry's log. Gotcha: a test that asserts one of these messages and fails
 # reads as the box too; the check then stays exit 2 run after run, which the publisher's
-# dead-man (publisher_deadman.sh) reports within hours, so keep each ERE an OS or daemon message.
+# dead-man (publisher_deadman.sh) reports within hours, so keep each ERE an OS or daemon message,
+# or a build script's own report that the box lacks a host program or library (cmake-rs, cc-rs,
+# clang-sys, pkg-config-rs): never a shell's `command not found`, which a recipe's typo also prints.
+# shellcheck disable=SC2016  # the backticks are cmake-rs's literal text, not a substitution
 readonly ENV_CAUSES='disk full: No space left on device|Disk quota exceeded
+a host build tool missing: [Ii]s `[^`]+` (not )?installed\?|[Ff]ailed to find tool|Unable to find libclang|The pkg-config command could not be found
 docker unreachable: Cannot connect to the Docker daemon|error during connect:|docker daemon is not reachable|docker daemon did not answer
 no network: Could not resolve host|Temporary failure in name resolution|Network is unreachable|getaddrinfo (ENOTFOUND|EAI_AGAIN)'
 env_cause() { # <log>: prints the cause and exits 0 when the log shows one
@@ -187,10 +198,15 @@ job() { # <name> <make target> [VAR=val...]
   shift
   [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]] && [ "$name" != total ] \
     || bad_plan "job name '$name' must match [A-Za-z0-9_-]+ and not be 'total' (it becomes the key gate.<name>.seconds)"
+  admit "$name" "$1"
   t0=$(devkit_now)
   run_make "$log" "$@" || rc=$?
   if [ "$rc" = 0 ]; then
     echo "CHECK $name PASS ($(($(devkit_now) - t0))s)"
+  elif [ "$rc" = 124 ]; then
+    # Before REPORT_ONLY: a hung ratchet is a hang, not a metric (devkit #355). Not retried: a
+    # second hang would hold the publisher another JOB_SECS.
+    job_failed "$name" "$t0" "$log" "timed out after ${JOB_SECS}s; "
   elif case " $REPORT_ONLY " in *" $name "*) true ;; *) false ;; esac; then
     # A ratchet is not retried: a metric does not flake, and the issue is the whole outcome.
     echo "CHECK $name REPORTED ($(($(devkit_now) - t0))s; log: $log)"
@@ -199,9 +215,6 @@ job() { # <name> <make target> [VAR=val...]
 \`\`\`
 $(tail -n 30 "$log")
 \`\`\`"
-  elif [ "$rc" = 124 ]; then
-    # Not retried: a second hang would hold the publisher another JOB_SECS.
-    job_failed "$name" "$t0" "$log" "timed out after ${JOB_SECS}s; "
   else
     mv "$log" "$LOGDIR/$name.first.log"
     rc=0
@@ -222,8 +235,16 @@ $(tail -n 30 "$LOGDIR/$name.first.log")
       job_failed "$name" "$t0" "$log" "$([ "$rc" != 124 ] || echo "retry timed out after ${JOB_SECS}s; ")"
     fi
   fi
+  slot_release
   JOB_SECONDS=$(grep -v "^$name " <<<"$JOB_SECONDS"; echo "$name $(($(devkit_now) - t0))")
   write_gate_metrics
+}
+# admit <name> <target>: the job's units, before its clock starts (header, Capacity).
+admit() {
+  [ "$IN_HOLDER" = 0 ] || return 0
+  slot_acquire CHECK "${SLUG#*/}:$1" "$(slot_cost "$1" "$2")" || exit 2
+  # The holder for a tier the job runs (it asks for nothing again).
+  export DEVKIT_SLOT_HOLDER=$$
 }
 job_failed() { # <name> <t0> <log> <why prefix>
   echo "CHECK $1 FAIL ($4$(($(devkit_now) - $2))s; log: $3)"
@@ -272,6 +293,7 @@ declare -F gate_cleanup >/dev/null || gate_cleanup() { :; }
 # The ratchet's job names, before the default plan appends METRICS_REBASELINE (never, here).
 REPORT_ONLY=$(tr '|' '\n' <<<"${GATE_JOBS_METRICS:-}" | awk 'NF { print $1 }' | paste -sd ' ' -)
 cleanup() {
+  slot_release
   # Bounded: a hung docker daemon made a plan's `docker rm -fv` block an EXIT trap for 12+ min
   # (2026-10-17).
   devkit_with_timeout "$CLEANUP_SECS" gate_cleanup >/dev/null 2>&1
@@ -281,6 +303,11 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
+# After the plan is sourced: slot_cost reads its GATE_JOB_COSTS. Only GATE_CAPACITY is applied.
+gate_env_load check_tree GATE_CAPACITY "$GATE_LOCAL_KEYS|$GATE_REMOTE_KEYS"
+slot_pool_init check_tree
+IN_HOLDER=0
+! slot_held_above || IN_HOLDER=1
 devkit_gate_areas "$CHANGED"
 echo "CHECK areas: ${GATE_AREAS:-none}"
 echo "CHECK tree: ${HEAD_SHA:0:12} of ${SLUG:-$REPO}; logs: $LOGDIR"
