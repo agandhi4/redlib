@@ -1,17 +1,17 @@
-# The repo's check API: the PR gate (scripts/ci/gate_plan.sh), the git hooks and linux-box's
+# The repo's check API: check_tree's plan (scripts/ci/gate_plan.sh), the git hooks and linux-box's
 # publisher (`make publish`) call these targets and nothing else, so a check changes here, once.
 #
 # Rust comes from rust-toolchain.toml. make's SHELL puts the same pinned toolchain first on PATH
-# for every recipe line and $(shell …) that the gate and the hooks use, so a hand-run
+# for every recipe line and $(shell …) that check_tree and the hooks use, so a hand-run
 # `make ci-quick` works on a machine with no Rust and no recipe can be the one left out
-# (devkit decisions 2026-10-19 "Lanes own their Postgres port; recipes run on the pins"). Under the
-# gate or a hook the PATH is already built and the line skips it.
+# (devkit decisions 2026-10-19 "Lanes own their Postgres port; recipes run on the pins"). Under
+# check_tree or a hook the PATH is already built and the line skips it.
 SHELL := devkit/bin/toolchain_shell.sh
 CARGO ?= cargo
 CI_IMAGE ?= redlib:ci
 # The image's APP_VERSION, and what ci-smoke asserts the binary and the OCI label report: the bare
-# 7-char sha, as publish.sh passes it; the gate passes gate-<pr> (scripts/ci/gate_plan.sh) because
-# it builds a merge commit that never ships.
+# 7-char sha, as publish.sh passes it; check_tree passes gate-$PR (scripts/ci/gate_plan.sh) because
+# its check build is never the one that ships.
 CI_BUILD_VERSION ?= $(shell git rev-parse --short=7 HEAD)
 
 .DEFAULT_GOAL := help
@@ -20,13 +20,13 @@ CI_BUILD_VERSION ?= $(shell git rev-parse --short=7 HEAD)
 help: ## list targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
 
-# The union recipe: the gate runs ci-quick; the two git hooks run its parts
+# The union recipe: check_tree runs ci-quick; the two git hooks run its parts
 # (scripts/ci/hooks.conf, devkit README "Git hooks"): pre-commit the seconds-long ci-guards,
 # secrets-staged and ci-lint, pre-push ci-typecheck and ci-unit. A new quick check goes into a
-# part, and a new part into both ci-quick and one hook, or the hooks stop covering the gate.
+# part, and a new part into both ci-quick and one hook, or the hooks stop covering the plan.
 # Guards first: an in-repo devkit/ edit, a disagreeing Rust pin or an unpinned action fails
 # before anything compiles.
-ci-quick: ci-guards secrets-check ci-lint ci-typecheck ## guards, secrets, fmt and clippy (the gate's quick job)
+ci-quick: ci-guards secrets-check ci-lint ci-typecheck ## guards, secrets, fmt and clippy (the plan's quick job)
 
 ci-guards: devkit-check toolchain-check workflows-check docs-check release-check ## pre-commit: the repo guards, no compile
 
@@ -44,7 +44,7 @@ ci-typecheck: ## pre-push: clippy -D warnings, cognitive complexity 15
 # (Reddit rate-limits and blocks runner IPs, so they cannot gate a PR). Run those with test-live.
 #
 # Under devkit's tier guard (docs/decisions.md 2026-10-13, devkit 4f5f282). The budget is the
-# whole command's wall time, compile included, so a cold target/ (the gate's fresh worktree)
+# whole command's wall time, compile included, so a cold target/ (check_tree's fresh worktree)
 # counts. The floor is the tests that RAN (ignored ones excluded) and moves only in the PR that
 # removes tests, saying why in docs/decisions.md. Both feed build/metrics/tier-unit.json.
 UNIT_BUDGET_SECONDS ?= 60
@@ -66,9 +66,9 @@ ci-unit: ## cargo test with line coverage, offline (live-Reddit tests are #[igno
 test-live: ## the #[ignore]d tests that call live Reddit (needs outbound network)
 	$(CARGO) test --locked -- --ignored --test-threads=1
 
-# Build only (devkit-check's publish contract): the gate runs ci-image then ci-smoke as two jobs,
+# Build only (devkit-check's publish contract): the plan runs ci-image then ci-smoke as two jobs,
 # and devkit/bin/publish.sh runs both on linux-box before it pushes. Builds for the host's
-# platform (the Dockerfile picks its builder by TARGETARCH), so the gate on the arm64 Mac compiles
+# platform (the Dockerfile picks its builder by TARGETARCH), so a build on the arm64 Mac compiles
 # natively instead of under QEMU (issue #7), and linux-box builds the amd64 image it ships.
 ci-image: ## build Dockerfile as $(CI_IMAGE) with APP_VERSION=$(CI_BUILD_VERSION)
 	DOCKER_CALL_TIMEOUT=900 devkit/bin/docker_bounded.sh build --build-arg APP_VERSION="$(CI_BUILD_VERSION)" -t $(CI_IMAGE) .
@@ -79,9 +79,9 @@ SMOKE_BUDGET_SECONDS ?= 30
 ci-smoke: ## run $(CI_IMAGE)'s binary offline; it and the OCI version label must report $(CI_BUILD_VERSION)
 	devkit/bin/tier_guard.sh smoke --budget $(SMOKE_BUDGET_SECONDS) -- scripts/ci/smoke_image.sh "$(CI_IMAGE)" "$(CI_BUILD_VERSION)"
 
-# Run by homelab's devkit-publish@redlib.timer on linux-box every 5 min, never by hand on a Mac
+# Run by homelab's devkit-publish@redlib.timer on linux-box (main checked at most once per 3 h), never by hand on a Mac
 # (it refuses anything but native amd64). devkit README "Publish".
-publish: ## move ghcr.io/agandhi4/redlib:latest to a gated main (linux-box only)
+publish: ## move ghcr.io/agandhi4/redlib:latest to a main check_tree proved green (linux-box only)
 	devkit/bin/publish.sh .
 
 # devkit/bin/metrics_collect.sh runs the collectors in scripts/ci/metrics.conf and compares the
@@ -89,7 +89,7 @@ publish: ## move ghcr.io/agandhi4/redlib:latest to a gated main (linux-box only)
 # ratchet"). The collectors are python3 and the pinned toolchain's clippy, which
 # metrics_collect.sh puts on PATH itself, plus jscpd: devkit's npm pin on the .nvmrc node,
 # installed on first use (devkit/bin/npm_tool.sh), never in the image.
-ci-metrics: ## the metrics ratchet: collect, then check against docs/metrics/ratchet.json (gate's last job)
+ci-metrics: ## the metrics ratchet: collect, then check against docs/metrics/ratchet.json (the plan's last job)
 	devkit/bin/metrics_collect.sh check
 metrics-snapshot: ## collect the metrics into build/metrics.json, no check
 	devkit/bin/metrics_collect.sh snapshot
@@ -100,9 +100,8 @@ metrics-tighten: ## collect, then lock the better numbers into docs/metrics/ratc
 metrics-rebaseline: ## collect, then overwrite every bound, or only KEYS=a,b (label the PR metrics-rebaseline)
 	devkit/bin/metrics_collect.sh rebaseline
 
-gate: ## make gate PR=<n> [GATE_ARGS=--no-post]
-	@test -n "$(PR)" || { echo "usage: make gate PR=<number> [GATE_ARGS=--no-post]" >&2; exit 2; }
-	devkit/bin/gate.sh "$(PR)" $(GATE_ARGS)
+gate: ## retired (devkit 2026-11-02): run make review PR=<n>, then make merge PR=<n>
+	@devkit/bin/gate.sh "$(PR)"
 
 pr: ## make pr BODY_FILE=<file> [TITLE=…] [DRAFT=1]; push, open the PR on origin (never a fork's parent)
 	devkit/bin/pr_create.sh
@@ -145,7 +144,7 @@ docs-check: ## part of ci-quick: AGENTS.md real, CLAUDE.md symlink, decisions.md
 secrets-check: ## part of ci-quick: no committed credentials (fixtures in scripts/ci/secrets_allow.txt)
 	devkit/bin/secrets_check.sh .
 
-secrets-staged: ## pre-commit's half of secrets-check: the staged paths only (the gate scans the tree)
+secrets-staged: ## pre-commit's half of secrets-check: the staged paths only (check_tree scans the tree)
 	devkit/bin/secrets_check.sh --staged .
 
 release-check: ## part of ci-quick: APP_VERSION baked into the image (ARG/ENV/LABEL), never set by compose

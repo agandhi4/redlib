@@ -1,5 +1,5 @@
 # shellcheck shell=bash disable=SC2034  # GATE_* are read by the skeleton that sources this
-# redlib's gate plan, sourced by devkit/bin/local_gate.sh (contract in its header). Jobs are
+# redlib's plan, sourced by devkit/bin/check_tree.sh when it proves main at deploy. Jobs are
 # declared per group; devkit_default_gate_plan (devkit/bin/_paths_lib.sh) picks which run from
 # the changed paths' areas, the same table the hooks use. Every job is a `make` target (Makefile).
 #
@@ -15,9 +15,8 @@
 # Askama), so they are code like src/.
 # The smoke boots no listener: that opens only after OAuth bootstrap against Reddit (AGENTS.md
 # "Startup order"). ci-smoke runs the image's binary offline and asserts it and the OCI label
-# report gate-<pr> (scripts/ci/smoke_image.sh); devkit/bin/publish.sh runs the same two targets before a push.
+# report gate-$PR (scripts/ci/smoke_image.sh); devkit/bin/publish.sh runs the same two targets before a push.
 GATE_SLUG=agandhi4/redlib
-GATE_STATE_NAME=redlib-gate
 
 IMAGE="redlib:gate-$PR"
 
@@ -25,7 +24,7 @@ GATE_JOBS_QUICK="quick ci-quick"
 GATE_JOBS_DOCS="docs docs-check"
 GATE_JOBS_BACKEND="unit ci-unit"
 # devkit runs it last and passes METRICS_REBASELINE=1 when the PR carries the
-# metrics-rebaseline label. vuln-app queries OSV, so the gate host needs outbound network.
+# metrics-rebaseline label. vuln-app queries OSV, so the checking host needs outbound network.
 GATE_JOBS_METRICS="metrics ci-metrics"
 GATE_JOBS_IMAGE="image ci-image CI_IMAGE=$IMAGE CI_BUILD_VERSION=gate-$PR|smoke ci-smoke CI_IMAGE=$IMAGE CI_BUILD_VERSION=gate-$PR"
 # What devkit/bin/publish.sh pushes to (read as this literal line, never sourced).
