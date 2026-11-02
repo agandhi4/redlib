@@ -33,7 +33,10 @@
 # per file to detect binaries and took 28 s on closet, which pushed the check out of pre-commit.
 # `--staged` scans only the paths staged for commit (added, copied, modified, renamed), for a
 # pre-commit hook that wants the check's cost to follow the change; the gate's full scan stays
-# authoritative. The working-tree content is what is read, as every hook step reads it.
+# authoritative. The INDEX's content is what is read (devkit #74), the allow file's too: a secret
+# staged and then removed from the working copy, or a staged file deleted from it, is still what
+# the commit holds, and reading the working tree let it through. The staged blobs are written to a
+# scratch tree (git checkout-index) and scanned there, so every rule below reads them unchanged.
 # Usage: devkit/bin/secrets_check.sh [--staged] [repo-root]    (part of ci-quick; scorecard T11 sec.secrets)
 set -uo pipefail
 STAGED=0
@@ -70,15 +73,25 @@ PLACEHOLDER='example|placeholder|changeme|change-me|dummy|test|fake|xxx|<|>|\$\{
 
 # The scan list, built once: tracked (or staged), present, not skipped, not allowed. Pure bash per
 # file; binaries are left to grep -I. Then one grep per rule over the whole list.
+LIST=$(mktemp) || exit 2
+SNAP='' STAGED_LIST=''
+trap 'rm -f "$LIST" "$STAGED_LIST"; [ -z "$SNAP" ] || rm -rf "$SNAP"' EXIT
+if [ "$STAGED" = 1 ]; then
+  # NUL-separated end to end: a name git would quote (non-ASCII) is passed as it is. -f: the
+  # allow file may be listed twice, staged and tracked.
+  STAGED_LIST=$(mktemp) && SNAP=$(mktemp -d) || exit 2
+  git diff --cached --name-only --diff-filter=ACMR -z >"$STAGED_LIST" || exit 2
+  { cat "$STAGED_LIST"; git ls-files -z -- "$ALLOW"; } | git checkout-index -f --prefix="$SNAP/" -z --stdin \
+    || { echo "secrets-check: cannot write the staged files to $SNAP (git above)" >&2; exit 2; }
+  cd "$SNAP" || exit 2
+fi
 list_paths() {
   if [ "$STAGED" = 1 ]; then
-    git diff --cached --name-only --diff-filter=ACMR -z | tr '\0' '\n'
+    tr '\0' '\n' <"$STAGED_LIST"
   else
     git ls-files
   fi
 }
-LIST=$(mktemp) || exit 2
-trap 'rm -f "$LIST"' EXIT
 while IFS= read -r f; do
   [ -n "$f" ] && [ -f "$f" ] || continue
   case "$f" in

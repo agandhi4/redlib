@@ -55,8 +55,10 @@ install() {
   [[ "$DEVKIT_TOOLCHAIN_BIN" =~ $LAUNCHD_SAFE_PATH ]] || die "the toolchain directory $DEVKIT_TOOLCHAIN_BIN is not a plain path"
   launchd_job_stage "$LABEL" main-check
   launchd_job_fill "$JOB_TEMPLATE" "$JOB_DIR/filled.plist" -e "s|__TOOLCHAIN_BIN__|$DEVKIT_TOOLCHAIN_BIN|g"
-  retire_apple_check
   launchd_job_load "$LABEL" "$JOB_DIR/filled.plist"
+  # Only once main-check is loaded (devkit #383): a failed load leaves apple-check running. Its
+  # first run is a StartInterval away, so the state is moved before it reads any.
+  retire_apple_check
   echo "install_main_check: $LABEL runs devkit main's bin/main_check.sh every 10 min (a check at most once per repo window) over every checkout under ${DEVKIT_CHECKOUT_PARENTS[*]} whose plan is not image alone, found at each run (python $DEVKIT_PYTHON_VERSION); its devkit clone $JOB_DIR/devkit; logs ~/Library/Logs/devkit/main-check.*.log"
 }
 

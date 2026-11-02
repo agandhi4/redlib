@@ -29,15 +29,20 @@
 # line.
 # Per repo: fetch origin main and add a detached worktree of it, so the plan (GATE_SLUG) and the
 # vendored devkit are main's, never a developer's branch.
-# The devkit sync comes first, so the dependency PRs merge onto the newest devkit. A repo whose
-# main has no .devkit-rev (devkit itself) has none. Against $DEVKIT_URL's main, fetched into the
-# repo:
-#   - main's .devkit-rev names it, or a commit vendoring the same tree (a tests/-only change):
-#     `current`. One not on devkit's main (vendored from a branch): skipped, never moved back.
+# The devkit sync comes first, so the dependency PRs merge onto the newest proven devkit. A repo
+# whose main has no .devkit-rev (devkit itself) has none. Its target is green devkit, never the
+# tip (owner 2026-11-02): the newest of $DEVKIT_URL's main's first SYNC_GREEN_DEPTH first-parent
+# commits whose `main-check` commit status (bin/main_check.sh, _commit_status_lib.sh) is success,
+# found once per run (devkit_green). With none, no repo is synced, and one `devkit-sync: nothing
+# synced` line names the newest red commit. Against that target:
+#   - main's .devkit-rev names it, a commit past it, or a commit vendoring the same tree (a
+#     tests/-only change): `current`. One not on devkit's main (vendored from a branch): skipped,
+#     never moved back.
 #   - else the one open PR labelled devkit-sync is reused when its branch is
-#     devkit-sync/<main sha7>, it vendors that commit and it merges cleanly into main (one whose
+#     devkit-sync/<target sha7>, it vendors that commit and it merges cleanly into main (one whose
 #     head is not the job's commit, job_sync_commit, is left alone). Otherwise, in a second
-#     worktree of main, `make devkit-sync` with DEVKIT_COMMIT_TRAILER set to the model-agnostic
+#     worktree of main, the repo's devkit/bin/devkit-sync.sh <target> (what `make devkit-sync`
+#     runs, given the ref its target cannot pass) with DEVKIT_COMMIT_TRAILER set to the model-agnostic
 #     default (a person's devkit.trailer config never signs a job's commit), checked to vendor
 #     only (_vendor_paths.sh vendoring_only and vendored_from, the very test merge_rules.sh's
 #     review exemption applies, so a sync that would need a review is refused here, not pushed),
@@ -110,6 +115,8 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
 . "$HERE/_checkouts_lib.sh"
 # shellcheck source=bin/_timeout_lib.sh  # devkit_git_guard
 . "$HERE/_timeout_lib.sh"
+# shellcheck source=bin/_commit_status_lib.sh  # devkit_main_check_state, the sync's green target
+. "$HERE/_commit_status_lib.sh"
 devkit_git_guard dependency-merge
 
 readonly SYNC_LABEL=devkit-sync
@@ -386,7 +393,7 @@ handle_pr() {
 # shellcheck disable=SC2016  # the backticks are markdown code spans, not command substitution
 sync_body() {
   local titles
-  printf 'Nightly devkit sync (devkit/bin/dependency_merge.sh): `make devkit-sync` from %s to %s. ' "${1:0:7}" "${2:0:7}"
+  printf 'Nightly devkit sync (devkit/bin/dependency_merge.sh): `devkit-sync.sh` from %s to %s, the newest devkit main the Mac'"'"'s main check passed (`main-check` green). ' "${1:0:7}" "${2:0:7}"
   printf 'It only vendors (devkit/, .devkit-rev, base copies) code reviewed on devkit main, so `make merge` '
   printf 'asks no review of it (merge_rules.sh); its effect on this repo is judged before a deploy.\n\n'
   printf 'Devkit commits %s..%s:\n' "${1:0:7}" "${2:0:7}"
@@ -461,7 +468,7 @@ fetch_sync_branches() {
     || { record_fail "$SLUG" $? error "cannot fetch origin's $SYNC_LABEL branches; see $2"; return 1; }
 }
 
-# push_sync <log> <lease>: make devkit-sync in a fresh worktree of main, check that it only
+# push_sync <log> <lease>: devkit-sync.sh to SYNC_UPSTREAM in a fresh worktree of main, check that it only
 # vendors, and force-push it to devkit-sync/<sha7> over <lease>: the open PR's head, or "" for
 # none, when a branch already there is pushed over only if adopt_sync_branch adopts it. Sets
 # SYNC_NEW and SYNC_HEAD (and SYNC_REUSE as adopt_sync_branch does); else records why, returns 1.
@@ -472,15 +479,19 @@ push_sync() {
   remove_worktree "$SYNC_WT"
   git -C "$WT" worktree add -q --detach "$SYNC_WT" "$main" >>"$log" 2>&1 \
     || { SYNC_WT=""; record "$SLUG" error "cannot add a worktree of main for the sync; see $log"; return 1; }
-  DEVKIT_COMMIT_TRAILER=$DEVKIT_DEFAULT_TRAILER make -C "$SYNC_WT" devkit-sync >>"$log" 2>&1 8>&- \
-    || { record "$SLUG" error "make devkit-sync failed (a conflict or a refused commit), not forced; see $log"; return 1; }
+  # The repo's own script, as its `make devkit-sync` recipe runs it, with the ref that recipe has
+  # no way to pass: every vendored copy takes one (and re-execs the copy it vendors with it).
+  (cd "$SYNC_WT" && DEVKIT_COMMIT_TRAILER=$DEVKIT_DEFAULT_TRAILER devkit/bin/devkit-sync.sh "$SYNC_UPSTREAM") >>"$log" 2>&1 8>&- \
+    || { record "$SLUG" error "devkit-sync.sh ${SYNC_UPSTREAM:0:7} failed (a conflict or a refused commit), not forced; see $log"; return 1; }
   SYNC_NEW=$(cut -d' ' -f1 "$SYNC_WT/.devkit-rev")
+  [ "$SYNC_NEW" = "$SYNC_UPSTREAM" ] \
+    || { record "$SLUG" error "devkit-sync.sh vendored ${SYNC_NEW:0:7}, not the green ${SYNC_UPSTREAM:0:7}; not pushed; see $log"; return 1; }
   SYNC_HEAD=$(git -C "$SYNC_WT" rev-parse HEAD)
   paths=$(git -C "$SYNC_WT" -c core.quotePath=false diff --name-only --no-renames "$main" HEAD)
-  [ -n "$paths" ] || { record "$SLUG" error "make devkit-sync committed nothing; see $log"; return 1; }
+  [ -n "$paths" ] || { record "$SLUG" error "devkit-sync.sh committed nothing; see $log"; return 1; }
   # The test pr_merge.sh's exemption applies: a sync that would need a review is never pushed.
-  # devkit's main is fetched again, not read from the record under test: devkit-sync fetched it
-  # just now, so it is at least the commit it vendored.
+  # devkit's main is fetched again, not read from the record under test: it holds the commit
+  # vendored, the green target.
   upstream=$(net fetch_devkit_main "$SYNC_WT") \
     || { record_fail "$SLUG" $? error "cannot fetch devkit's main from $DEVKIT_URL (git above)"; return 1; }
   (cd "$SYNC_WT" && devkit_sync_only HEAD "$main" "$paths" && vendored_from HEAD "$upstream" "$main") || {
@@ -488,9 +499,6 @@ push_sync() {
     return 1
   }
   local lease=$2 branch=$SYNC_LABEL/${SYNC_NEW:0:7} there
-  # make devkit-sync fetches devkit's main itself: one merged since is another branch, and the
-  # open PR found for the old one is superseded (close_superseded).
-  [ "$SYNC_NEW" = "$SYNC_UPSTREAM" ] || lease="" SYNC_REUSE=""
   fetch_sync_branches "$SYNC_WT" "$log" || return 1  # also reads the branch's tip
   # An unleased branch is judged first, never pushed into blind: a push of the very commit it
   # holds (a sync rebuilt in the same second) is "up-to-date" past any lease (#219).
@@ -543,18 +551,59 @@ close_superseded() {
   done <<<"$1"
 }
 
-# sync_behind: set SYNC_OLD and SYNC_UPSTREAM (devkit's main) and return 0 when main's vendored
-# devkit should move to it (header); else record why not (nothing for a repo vendoring none).
+# The sync's depth (header): 40 first-parent commits is more than the busiest day of devkit merges
+# yet (31 on 2026-11-02) and some ten 3 h check windows at the usual rate, so a green commit is in
+# reach unless devkit main has been red, or unchecked, for that long; then nothing syncs, which
+# is the point. A deeper walk would sync a devkit days stale without anyone noticing the red.
+readonly SYNC_GREEN_DEPTH=40
+DEVKIT_REPO_SLUG=$(devkit_url_slug "$DEVKIT_URL")
+GREEN="" GREEN_WHY="" DEVKIT_TIP=""
+# devkit_green <dir>: fetch devkit's main into <dir> (DEVKIT_TIP) and, the first time a run gets
+# that far, walk it for the sync's target (header): GREEN, or GREEN_WHY and one `devkit-sync:
+# nothing synced` line.
+# Once per run, so every repo syncs to one commit and the statuses are read once. Returns the
+# fetch's failure (net's code); a status gh cannot read stops the walk, failing closed.
+devkit_green() {
+  local tip sha state red=""
+  tip=$(net fetch_devkit_main "$1") || return
+  DEVKIT_TIP=$tip
+  [ -z "$GREEN$GREEN_WHY" ] || return 0
+  for sha in $(git -C "$1" rev-list --first-parent -n "$SYNC_GREEN_DEPTH" "$tip"); do
+    state=$(net devkit_main_check_state "$DEVKIT_REPO_SLUG" "$sha") \
+      || { GREEN_WHY="cannot read devkit ${sha:0:7}'s main-check status (gh above)"; break; }
+    case $state in
+      success) GREEN=$sha; break ;;
+      failure|error) [ -n "$red" ] || red=$sha ;;
+    esac
+  done
+  if [ -n "$GREEN" ]; then
+    note "devkit-sync: target ${GREEN:0:7}, the newest main-check green devkit main (tip ${tip:0:7}, $(git -C "$1" rev-list --count "$GREEN..$tip") newer unproven)"
+    return 0
+  fi
+  [ -n "$GREEN_WHY" ] || GREEN_WHY="no main-check green commit in devkit main's newest $SYNC_GREEN_DEPTH${red:+; the newest red is ${red:0:7} ($(git -C "$1" log -1 --format=%s "$red"))}"
+  note "devkit-sync: nothing synced: $GREEN_WHY"
+}
+
+# sync_behind: set SYNC_OLD and SYNC_UPSTREAM (the sync's green target, devkit_green) and return
+# 0 when main's vendored devkit should move to it (header); else record why not (nothing for a
+# repo vendoring none, or when no devkit main is green: devkit_green said so once).
 sync_behind() {
   local rev
   SYNC_UPSTREAM="" SYNC_NEW=""
   rev=$(git -C "$WT" show HEAD:.devkit-rev 2>/dev/null) || return 1
   SYNC_OLD=${rev%% *}
-  SYNC_UPSTREAM=$(net fetch_devkit_main "$WT") \
+  devkit_green "$WT" \
     || { record_fail "$SLUG" $? error "cannot fetch devkit's main from $DEVKIT_URL (git above)"; return 1; }
+  [ -n "$GREEN" ] || return 1
+  SYNC_UPSTREAM=$GREEN
   [ "$SYNC_OLD" != "$SYNC_UPSTREAM" ] || { record "$SLUG" current "devkit at ${SYNC_OLD:0:7}"; return 1; }
-  git -C "$WT" merge-base --is-ancestor "$SYNC_OLD" "$SYNC_UPSTREAM" 2>/dev/null \
+  # Judged against the tip, so a devkit branch's commit is named as one even when it descends
+  # from the target; on main, it is behind the target or past it (main is squash-merged, linear).
+  git -C "$WT" merge-base --is-ancestor "$SYNC_OLD" "$DEVKIT_TIP" 2>/dev/null \
     || { record "$SLUG" skipped ".devkit-rev ${SYNC_OLD:0:7} is not on devkit's main; a sync would move it back"; return 1; }
+  # Synced past the target (by hand, or before devkit went red): a sync would move it back.
+  ! git -C "$WT" merge-base --is-ancestor "$SYNC_UPSTREAM" "$SYNC_OLD" 2>/dev/null \
+    || { record "$SLUG" current "devkit at ${SYNC_OLD:0:7}, past ${SYNC_UPSTREAM:0:7}, the newest green devkit main"; return 1; }
   [ "$(cd "$WT" && vendor_tree_of "$SYNC_UPSTREAM")" != "${rev#* }" ] \
     || { record "$SLUG" current "devkit at ${SYNC_OLD:0:7}; main ${SYNC_UPSTREAM:0:7} vendors the same tree"; return 1; }
 }
@@ -611,15 +660,16 @@ sync_devkit() {
 # the job's own commit (job_sync_commit, adoption's test, so never a person's), it vendors a commit
 # devkit's main has since moved past, and no open PR is on it. Branches of closed or merged PRs
 # included: close_superseded deletes its own, but a hand-closed PR's or an older run's stayed (finplat
-# and rollcall devkit-sync/c94512c, 2026-10-24). The branch of devkit's main now (SYNC_UPSTREAM, or
-# SYNC_NEW when the sync vendored a newer one) stays: a run's unfinished work, which the next adopts.
+# and rollcall devkit-sync/c94512c, 2026-10-24). The target's own branch (SYNC_UPSTREAM, the green
+# commit) stays: a run's unfinished work, which the next adopts. One vendoring a newer commit than
+# the target (synced before devkit went red) stays too, until the target passes it.
 # Leased: a branch that moved since it was read is kept.
 prune_sync_branches() {
   [ -n "$SYNC_UPSTREAM" ] || return 0  # devkit itself, or devkit's main unread
   local log=$STATE/dependency-merge/${SLUG#*/}-devkit-sync.log branch tip rev stale="" open detail
   fetch_sync_branches "$WT" "$log" || return 0
   while read -r branch tip; do
-    case $branch in "$SYNC_LABEL/${SYNC_UPSTREAM:0:7}"|"$SYNC_LABEL/${SYNC_NEW:0:7}") continue ;; esac
+    [ "$branch" != "$SYNC_LABEL/${SYNC_UPSTREAM:0:7}" ] || continue
     job_sync_commit "$WT" "$tip" || continue
     rev=$(git -C "$WT" show "$tip:.devkit-rev" 2>/dev/null) || continue
     rev=${rev%% *}

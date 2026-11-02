@@ -92,10 +92,13 @@ is README.md "Architecture". Invariants of the design:
   `main-red`, a job is a FAIL after `CHECK_JOB_SECONDS` (1800), and the Mac's hourly
   `publisher_deadman.sh` (GitHub only) files `publisher stalled` when linux-box stops publishing.
 - Every main the publisher does not prove is proven on the Mac: `bin/main_check.sh` (one
-  LaunchAgent, each repo once per cadence window) runs check_tree at a new main of every plan but
+  LaunchAgent, each repo once per cadence window, in its own clone of the repo, never the
+  checkout lanes share) runs check_tree at a new main of every plan but
   `DEPLOY_KINDS=image` alone (ios, mac, hosted, library, tooling; devkit's own), posts the verdict
   as the commit's `main-check` status (`_commit_status_lib.sh`, the one context name), and files
   and closes only its own `main-red` issues (`main is red on the Mac at …`, `_issue_lib.sh`).
+  A plan's `DEPLOY_BRANCH=<branch>` is fast-forwarded to each green main, never forced: the one
+  way a host that deploys a branch (rollcall's Vercel production) ships only checked commits.
 - A launchd job runs devkit main's copy of itself: its plist starts the job dir's `launcher.sh`
   (`bin/job_launcher.sh`, installed by `bin/_launchd_job_lib.sh`), never a path in a checkout, so
   a devkit merge reaches the next run with no fast-forward. A new job goes through the same lib.

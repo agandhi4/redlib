@@ -6,7 +6,8 @@
 # syncs devkit's main), and a plan that declares no kind. An image-only plan is linux-box's:
 # publish.sh already runs every job of it (owner 2026-11-02: every repo's main is proven). Run by
 # the LaunchAgent com.agandhi4.devkit.main-check every 10 min (bin/install_main_check.sh), from
-# devkit main's copy. It deploys nothing.
+# devkit main's copy. It deploys nothing itself; a plan's DEPLOY_BRANCH is how a host that deploys
+# a branch (rollcall's Vercel production) gets only checked commits (below).
 #
 # Usage: bin/main_check.sh [--root <dir>]... [--repos a,b]
 #   --root   where the checkouts live, repeatable (default _checkouts_lib.sh's
@@ -17,16 +18,19 @@
 # second clone of a repo is left out silently. Every git network call is bounded and never
 # prompts (_timeout_lib.sh devkit_git_guard, DEVKIT_GIT_TIMEOUT), so a remote waiting on a
 # password or a host key, or never answering, is one fetch error, never a stalled run (devkit #366).
-# Per checkout: fetch origin main (M) and read M's plan, never the checkout's. No plan, or
-# DEPLOY_KINDS=image: skipped. M already judged ($STATE/<name>: `<sha> pass` or `<sha> fail
+# Per checkout, in the job's own clone of it ($STATE/clones/<name>, own_clone), never the
+# checkout: fetch origin main (M) and read M's plan, never the checkout's. No plan, or
+# DEPLOY_KINDS=image: skipped. A checkout with no origin is no fleet repo: skipped silently. M already judged ($STATE/<name>: `<sha> pass` or `<sha> fail
 # <first bad sha>`): up-to-date, and its status and main-red sync retried if GitHub failed it. A
 # check already started in the repo's current window (bin/_cadence_lib.sh: the plan's
 # MAIN_CHECK_MINUTES, at the slug's own minute, as the publisher's): waiting, so a busy main is
 # checked at most once a window and the repos' checks spread over it.
 # Otherwise check_tree.sh M (every job of M's plan, a clean worktree, each job admitted
 # by the slot pool, so it never runs beside a lane's tests over capacity), then by its exit:
-#   0  pass: recorded; M gets the `main-check` status success (_commit_status_lib.sh), and the
-#      Mac's open main-red issues close, naming M
+#   0  pass: recorded; M gets the `main-check` status success (_commit_status_lib.sh); a plan
+#      with a literal DEPLOY_BRANCH=<branch> line gets origin's <branch> fast-forwarded to M
+#      (advance_deploy_branch: never forced, never main); and the Mac's open main-red issues
+#      close, naming M
 #   1  fail: recorded; M gets `main-check` failure, and the first bad commit (M, or the first red
 #      one since the last pass, which a red M keeps) gets one main-red issue `main is red on the
 #      Mac at <sha7>: <jobs>` (_issue_lib.sh devkit_main_red_file, publish.sh's), whose body names
@@ -112,15 +116,72 @@ prune_logs() {
   done
 }
 
-# checked_main <checkout> <plan file>: true, with MAIN_SHA its origin/main and <plan file> main's
-# plan, when that plan is one the Mac proves.
+# checked_main <repo> <plan file>: true, with MAIN_SHA its origin/main and <plan file> main's
+# plan, when that plan is one the Mac proves; MAIN_SHA is "" when <repo> has no origin/main.
 checked_main() {
   MAIN_SHA=$(git -C "$1" rev-parse --verify -q refs/remotes/origin/main) || return 1
   git -C "$1" show "$MAIN_SHA:scripts/ci/gate_plan.sh" >"$2" 2>/dev/null && mac_proves "$2"
 }
 
-# sync_github <name> <dir> <slug> <main> pass|fail [<first bad>]: the verdict on GitHub, the
-# main-check status on <main> and the main-red issues, setting SAID. A gh failure is retried at
+# own_clone <checkout> <name>: CLONE, this job's clone of the checkout's repo, never the checkout
+# itself (devkit #347): a fetch and a check's worktree in a checkout the lanes' worktrees share
+# raced their git (ref and index locks, read as an `error`), and held a worktree there for a whole
+# plan's run. Made once as a local clone of the checkout (objects hard-linked, which git never
+# rewrites; the checkout is only read; no network), then pointed at the checkout's origin URL and
+# core.sshCommand (a deploy key) at every run, so a changed remote is followed. 0 ready, 1 the
+# checkout has no origin (no fleet repo), 2 a failure, with CLONE_ERROR.
+own_clone() {
+  local dir=$1 url ssh err seed
+  CLONE=$STATE/clones/$2 CLONE_ERROR=''
+  url=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
+  if [ ! -e "$CLONE/.git" ]; then
+    rm -rf "$CLONE"
+    err=$(mkdir -p "$STATE/clones" && git clone -q --no-checkout "$dir" "$CLONE" 2>&1) \
+      || { CLONE_ERROR="cannot clone the checkout into $CLONE: ${err//$'\n'/ }"; rm -rf "$CLONE"; return 2; }
+    # A local clone maps the checkout's branches to origin/*: its origin/main would be the
+    # developer's local main, stale or unpushed. Seed it with the checkout's origin/main, the
+    # last-known main a failed fetch is judged by, or none.
+    if seed=$(git -C "$dir" rev-parse --verify -q refs/remotes/origin/main); then
+      git -C "$CLONE" update-ref refs/remotes/origin/main "$seed"
+    else
+      git -C "$CLONE" update-ref -d refs/remotes/origin/main 2>/dev/null
+    fi
+  fi
+  git -C "$CLONE" remote set-url origin "$url" || { CLONE_ERROR="cannot point $CLONE at $url (git above)"; return 2; }
+  if ssh=$(git -C "$dir" config --get core.sshCommand); then
+    git -C "$CLONE" config core.sshCommand "$ssh"
+  else
+    git -C "$CLONE" config --unset core.sshCommand
+  fi
+  return 0
+}
+
+# advance_deploy_branch <repo> <plan> <main>: move origin's DEPLOY_BRANCH (the plan's literal line;
+# none: nothing) to the green <main>, setting DEPLOYED to what it did; 1 with DEPLOYED the reason
+# when it cannot. Why (owner 2026-11-02): a host that deploys every push to main (Vercel) shipped
+# commits nothing had checked; told to deploy that branch instead, it ships only what passed
+# here. A plain push, never forced: a branch someone moved past <main> by hand (the urgent path,
+# `git push origin main:<branch>`) is left there, and one moved off main's history is refused.
+advance_deploy_branch() {
+  local repo=$1 m=$3 branch tip
+  DEPLOYED=''
+  branch=$(gate_plan_literal "$2" DEPLOY_BRANCH)
+  [ -n "$branch" ] || return 0
+  [ "$branch" != main ] || { DEPLOYED="DEPLOY_BRANCH=main would deploy main itself; nothing pushed"; return 1; }
+  git -C "$repo" fetch -q --no-tags origin "+refs/heads/$branch:refs/remotes/origin/$branch" 2>/dev/null \
+    || git -C "$repo" update-ref -d "refs/remotes/origin/$branch" 2>/dev/null
+  tip=$(git -C "$repo" rev-parse -q --verify "refs/remotes/origin/$branch")
+  if [ -n "$tip" ] && git -C "$repo" merge-base --is-ancestor "$m" "$tip"; then
+    DEPLOYED="$branch at ${tip:0:7} already"
+    return 0
+  fi
+  git -C "$repo" push -q origin "$m:refs/heads/$branch" 2>"$STATE/${repo##*/}.push.err" \
+    || { DEPLOYED="cannot push $branch to ${m:0:7}: $(tr '\n' ' ' <"$STATE/${repo##*/}.push.err")"; return 1; }
+  DEPLOYED="$branch moved to ${m:0:7}"
+}
+
+# sync_github <name> <repo> <slug> <main> pass|fail [<first bad>]: the verdict on GitHub, the
+# main-check status on <main>, a green one's deploy branch, and the main-red issues, setting SAID. A gh failure is retried at
 # every later tick of the same main ($STATE/<name>.synced holds the main whose sync went through),
 # never left until main moves. The status goes first: a job reading it (dependency_merge.sh) acts
 # on it, an issue only tells a person.
@@ -131,6 +192,10 @@ sync_github() {
       || { SAID="gh failed (above); no status posted, retried next tick"; return; }
     SAID=$(devkit_main_red_heal "$slug" "main_check.sh on $(hostname): ${m:0:7} passes every job of its plan on the Mac; closing." "" "$WHERE") \
       || { SAID="gh failed (above); none closed, retried next tick"; return; }
+    # Last, so a push that keeps failing (a branch moved off main's history, a protected one)
+    # never holds the issues open; the sync is retried each tick, saying why, until it lands.
+    advance_deploy_branch "$dir" "$STATE/$name.plan" "$m" || { SAID="$SAID; deploy: $DEPLOYED; retried next tick"; return; }
+    [ -z "$DEPLOYED" ] || SAID="$SAID; deploy: $DEPLOYED"
   else
     jobs=$(sed -n 's/^CHECK VERDICT FAIL .*failed=//p' "$STATE/$name.check.out")
     devkit_main_check_post "$slug" "$m" fail "main_check.sh: failed on the Mac: ${jobs:-see the main-red issue}" \
@@ -143,16 +208,27 @@ sync_github() {
 
 # judge <checkout>: one MAIN line; counts into CHECKED, RED, ERRORS.
 judge() {
-  local dir=$1 name=${1##*/} m plan slug sha='' prev='' first_bad='' out rc=0 synced=''
+  local dir=$1 name=${1##*/} m plan slug sha='' prev='' first_bad='' out rc=0 synced='' repo src known=''
   plan=$STATE/$name.plan
+  own_clone "$dir" "$name" || rc=$?
+  case $rc in
+    0) repo=$CLONE ;;
+    1) return 0 ;;
+    *) echo "MAIN $name error ($CLONE_ERROR)"; ERRORS=$((ERRORS + 1)); return ;;
+  esac
   # Every checkout under the roots is fetched, so a repo that adds a plan or drops image is seen;
-  # one that fails (an SSH remote launchd has no agent for) is an error only when its last-known
-  # main is one the Mac proves, and any other says nothing.
-  if ! fetch_main "$dir" 2>"$STATE/$name.err"; then
-    checked_main "$dir" "$plan" || return 0
-    echo "MAIN $name error (git fetch of origin main: $(tr '\n' ' ' <"$STATE/$name.err"))"; ERRORS=$((ERRORS + 1)); return
+  # one that fails (an SSH remote launchd has no agent for) is an error when its last-known main
+  # (the clone's, else the checkout's) is one the Mac proves or is unknown (devkit #351: unknown
+  # is never "not ours"), and says nothing when that main is another's.
+  if ! fetch_main "$repo" 2>"$STATE/$name.err"; then
+    for src in "$repo" "$dir"; do
+      if checked_main "$src" "$plan"; then known=mac; break; fi
+      [ -z "$MAIN_SHA" ] || { known=other; break; }
+    done
+    [ "$known" != other ] || return 0
+    echo "MAIN $name error (git fetch of origin main: $(tr '\n' ' ' <"$STATE/$name.err")$([ -n "$known" ] || echo '; no last-known main tells whether the Mac proves it'))"; ERRORS=$((ERRORS + 1)); return
   fi
-  checked_main "$dir" "$plan" || return 0
+  checked_main "$repo" "$plan" || return 0
   m=$MAIN_SHA
   slug=$(gate_plan_literal "$plan" GATE_SLUG)
   [ -n "$slug" ] || { echo "MAIN $name error (main's plan has no literal GATE_SLUG=owner/repo to post the status and file main-red in)"; ERRORS=$((ERRORS + 1)); return; }
@@ -161,7 +237,7 @@ judge() {
     [ "$prev" != fail ] || RED=$((RED + 1))
     [ ! -f "$STATE/$name.synced" ] || synced=$(head -n 1 "$STATE/$name.synced")
     if [ "$synced" = "$m" ]; then echo "MAIN $name ${m:0:7} up-to-date (checked: $prev)"; return; fi
-    sync_github "$name" "$dir" "$slug" "$m" "$prev" "$first_bad"
+    sync_github "$name" "$repo" "$slug" "$m" "$prev" "$first_bad"
     echo "MAIN $name ${m:0:7} up-to-date (checked: $prev; main-red: $SAID)"
     return
   fi
@@ -172,12 +248,12 @@ judge() {
   fi
   cadence_mark "$STATE/$name.started" || { echo "MAIN $name error (cannot write $STATE/$name.started)"; ERRORS=$((ERRORS + 1)); return; }
   out=$STATE/$name.check.out
-  "$HERE/check_tree.sh" "$m" --repo "$dir" --log-dir "$STATE/$name.check/${m:0:7}" >"$out" 2>&1 8>&- || rc=$?
+  "$HERE/check_tree.sh" "$m" --repo "$repo" --log-dir "$STATE/$name.check/${m:0:7}" >"$out" 2>&1 8>&- || rc=$?
   CHECKED=$((CHECKED + 1))
   case $rc in
     0)
       echo "$m pass" >"$STATE/$name"
-      sync_github "$name" "$dir" "$slug" "$m" pass
+      sync_github "$name" "$repo" "$slug" "$m" pass
       echo "MAIN $name ${m:0:7} pass (main-red: $SAID)" ;;
     1)
       RED=$((RED + 1))
@@ -185,7 +261,7 @@ judge() {
       # a pass; filing it again is a no-op while it is open (the title is the key).
       if [ "$prev" != fail ] || [ ! -f "$STATE/$name.red" ]; then first_bad=$m; cp "$out" "$STATE/$name.red"; fi
       echo "$m fail $first_bad" >"$STATE/$name"
-      sync_github "$name" "$dir" "$slug" "$m" fail "$first_bad"
+      sync_github "$name" "$repo" "$slug" "$m" fail "$first_bad"
       echo "MAIN $name ${m:0:7} fail ($(sed -n 's/^CHECK VERDICT FAIL .*failed=//p' "$out"); main-red: $SAID)" ;;
     *)
       ERRORS=$((ERRORS + 1))
