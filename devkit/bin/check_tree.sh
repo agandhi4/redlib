@@ -29,7 +29,8 @@
 #     and files one `ratchet` issue per job. They run with METRICS_BETTER_OK=1, as on any main.
 #   - Time budgets never fail it (tier_guard.sh reports OVERBUDGET; TIER_BUDGET_ENFORCE is
 #     unset here). A hung job does: each run of a job is stopped after CHECK_JOB_SECONDS (default
-#     1800, whole seconds) and is a FAIL naming it, not retried (devkit decisions 2026-11-02).
+#     1800, whole seconds), with every process under it, and is a FAIL naming it, not retried (devkit
+#     decisions 2026-11-02).
 #   - The box, not the commit: a job failing its run and its retry with a cause in ENV_CAUSES
 #     (no disk, no network, no docker daemon, a build script's host tool such as cmake) stops the check with exit 2 and no verdict, as a
 #     plan's require_docker does before its first Docker job, so publish.sh never calls it red.
@@ -65,7 +66,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
 . "$HERE/toolchain_path.sh"
 # shellcheck source=bin/_paths_lib.sh  # devkit_gate_areas, devkit_default_gate_plan for the plan
 . "$HERE/_paths_lib.sh"
-# shellcheck source=bin/_timeout_lib.sh  # devkit_docker_ensure, devkit_with_timeout
+# shellcheck source=bin/_timeout_lib.sh  # devkit_docker_ensure, devkit_with_timeout, devkit_timeout_stop
 . "$HERE/_timeout_lib.sh"
 # shellcheck source=bin/_load_lib.sh  # devkit_now
 . "$HERE/_load_lib.sh"
@@ -160,9 +161,9 @@ file_issue() { # <label> <title> <body>
   note "$1 issue: $said"
 }
 
-# run_make <log> <target> [VAR=val...]: one attempt, 124 when stopped at JOB_SECS (make passes
-# the TERM to its recipes). 7>&-: publish.sh's lock stays with it, so a job's leftover descendant
-# never holds the next publish.
+# run_make <log> <target> [VAR=val...]: one attempt, 124 when stopped at JOB_SECS: make and every
+# process under it, so nothing of it runs on into the next job or the worktree's removal (#311). 7>&-: publish.sh's lock stays with it, so a job's
+# leftover descendant never holds the next publish.
 _make_once() { local log=$1; shift; make -C "$WT" --no-print-directory "$@" </dev/null >"$log" 2>&1 7>&-; }
 run_make() { devkit_with_timeout "$JOB_SECS" _make_once "$@"; }
 
@@ -293,6 +294,8 @@ declare -F gate_cleanup >/dev/null || gate_cleanup() { :; }
 # The ratchet's job names, before the default plan appends METRICS_REBASELINE (never, here).
 REPORT_ONLY=$(tr '|' '\n' <<<"${GATE_JOBS_METRICS:-}" | awk 'NF { print $1 }' | paste -sd ' ' -)
 cleanup() {
+  # A TERM to this process alone (not its group) leaves the running job: stop it first.
+  devkit_timeout_stop
   slot_release
   # Bounded: a hung docker daemon made a plan's `docker rm -fv` block an EXIT trap for 12+ min
   # (2026-10-17).

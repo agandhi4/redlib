@@ -48,7 +48,7 @@ What each path is; [AGENTS.md](AGENTS.md) holds the invariants that tie them tog
 | `bin/contract_probe.sh` | `<base> --live P --health P --request-id P --json-log FILE\|CONTAINER --metrics P --require-metric NAME --proxy-404 URL`: the observability contract asserted against a booted app, each assertion opt-in so repos switch them on as they comply. Called from a smoke after `boot_image.sh up`; `BOOT_EXPECT_VERSION` is checked in health, logs and `app_info`. One `probe <name> PASS\|FAIL` line each, every assertion runs. |
 | `bin/publish.sh` | `<repo-checkout> [--ungated <reason>]`, run as `make publish` by linux-box's timer: checks every new commit of origin/main with `check_tree.sh` and moves `latest` to the newest one that passes, when an image input changed, after `ci-image` + `ci-smoke` at it on native amd64. See "Publish". |
 | `bin/check_tree.sh` | `<sha> [--repo <checkout>] [--log-dir <dir>]`: every job of that commit's plan on a clean worktree; `CHECK <job> PASS|FAIL|REPORTED|SKIPPED`, `CHECK VERDICT PASS|FAIL head=<sha>`. A flake retried once (`flaky` issue), the ratchet report-only (`ratchet` issue). publish.sh and apple_check.sh run it. |
-| `bin/apple_check.sh` | `[--root <dir>] [--repos a,b]`, every 10 min on the Mac (`bin/install_apple_check.sh` once): `check_tree.sh` at a new origin main of every checkout whose plan declares `DEPLOY_KINDS` ios or mac, once per cadence window; `APPLE <repo> <sha7> pass|fail|up-to-date|waiting|error`. Deploys nothing. See "Deploy kinds". |
+| `bin/main_check.sh`, `bin/_commit_status_lib.sh` | `[--root <dir>]... [--repos a,b]`, every 10 min on the Mac (`bin/install_main_check.sh` once): `check_tree.sh` at a new origin main of every checkout whose plan is not `DEPLOY_KINDS=image` alone, once per cadence window; the verdict is the commit's `main-check` status; `MAIN <repo> <sha7> pass|fail|up-to-date|waiting|error`. Deploys nothing. See "Deploy kinds". |
 | `bin/registry_prune.sh` | `<ghcr.io/owner/name> [--keep N] [--dry-run]`: GHCR retention in images, not package versions: the newest N `sha-*` images, everything since, `latest`, and every manifest they reference. publish.sh runs it. |
 | `bin/ship_tag.sh` | `<owner/repo> <sha> [--date YYYY-MM-DD]`: the deploying step marks a main commit shipped with the annotated tag `ship-<date>-<sha7>` via `gh api` (no clone). Idempotent for the same sha, refuses another, survives a create race; prints `SHIP_TAG=<tag>`. Needs `contents: write`. |
 | `bin/release_check.sh` | Guard for `ci-quick`: the image is the only source of `APP_VERSION`. Dockerfile final stage has the ARG, ENV and OCI `image.version` LABEL; no compose file sets it under `environment:`; every workflow step that pushes an image passes it as a build arg. Every Dockerfile (root and one level down): a non-root final `USER` may `EXPOSE` and health-check only ports >= 1024 (the NAS kernel refuses a privileged bind; Orbit was down 16 h on 2026-10-13). |
@@ -943,22 +943,27 @@ sourcing: `DEPLOY_KINDS=<kind>[,<kind>]`, unquoted (`DEPLOY_KINDS=image,ios` is 
 | Kind | Ships as | What proves main |
 |---|---|---|
 | `image` | `PUBLISH_IMAGE` (required with it, and only with it) | `publish.sh` on linux-box, above |
-| `ios`, `mac` | an Apple app built on the Mac | `bin/apple_check.sh` on the Mac: `check_tree.sh` at a new main, once per window |
-| `hosted` | its host applies main itself (homelab's hosts, Vercel) | nothing after merge |
-| `library`, `tooling` | nothing deploys (alone, never beside another kind) | nothing after merge |
+| `ios`, `mac` | an Apple app built on the Mac | `bin/main_check.sh` on the Mac: `check_tree.sh` at a new main, once per window |
+| `hosted` | its host applies main itself (homelab's hosts, Vercel) | `bin/main_check.sh` on the Mac |
+| `library`, `tooling` | nothing deploys (alone, never beside another kind) | `bin/main_check.sh` on the Mac |
 
 The scorecard's `deploy_kinds` WIRED check fails a plan that declares none, an unknown kind or
 `image` without `PUBLISH_IMAGE` (or the reverse), and its evidence is the readout, kind → proof.
 
-The Apple kinds' proof is the Mac's LaunchAgent `com.agandhi4.devkit.apple-check`
-(`bin/install_apple_check.sh [<root>]` once; logs `~/Library/Logs/devkit/apple-check.*.log`).
-Every 10 min, for each checkout under `~/projects/solo` whose origin main declares ios or mac, it
-runs `check_tree.sh` at main's newest commit when main moved since its last verdict and no check
-started in the repo's window yet (`_cadence_lib.sh`, `MAIN_CHECK_MINUTES`, as the publisher's):
-the whole plan, the Xcode jobs included, each job admitted by the slot pool. A red main files one `main-red`
-issue titled `main is red on the Mac at <sha7>: <jobs>` for its first bad commit, and a green main
-closes only those; the publisher's titles have no `on the Mac`, so neither closes the other's. An
-exit 2 (the box) records nothing; on battery the run is skipped.
+Every kind but `image` is proven by the Mac's LaunchAgent `com.agandhi4.devkit.main-check`
+(`bin/install_main_check.sh` once, which also retires the Apple-only `apple-check` job it replaced;
+logs `~/Library/Logs/devkit/main-check.*.log`). Every 10 min, for each checkout under
+`~/projects/solo` and `~/projects/homelab` whose origin main has a plan that is not
+`DEPLOY_KINDS=image` alone (an image-only plan is linux-box's, which runs every job of it; a plan
+mixing image with another kind, or declaring none, is checked here too), it runs `check_tree.sh`
+at main's newest commit when main moved since its last verdict and no check started in the repo's
+window yet (`_cadence_lib.sh`, `MAIN_CHECK_MINUTES`, as the publisher's): the whole plan, the
+Xcode jobs included, each job admitted by the slot pool. Each verdict is posted on the checked
+commit as the GitHub status `main-check` (`success` or `failure`, `_commit_status_lib.sh`), which a
+job that acts only on a proven main reads; a commit with none was never checked. A red main files
+one `main-red` issue titled `main is red on the Mac at <sha7>: <jobs>` for its first bad commit,
+and a green main closes only those; the publisher's titles have no `on the Mac`, so neither
+closes the other's. An exit 2 (the box) records and posts nothing; on battery the run is skipped.
 
 ## Deploy
 

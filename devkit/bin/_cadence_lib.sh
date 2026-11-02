@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # How often main is checked, per repo, and in which minute. Sourced; defines functions and runs
 # nothing. Callers source _load_lib.sh (devkit_epoch) and _gate_env.sh (gate_plan_literal) first.
-# Used by: publish.sh (linux-box's check_tree runs) and apple_check.sh (the Mac's, its own stamp
+# Used by: publish.sh (linux-box's check_tree runs) and main_check.sh (the Mac's, its own stamp
 # per repo); every scheduled check of main goes through it.
 #
 # Why (owner 2026-11-02): linux-box's publisher ticks every 5 min for every repo at once, and each
