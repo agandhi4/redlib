@@ -2,8 +2,8 @@
 # Bounded commands, and guards for a hung Docker daemon and a hung git remote. Sourced; defines
 # functions and runs nothing. Used by: throwaway_pg.sh, boot_image.sh, docker_bounded.sh and
 # publish.sh (devkit_docker_guard), check_tree.sh (devkit_docker_ensure in its require_docker,
-# devkit_with_timeout around the plan's gate_cleanup), and the jobs that fetch every checkout,
-# dependency_merge.sh and apple_check.sh (devkit_git_guard).
+# devkit_with_timeout around each job and the plan's gate_cleanup), and the jobs that fetch every
+# checkout, dependency_merge.sh and main_check.sh (devkit_git_guard).
 #
 # Why (2026-10-17): the OrbStack daemon wedged and every `docker rm -fv`, `docker ps` and
 # `docker inspect` hung for 12+ minutes. Inside a job only the 15-minute silence watchdog
@@ -11,9 +11,14 @@
 # slots while every other lane queued behind them. macOS has no `timeout(1)`, hence the shell
 # version.
 #
-#   devkit_with_timeout <secs> <cmd...>   run cmd (a function too, in a subshell); TERM it and
-#                                         its direct children after <secs>. Returns cmd's exit
-#                                         code, or 124 (GNU timeout's) when it was stopped.
+#   devkit_with_timeout <secs> <cmd...>   run cmd (a function too, in a subshell); after <secs>
+#                                         stop it and everything it started (_devkit_stop_tree:
+#                                         TERM, then KILL DEVKIT_TIMEOUT_GRACE s later, default
+#                                         10). Returns cmd's exit code, or 124 (GNU timeout's)
+#                                         when it was stopped. While it runs,
+#                                         DEVKIT_TIMEOUT_PID names cmd for devkit_timeout_stop.
+#   devkit_timeout_stop                   from the caller's EXIT trap: stop the running cmd's
+#                                         tree the same way; nothing when none runs.
 #   devkit_docker_guard <who>             from here on every `docker` call in the sourcing script
 #                                         is bounded by DOCKER_CALL_TIMEOUT (default 180 s: a
 #                                         first `docker run` may pull an image), and the daemon
@@ -51,26 +56,88 @@
 # once its TERM lands the command can exit (a script whose `sleep` child was killed exits 0)
 # and the stand-down below KILLs the watcher before its `exit 124`, which read as success
 # under load (throwaway_pg's hung-daemon case, devkit #215's gate, 2026-10-22). With no file
-# (no mktemp, a full disk) the bound still stops the command but cannot say so: never 124.
+# (no mktemp, a full disk) the bound still TERMs the tree but cannot say so: never 124, and the
+# stand-down may cut its KILL short.
+# Why the whole tree (devkit #311, Codex on #301): TERM to cmd and its direct children reached
+# make alone, which passes it to its recipes' shells only, so a timed-out job's test runner, or a
+# recipe that traps TERM, ran on into the next job and under the worktree being removed. The
+# tree stays in the caller's process group, so a supervisor's group or cgroup kill still takes
+# it all, and the watcher, a process of its own, still stops it if the caller is SIGKILLed.
 devkit_with_timeout() {
-  local secs=$1 pid watcher rc=0 fired
+  local secs=$1 grace=${DEVKIT_TIMEOUT_GRACE:-10} pid watcher rc=0 fired
   shift
+  [[ "$grace" =~ ^[0-9]+$ ]] || { echo "devkit_with_timeout: DEVKIT_TIMEOUT_GRACE must be a whole number of seconds (got '$grace')" >&2; exit 2; }
   fired=$(mktemp "${TMPDIR:-/tmp}/devkit_timeout.XXXXXX" 2>/dev/null) || fired=/dev/null
   "$@" &
   pid=$!
-  ( sleep "$secs"; echo fired >"$fired"; pkill -TERM -P "$pid"; kill -TERM "$pid" ) </dev/null >/dev/null 2>&1 &
+  ( sleep "$secs"; echo fired >"$fired"; _devkit_stop_tree "$pid" "$grace" ) </dev/null >/dev/null 2>&1 &
   watcher=$!
+  DEVKIT_TIMEOUT_PID=$pid DEVKIT_TIMEOUT_WATCHER=$watcher DEVKIT_TIMEOUT_GRACE_SECS=$grace
   wait "$pid" 2>/dev/null || rc=$?  # 2>: the shell's own "Terminated" notice, not cmd's stderr
-  # Stand the watcher down with signals it cannot defer or trap: bash 3.2 lost a TERM sent to
-  # a trapping subshell about one time in 40, which then slept its full term and fired on a
-  # command that had finished. STOP freezes it before its sleep can end, KILL its sleep, then it.
-  kill -STOP "$watcher" 2>/dev/null || :
-  pkill -KILL -P "$watcher" 2>/dev/null || :
-  kill -KILL "$watcher" 2>/dev/null || :
-  wait "$watcher" 2>/dev/null || :
+  DEVKIT_TIMEOUT_PID=''  # reaped: its pid may be reused, so devkit_timeout_stop leaves it be
+  # Fired: the watcher owns the stop until its KILL, so it is waited for (at most the grace),
+  # never stood down mid-stop, by this or by devkit_timeout_stop.
+  if [ -s "$fired" ]; then wait "$watcher" 2>/dev/null || :; else _devkit_watcher_down "$watcher"; fi
+  DEVKIT_TIMEOUT_WATCHER=''
   [ ! -s "$fired" ] || rc=124
   [ "$fired" = /dev/null ] || rm -f "$fired"
   return "$rc"
+}
+
+# Stand a watcher down with signals it cannot defer or trap: bash 3.2 lost a TERM sent to a
+# trapping subshell about one time in 40, which then slept its full term and fired on a command
+# that had finished. STOP freezes it before its sleep can end, KILL its sleep, then it.
+_devkit_watcher_down() {
+  kill -STOP "$1" 2>/dev/null || :
+  pkill -KILL -P "$1" 2>/dev/null || :
+  kill -KILL "$1" 2>/dev/null || :
+  wait "$1" 2>/dev/null || :
+}
+
+# A TERM or Ctrl-C to the caller alone (a hand-run check_tree) leaves cmd running; the watcher
+# goes first, so it never signals the tree's pids after they are reused.
+devkit_timeout_stop() {
+  local pid=${DEVKIT_TIMEOUT_PID:-}
+  [ -n "$pid" ] || return 0
+  [ -z "${DEVKIT_TIMEOUT_WATCHER:-}" ] || _devkit_watcher_down "$DEVKIT_TIMEOUT_WATCHER"
+  DEVKIT_TIMEOUT_PID='' DEVKIT_TIMEOUT_WATCHER=''
+  _devkit_stop_tree "$pid" "$DEVKIT_TIMEOUT_GRACE_SECS"
+  wait "$pid" 2>/dev/null || :
+}
+
+# _devkit_stop_tree <pid> <grace>: STOP <pid> and every descendant, walking again until a walk
+# finds none new (a stopped process cannot fork, and none exits mid-walk to orphan its children
+# out of reach), then TERM and CONT them all, and KILL whichever is still alive after <grace> s.
+_devkit_stop_tree() {
+  local root=$1 grace=$2 all='' found p deadline=$((SECONDS + $2)) _
+  for _ in 1 2 3 4 5 6 7 8; do
+    found=$(_devkit_tree "$root" | grep -vxF -e "${all:-x}" -e x) || :
+    [ -n "$found" ] || break
+    for p in $found; do kill -STOP "$p" 2>/dev/null || :; done
+    all=$(printf '%s\n%s' "$all" "$found" | grep .)
+  done
+  [ -n "$all" ] || return 0
+  for p in $all; do kill -TERM "$p" 2>/dev/null || :; done
+  for p in $all; do kill -CONT "$p" 2>/dev/null || :; done
+  while [ "$SECONDS" -lt "$deadline" ] && _devkit_any_alive "$all"; do sleep 0.2; done
+  for p in $all; do kill -KILL "$p" 2>/dev/null || :; done
+}
+
+# _devkit_tree <pid>: <pid> and its descendants, one per line, from one ps snapshot.
+_devkit_tree() {
+  ps -A -o pid= -o ppid= | awk -v root="$1" '
+    { kids[$2] = kids[$2] " " $1 }
+    END { q = root; while (q != "") { n = split(q, a, " "); q = ""; for (i = 1; i <= n; i++) { print a[i]; q = q kids[a[i]] } } }'
+}
+
+# A zombie is gone: from an EXIT trap the root is the caller's own unreaped child, and `kill -0`
+# on it held every stop for the full grace.
+_devkit_any_alive() {
+  local p
+  for p in $1; do
+    case "$(ps -o stat= -p "$p" 2>/dev/null | tr -d ' ')" in '' | Z*) ;; *) return 0 ;; esac
+  done
+  return 1
 }
 
 devkit_docker_guard() {

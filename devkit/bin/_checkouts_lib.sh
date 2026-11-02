@@ -1,7 +1,8 @@
+# shellcheck shell=bash
 # The fleet's checkouts on this box, found at run time so a repo cloned after a job's install is
 # covered with no reinstall (2026-11-02: instalite-relay was never synced by the nightly job,
 # whose plist held the repo list of its install day). Sourced; defines functions only.
-# Used by apple_check.sh (one --root) and dependency_merge.sh (DEVKIT_CHECKOUT_PARENTS); each job
+# Used by main_check.sh and dependency_merge.sh (both scan DEVKIT_CHECKOUT_PARENTS by default); each job
 # then judges a checkout by its origin/main, never by this list.
 #
 #   DEVKIT_CHECKOUT_PARENTS

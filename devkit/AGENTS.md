@@ -79,7 +79,7 @@ is README.md "Architecture". Invariants of the design:
   skipped unchecked. Only correctness fails a check: a flake is retried once
   and files `flaky`; ratchets and budgets report or file issues, never fail it. `--ungated` is the
   owner's alone. Every plan declares `DEPLOY_KINDS=` (README "Deploy kinds"; the scorecard's
-  `deploy_kinds`), so a kind no publisher proves (`ios`, `mac`) is proven elsewhere. check_tree
+  `deploy_kinds`), so every kind the publisher does not prove is proven on the Mac. check_tree
   prints `CHECK <job> PASS|FAIL|REPORTED|SKIPPED …` and `CHECK VERDICT PASS|FAIL head=<sha>` (an
   API, like the gate's). A repo's checks start at most once per window
   (`bin/_cadence_lib.sh`: the plan's `MAIN_CHECK_MINUTES`, default 180, at the slug's own minute),
@@ -91,10 +91,11 @@ is README.md "Architecture". Invariants of the design:
   record expires after 24 h (`publish.sh --recheck <sha>` sooner), a green commit closes
   `main-red`, a job is a FAIL after `CHECK_JOB_SECONDS` (1800), and the Mac's hourly
   `publisher_deadman.sh` (GitHub only) files `publisher stalled` when linux-box stops publishing.
-- An Apple app's main is proven on the Mac: `bin/apple_check.sh` (a LaunchAgent, each repo once
-  per cadence window) runs check_tree at a new main of a plan declaring `DEPLOY_KINDS` ios or mac,
-  and files and closes only its own `main-red` issues (`main is red on the Mac at …`,
-  `_issue_lib.sh` devkit_main_red_*).
+- Every main the publisher does not prove is proven on the Mac: `bin/main_check.sh` (one
+  LaunchAgent, each repo once per cadence window) runs check_tree at a new main of every plan but
+  `DEPLOY_KINDS=image` alone (ios, mac, hosted, library, tooling; devkit's own), posts the verdict
+  as the commit's `main-check` status (`_commit_status_lib.sh`, the one context name), and files
+  and closes only its own `main-red` issues (`main is red on the Mac at …`, `_issue_lib.sh`).
 - A launchd job runs devkit main's copy of itself: its plist starts the job dir's `launcher.sh`
   (`bin/job_launcher.sh`, installed by `bin/_launchd_job_lib.sh`), never a path in a checkout, so
   a devkit merge reaches the next run with no fast-forward. A new job goes through the same lib.
