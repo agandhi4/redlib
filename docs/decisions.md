@@ -275,3 +275,8 @@ Consequence: about 4x fewer prefetch calls for the same browsing, and a post ope
 Why: gate logs for #60–#67 showed the image job's dependency step (about 270 release crates) rebuilding cold on each PR's first gate and on each publish, 150–430 s. The cause was `COPY Cargo.lock Cargo.toml`: every PR bumps the crate version for the `?v=` asset cache-buster, which changes both files. Those cold builds pushed #62, #65 and #67 past the gate budget and forced full reruns.
 Decision: a `dep-manifests` stage rewrites redlib's own version to 0.0.0 in both files, and the dependency layer copies those versions instead. BuildKit keys `COPY --from` on content, so the layer is rebuilt only when a dependency changes. `COPY . ./` then brings in the real manifests, so only the redlib crate recompiles.
 Consequence: a version bump no longer costs a cold dependency build in the gate or on linux-box. The stage's `test` lines fail the build if the rewrite stops matching exactly one line per file.
+
+## 2026-11-02 — The docs describe review rounds and the main check, not the retired gate
+Why: devkit retired the pre-merge gate (devkit 2026-11-02), but AGENTS.md, the README, docs/fork.md and the Makefile still told agents to run `make gate` and wait for `local-gate`.
+Decision: a PR merges on review rounds (`@codex review` or `make review PR=<n>`, capped at `DEVKIT_REVIEW_ROUNDS`); linux-box's publisher proves main with `check_tree.sh` at most once per 3 h window and ships only green commits. `GATE_STATE_NAME` is dropped (nothing reads it).
+Consequence: `make gate` remains as devkit's stub. The plan file keeps its name, `scripts/ci/gate_plan.sh`.
