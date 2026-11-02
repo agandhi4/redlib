@@ -22,6 +22,11 @@
 #     GATE_ALLOW_FORKS=0|1                   optional; default 0: a fork PR is refused before fetch
 #     GATE_JOB_COSTS="<job>=<units> ..."     optional; a job's admission cost where the default
 #                                            table guesses wrong ("Concurrency")
+#     GATE_DOCKER_GROUPS="IMAGE E2E"         optional (that is the default); the default plan's
+#                                            groups whose jobs need Docker: when one will run,
+#                                            the daemon is checked before the first job
+#                                            (require_docker). A plan whose db tiers run a
+#                                            throwaway Postgres adds BACKEND and CLOCK; "" for none
 #     gate_plan()                            required; called with the merged worktree ready
 #     gate_cleanup()                         optional; runs in the EXIT trap (containers, images)
 #   Available to the plan: $PR $WT $ROOT $CHANGED $HEAD_SHA $MAIN_SHA $LOGDIR, the areas the
@@ -38,6 +43,9 @@
 #     note <text>                              GATE note: <text>
 #     changed <ERE>                            true if any changed path matches (anchor it)
 #     pr_has_label <label>                     true only if gh confirms the label (fails closed)
+#     require_docker <what needs it>           the daemon answers (a stopped OrbStack is started
+#                                              once, with a note), else GATE docker FAIL and VERDICT
+#                                              FAIL before any job; the default plan calls it
 #     nothing_to_run <reason>                  early VERDICT PASS when no job applies
 #   Every job must be a Makefile target the CI workflows also call: parity is structural.
 #   Change a check in the Makefile, never in the plan.
@@ -56,15 +64,26 @@
 #   (throwaway_pg.sh, boot_image.sh) probe the daemon and bound every docker call themselves
 #   (bin/_timeout_lib.sh), so a hung daemon fails in seconds with one line, not 15 minutes.
 #
-# Budgets (owner directive 2026-10-13: whole gate <= 10 min, no job > 5 min): GATE_JOB_BUDGET_MINUTES
-#   (default 5) per job and GATE_BUDGET_MINUTES (default 10) for the whole gate, counted from the
-#   moment the PR's run lock is held, less every second a job queued for capacity ("Concurrency":
-#   waiting is the box's cost, not the PR's). Decimals allowed; 0 disables.
+# Docker (devkit decisions 2026-11-01): when a GATE_DOCKER_GROUPS group will run, the default plan
+#   probes the daemon once before its first job (require_docker). redlib #67 ran quick and unit
+#   for ~135 s with OrbStack stopped before its image job found no daemon, and needed a full
+#   rerun. Down on macOS with `orbctl status` saying Stopped, the gate runs `orbctl start` once,
+#   probes up to DEVKIT_ORBSTACK_START_PROBES times 1 s apart (default 60) and goes on with `GATE
+#   note: OrbStack was stopped; started it ...`. Otherwise `GATE docker FAIL (needed by <groups>:
+#   <why>)` and VERDICT FAIL before any job. Never `orbctl stop`: it kills every lane's containers.
+#
+# Budgets (owner directive 2026-10-13: whole gate <= 10 min, no job > 5 min; 2026-10-28: <= 10 min
+#   of the gate's own run time once admitted): GATE_JOB_BUDGET_MINUTES (default 5) per job and
+#   GATE_BUDGET_MINUTES (default 10) for the whole gate, counted from the moment the PR's run lock
+#   is held, less every second a job queued for capacity ("Concurrency": waiting is the box's
+#   cost, not the PR's, and is reported on its own `GATE note:` line). Decimals allowed; 0 disables.
 #   An over-budget job still runs to completion (budgets never kill real work; the watchdog
 #   handles hangs) and then prints GATE <job> OVERBUDGET (<n>s > <budget>s); the whole gate prints
-#   GATE total OVERBUDGET (...). Either makes the verdict FAIL, with the job named in the status
-#   description, unless GATE_BUDGET_ENFORCE=0 (default 1), which keeps the lines and the verdict
-#   PASS: for a queue adopting budgets before its suites fit.
+#   GATE total OVERBUDGET (...). Reported, never failed (owner 2026-10-29: 87 of 181 failed gates
+#   since 10-22 failed on load alone): the lines and one `GATE note: over budget, reported` stay,
+#   the verdict is the tests'. GATE_BUDGET_ENFORCE=1 (default 0) makes either a FAIL naming the
+#   job in the status description; the nightly budget watch (bin/budget_watch.sh) runs that way,
+#   on an idle box, so a real slowdown still surfaces.
 #   Under load a JOB's budget stretches (bin/_load_lib.sh: min(max(1-minute load / cores, gate
 #   slots held), 2), sampled when the job starts and when it ends, the larger kept, only above
 #   1.0), and its PASS|FAIL and OVERBUDGET lines then carry `; budget 300 s ×1.6 (load 2.0 at
@@ -109,15 +128,23 @@
 #   GATE_CAPACITY (an integer >= 1; default max(4, ceil(cores / 2))) is the pool's size. A job's
 #   cost is its GATE_JOB_COSTS entry, else the heaviest word of its make target: 1 for lint,
 #   docs, deps and metrics, 3 for Docker (db, image, smoke, e2e), 4 for native (ios, swift), 2
-#   for anything else (a test tier). Waiters queue in order of their gate's start, so a running
+#   for anything else (a test tier), raised to what the job measured (_slot_lib.sh "Measured
+#   costs": each job's CPU seconds go to the outcome record as `cpu_seconds`, and the recorder
+#   keeps $STATE/job-costs, which the next gate reads). Waiters queue in order of their gate's
+#   start, so a running
 #   gate's next job goes ahead of a newer gate's first; while it waits a job prints, at once and
 #   every 30 s (each heartbeat ending ` (waited <n>s)`),
 #     GATE waiting for capacity: <repo>#<pr> <job> needs <c> of <cap>, <u> in use (<holder> <c>,
-#       ...)[; queued behind <repo>#<pr> <job>, ...]
+#       ...); position <k> of <n>[, behind <repo>#<pr> <job>, ...]
 #   and its PASS|FAIL line then carries `; queued <n>s` inside the parentheses. A holder whose pid
 #   died is reclaimed by the next look at the pool. A tier run by hand outside a gate is admitted
 #   too (holder `<repo>:<tier>`); a job's make gets DEVKIT_SLOT_HOLDER=<the gate's pid>, so a tier
-#   inside it runs on the job's units instead of asking again. 1 gate at a time was the
+#   inside it runs on the job's units instead of asking again. Before its first job the gate prints
+#   the pool as it finds it, `GATE slot queue: <u> of <cap> in use (<holder> <c>, ...); <n>
+#   waiting (<label>, ...)`; `devkit/bin/gate_queue.sh` prints it live, with ages and pids.
+#   Admission stays per job, not per gate (devkit decisions 2026-10-28): a gate reserving its
+#   plan's peak would idle those units through its lint jobs, and its mid-run waits are already
+#   off its budget. 1 gate at a time was the
 #   2026-10-05 rule, GATE_SLOTS equal slots per whole gate the 2026-10-20 one (gate.env may still
 #   hold it for older vendored copies; this file ignores it).
 #   Two gates of ONE PR never overlap: before its first job a gate locks
@@ -160,7 +187,7 @@
 #   merge queues and linux-box never create it, so they keep the defaults.
 #
 # Output contract, parsed by the merge queues and worker.py — keep it (the informational
-# `GATE slot|areas|note|scope|waiting ...` lines are never job lines):
+# `GATE slot|areas|note|scope|waiting ...` lines, `GATE slot queue:` included, are never job lines):
 #   GATE <job> PASS|FAIL|SKIPPED [(...)]            one line per job
 #   GATE <job> WATCHDOG (silent for <n>s; log: <path>)      then the run stops
 #   GATE <job>|total OVERBUDGET (<n>s > <budget>s)  after the job's PASS|FAIL line / before VERDICT
@@ -241,7 +268,7 @@ require_setting GATE_SILENCE_SECONDS "$SILENT_SECS" '^[0-9]+$' 'a whole number o
 JOB_BUDGET_SECS=$(minutes_to_secs GATE_JOB_BUDGET_MINUTES "${GATE_JOB_BUDGET_MINUTES:-5}") || exit 2
 GATE_BUDGET_SECS=$(minutes_to_secs GATE_BUDGET_MINUTES "${GATE_BUDGET_MINUTES:-10}") || exit 2
 readonly JOB_BUDGET_SECS GATE_BUDGET_SECS
-readonly BUDGET_ENFORCE=${GATE_BUDGET_ENFORCE:-1}
+readonly BUDGET_ENFORCE=${GATE_BUDGET_ENFORCE:-0}
 require_setting GATE_BUDGET_ENFORCE "$BUDGET_ENFORCE" '^[01]$' '0 or 1'
 # Machine-wide, shared with every repo's gate and hand-run tier on this box (closet's included):
 # parallel full suites on one machine cause load-induced test timeouts (header, "Concurrency").
@@ -285,6 +312,7 @@ GATE_ALLOW_FORKS=0   # set here, not read from the environment: only the plan ma
 . "$(dirname "${BASH_SOURCE[0]}")/_gitattributes_lib.sh"
 GATE_CODE_PATHS=  # the plan's alone, never the environment's (_paths_lib.sh header)
 GATE_JOB_COSTS=   # the plan's alone too: an exported one would re-cost every repo's jobs
+unset GATE_DOCKER_GROUPS   # the plan's alone; unset, not empty: "" means no group needs Docker
 # shellcheck source=/dev/null  # the repo's plan; its contract is in the header
 . "$PLAN"
 slot_costs_check local_gate
@@ -305,9 +333,14 @@ WT="$STATE/$GATE_WORKTREE_PREFIX$PR"
 PRDIR="$STATE/logs/$PR"
 LOGDIR=""   # this run's own dir under $PRDIR, once open_run names it (header, "Run logs")
 readonly KEEP_RUNS=5
+readonly JOB_COSTS_FILE=$STATE/job-costs   # gate_record.py --costs writes it ("Concurrency")
+readonly TIMES_FILE=$STATE/times.$$        # children_cpu's; before the EXIT trap, which removes it
+slot_measured_costs local_gate "$JOB_COSTS_FILE"
+readonly SLOT_MEASURED_COSTS
 GATE_REF="refs/gate/pr-$PR"
 
 JOB_OUTCOMES="" # "<name> <verdict> <seconds|->" lines, in run order, for the outcome record
+JOB_CPU=""      # "<name>=<cpu seconds>" words, for the record's cpu_seconds and job-costs
 OVER_NAMES=""   # jobs (and `total`) over an ENFORCED budget, space-separated, for the record
 RECORD=0        # 1 once $LOGDIR exists: from then on every exit leaves an outcome record
 RUN_VERDICT=error   # pass|fail once verdict() or a FAIL step decides; error if neither does
@@ -392,6 +425,7 @@ wait_for_load
 mkdir -p "$STATE" || { echo "local_gate: cannot create $STATE" >&2; exit 2; }
 run_lock_acquire GATE "$STATE/pr-$PR.lock" "another gate of PR #$PR"
 echo "GATE slot capacity $SLOT_CAPACITY"
+POOL_NOW=$(slot_summary) && echo "GATE slot queue: $POOL_NOW"
 readonly GATE_T0=$SECONDS   # the whole-gate budget starts once the PR is this run's
 GATE_ORDER=$(date +%s)      # this gate's place in the capacity queue, for every job (header)
 readonly GATE_ORDER
@@ -453,9 +487,11 @@ job_went_silent() { # <log>
 # record_outcome: the outcome record (header, "Outcome record"), once, from the EXIT trap.
 record_outcome() {
   [ "$RECORD" = 1 ] || return 0
-  local name over=() total=${TOTAL_SECS:-}
+  local name entry over=() total=${TOTAL_SECS:-}
   for name in $OVER_NAMES; do over+=(--over "$name"); done
+  for entry in $JOB_CPU; do over+=(--cpu "$entry"); done
   printf '%s\n' "$JOB_OUTCOMES" | "$DEVKIT_PYTHON" -I "$GATE_RECORDER" --logdir "$LOGDIR" --runs "$STATE/runs.tsv" \
+    --costs "$JOB_COSTS_FILE" \
     --pr "$PR" --head "$HEAD_SHA" --main "$MAIN_SHA" --started "$GATE_STARTED" \
     --verdict "$RUN_VERDICT" --seconds "${total:-$((SECONDS - GATE_T0 - QUEUED_SECS))}" \
     ${total:+--total-seconds "$total"} ${over[@]+"${over[@]}"} \
@@ -466,6 +502,7 @@ cleanup() {
   # An interrupted gate must not leave a job running in the worktree it is about to remove.
   stop_job
   slot_release
+  rm -f "$TIMES_FILE"
   # An interrupted gate must not leave the PR showing `pending` forever.
   if [ "$STATUS_OPEN" = 1 ]; then post_status error "Local gate interrupted before a verdict"; fi
   record_outcome
@@ -546,9 +583,18 @@ whole_budget() {
   note "$WHOLE_BUDGET_NOTE"
 }
 
+# children_cpu: CHILD_CPU, the whole CPU seconds (user + sys) of every child this shell has reaped,
+# their own reaped descendants included (getrusage's RUSAGE_CHILDREN). The `times` builtin must
+# run in this shell: in $( ) it reports the subshell's children, always 0, hence TIMES_FILE.
+children_cpu() {
+  times >"$TIMES_FILE"
+  CHILD_CPU=$(awk 'NR == 2 { for (i = 1; i <= 2; i++) { split($i, t, /[ms]/); s += t[1] * 60 + t[2] }
+    printf "%d\n", s }' "$TIMES_FILE")
+}
+
 # ---- helpers for gate_plan ---------------------------------------------------------------
 job() { # <name> <make target> [VAR=val...]
-  local name=$1 t0 log=$LOGDIR/$1.log rc secs queued
+  local name=$1 t0 log=$LOGDIR/$1.log rc secs queued cpu0
   local budget load_note
   shift
   if [[ ! "$name" =~ ^[A-Za-z0-9_-]+$ ]] || [ "$name" = total ]; then
@@ -566,6 +612,8 @@ job() { # <name> <make target> [VAR=val...]
   # The child opens $log after it is forked; create it first so the watchdog's first size read
   # never races a missing file (it printed a `wc` error line before the job's redirect ran).
   : >"$log"
+  children_cpu
+  cpu0=$CHILD_CPU
   # 7>&-: the PR lock stays with this process. A job's descendant that outlives the gate (a dev
   # server) would otherwise hold it, and the PR's next gate would wait forever. A tier inside the
   # job finds the job's units through DEVKIT_SLOT_HOLDER.
@@ -585,6 +633,8 @@ job() { # <name> <make target> [VAR=val...]
   rc=$?
   JOB_PGID=""
   secs=$((SECONDS - t0))
+  children_cpu
+  JOB_CPU="$(tr ' ' '\n' <<<"$JOB_CPU" | grep -v "^$name=" | tr '\n' ' ')$name=$((CHILD_CPU - cpu0))"
   devkit_load_rescale "$(slot_held_count)"
   slot_release
   budget=$LOAD_BUDGET load_note=$LOAD_NOTE
@@ -613,6 +663,19 @@ pr_has_label() { # fail closed: a gh error means "no label", so label-relaxed ch
 # The description names main, as every verdict does: pr_merge.sh reads `on main <sha>` from it
 # when the gate ran on another host.
 nothing_to_run() { echo "GATE all SKIPPED ($1)"; verdict PASS "$1; nothing to run on main ${MAIN_SHA:0:7}"; }
+# require_docker <what needs it>: before the first job of a plan that will need Docker (the
+# default plan calls it for GATE_DOCKER_GROUPS, header), so a stopped daemon fails in seconds, not
+# after minutes of earlier jobs (redlib #67). A stopped OrbStack is started once and the run goes
+# on with a note (devkit_docker_ensure, bin/_timeout_lib.sh); anything else is a FAIL verdict
+# before any job, naming Docker and the remedy.
+require_docker() {
+  if devkit_docker_ensure local_gate; then
+    [ -z "$DEVKIT_DOCKER_NOTE" ] || note "$DEVKIT_DOCKER_NOTE"
+    return 0
+  fi
+  fail_step docker "needed by $1: $DEVKIT_DOCKER_ERROR"
+  verdict FAIL "Docker is not reachable (needed by $1); start Docker and rerun"
+}
 
 # ---- run logs (header, "Run logs") --------------------------------------------------------------
 # run_numbers: "<n> <dir>" for each run dir under $PRDIR, any order.
@@ -728,7 +791,7 @@ close_budgets() {
   check_budget total "$TOTAL_SECS" "$WHOLE_BUDGET_SECS" "$WHOLE_BUDGET_NOTE"
   write_gate_metrics "$TOTAL_SECS"
   if [ -n "$OVERBUDGET" ] && [ "$BUDGET_ENFORCE" = 0 ]; then
-    note "over budget, not enforced (GATE_BUDGET_ENFORCE=0): $OVERBUDGET"
+    note "over budget, reported (budgets fail only under GATE_BUDGET_ENFORCE=1): $OVERBUDGET"
   fi
 }
 close_budgets

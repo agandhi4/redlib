@@ -46,7 +46,7 @@ declare -F metrics_conf_parse >/dev/null || . "$(dirname "${BASH_SOURCE[0]}")/_m
 # checkout, main's copy), the guards ci-quick runs (devkit-check, docs/toolchain/workflows/
 # release/ci-targets checks, own-commit, ios-check, hooks_check, bats_assert_check and their libs), and fleet
 # operations run from a devkit checkout or after merge (sync, new, monthly audit, the publisher
-# publish.sh with ship_tag.sh and registry_prune.sh, the nightly dependency merge and its vuln_watch.py), machine setup (install_gh_shim.sh, whose --check
+# publish.sh with ship_tag.sh and registry_prune.sh, the nightly dependency merge and its vuln_watch.py and budget_watch.sh), machine setup (install_gh_shim.sh, whose --check
 # the scorecard reads; install_dependency_merge.sh, install_monthly_audit.sh, _launchd_job_lib.sh,
 # and job_launcher.sh, the launchd entry they install), and
 # ios_device.sh, which only a person's `make ios-install` runs against a phone.
@@ -56,8 +56,8 @@ DEVKIT_TOOLING_BIN="local_gate.sh gate.sh remote_gate.sh _paths_lib.sh
   _makefile_lib.sh workflows_check.sh _workflows_lib.sh release_check.sh _dockerfile_lib.sh
   _gitattributes_lib.sh _trailer_lib.sh own_commit_check.py _dockerignore.py py_cognitive_lint.py changed_lint.py _changed_files.py
   devkit-sync.sh devkit-new.sh monthly_audit.sh dead_alert_audit.py ship_tag.sh publish.sh docker_credential_gh.sh registry_prune.sh scorecard.py agent_cost.py secrets_check.sh migration_check.py
-  gate_record.py pr_merge.sh merge_rules.sh pr_create.sh _gh_repo_lib.sh codex_review.py _codex_rules.sh _merge_carry.sh decisions_merge.py gate_bite.py _repo_identity.py _renovate.py install_gh_shim.sh
-  dependency_merge.sh _dependency_pr.py vuln_watch.py install_dependency_merge.sh install_monthly_audit.sh _launchd_job_lib.sh job_launcher.sh
+  gate_record.py gate_queue.sh pr_merge.sh merge_rules.sh pr_create.sh _gh_repo_lib.sh codex_review.py _codex_rules.sh _merge_carry.sh decisions_merge.py gate_bite.py _repo_identity.py _renovate.py install_gh_shim.sh
+  dependency_merge.sh _dependency_pr.py vuln_watch.py budget_watch.sh install_dependency_merge.sh install_monthly_audit.sh _launchd_job_lib.sh job_launcher.sh
   ios_check.py ios_device.sh bats_assert_check.py"
 # What the image group exercises (ci-smoke/ci-image boot through them): tooling, but a change
 # to one runs the image group even when nothing else would.
@@ -230,6 +230,12 @@ devkit_gate_areas() {
 #                                  (bin/tier_guard.sh "Clock shift"; exceptions in
 #                                  scripts/ci/clock_shift.conf)
 #   GATE_CLOCK_SHIFTS="<n>d ..."   the offsets, whole days ahead; unset or empty: "30d 365d"
+#   GATE_DOCKER_GROUPS="<GROUP> ..." the groups whose jobs need Docker; unset: "IMAGE E2E", ""
+#                                  for none. When one will run, the skeleton's require_docker
+#                                  checks the daemon before the first group (a stopped OrbStack
+#                                  is started once; else VERDICT FAIL before any job). A plan
+#                                  whose db tiers boot throwaway_pg.sh adds BACKEND and CLOCK
+#                                  (finplat, orbit, locus, kitchen; closet's CLOCK)
 #   gate_plan_extra()              optional; called after the groups above, for the repo's own
 #                                  rules (devkit_group_ran <group> says whether a group ran)
 #
@@ -303,6 +309,7 @@ devkit_default_gate_plan() {
   [ -n "$GATE_AREAS" ] || nothing_to_run "No changed paths"
   [ "$GATE_AREAS" != native ] || _devkit_native_runs \
     || nothing_to_run "Only native paths changed (ios/, OrbitAgent/, *.xcodeproj/); build and test them on the Mac"
+  _devkit_docker_preflight
   DEVKIT_GATE_RAN=' '
   _devkit_group QUICK "$(_devkit_quick_jobs)"
   if devkit_group_ran quick; then
@@ -317,6 +324,33 @@ devkit_default_gate_plan() {
   _devkit_group E2E
   if declare -F gate_plan_extra >/dev/null; then gate_plan_extra; fi
   _devkit_metrics_group
+}
+
+# Before the first group: when a GATE_DOCKER_GROUPS group (header table) will run, the daemon must
+# answer now (require_docker, the skeleton's), not after minutes of earlier jobs (redlib #67:
+# OrbStack stopped, quick and unit ran ~135 s, then the image job failed and the PR re-gated in
+# full). A harness that runs a plan without the skeleton has no require_docker and probes nothing.
+_devkit_docker_preflight() {
+  local group need="" groups="QUICK DOCS CLOCK BACKEND FRONTEND IMAGE E2E METRICS"
+  for group in ${GATE_DOCKER_GROUPS-IMAGE E2E}; do
+    case " $groups " in
+      *" $group "*) ;;
+      *) echo "devkit_default_gate_plan: GATE_DOCKER_GROUPS names '$group' (groups: $groups)" >&2; exit 2 ;;
+    esac
+    ! _devkit_group_will_run "$group" || need+=${need:+, }$(tr '[:upper:]' '[:lower:]' <<<"$group")
+  done
+  [ -n "$need" ] && declare -F require_docker >/dev/null || return 0
+  require_docker "$need"
+}
+
+# <GROUP>: true when the group has jobs and will run them (DOCS only when QUICK will not, as
+# devkit_default_gate_plan runs them).
+_devkit_group_will_run() {
+  local jobs_var=GATE_JOBS_$1
+  [ "$1" != CLOCK ] || jobs_var=DEVKIT_CLOCK_JOBS
+  [ -n "${!jobs_var:-}" ] || return 1
+  if [ "$1" = DOCS ] && [ -n "${GATE_JOBS_QUICK:-}" ] && _devkit_group_runs QUICK; then return 1; fi
+  _devkit_group_runs "$1"
 }
 
 # The QUICK jobs, with MIGRATION_EDIT_OK=1 appended under the `migration-contract` label
