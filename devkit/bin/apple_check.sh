@@ -7,7 +7,12 @@
 #
 # Usage: bin/apple_check.sh [--root <dir>] [--repos a,b]
 #   --root   where the checkouts live (default ~/projects/solo): every <root>/<name> git checkout
+#            (_checkouts_lib.sh devkit_checkouts, the nightly dependency merge's scan too)
 #   --repos  only these checkout names
+# One checkout per origin slug, the first by name (_checkouts_lib.sh devkit_claim_checkout); a
+# second clone of a repo is left out silently. Every git network call is bounded and never
+# prompts (_timeout_lib.sh devkit_git_guard, DEVKIT_GIT_TIMEOUT), so a remote waiting on a
+# password or a host key, or never answering, is one fetch error, never a stalled run (devkit #366).
 # Per checkout: fetch origin main (M) and read M's plan, never the checkout's. No ios or mac kind:
 # skipped. M already judged ($STATE/<name>: `<sha> pass` or `<sha> fail <first bad sha>`):
 # up-to-date, and its main-red filing or closing retried if GitHub failed it. A check already started in the repo's current window (bin/_cadence_lib.sh: the
@@ -38,6 +43,11 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
 . "$HERE/_load_lib.sh"
 # shellcheck source=bin/_cadence_lib.sh  # cadence_minutes, cadence_due, cadence_mark, cadence_utc
 . "$HERE/_cadence_lib.sh"
+# shellcheck source=bin/_checkouts_lib.sh  # devkit_checkouts, devkit_claim_checkout
+. "$HERE/_checkouts_lib.sh"
+# shellcheck source=bin/_timeout_lib.sh  # devkit_git_guard
+. "$HERE/_timeout_lib.sh"
+devkit_git_guard apple_check
 
 readonly WHERE='on the Mac'
 usage() { echo "usage: apple_check.sh [--root <dir>] [--repos a,b]" >&2; exit 2; }
@@ -158,9 +168,10 @@ judge() {
   esac
 }
 
-if [ -n "$REPOS_ARG" ]; then DIRS=$(tr ',' '\n' <<<"$REPOS_ARG" | sed "s|^|$ROOT_DIR/|"); else DIRS=$(find "$ROOT_DIR" -mindepth 1 -maxdepth 1 -type d | sort); fi
+if [ -n "$REPOS_ARG" ]; then DIRS=$(tr ',' '\n' <<<"$REPOS_ARG" | sed "s|^|$ROOT_DIR/|"); else DIRS=$(devkit_checkouts "$ROOT_DIR"); fi
 for dir in $DIRS; do
   [ -e "$dir/.git" ] || { [ -z "$REPOS_ARG" ] || { echo "APPLE ${dir##*/} error (not a git checkout)"; ERRORS=$((ERRORS + 1)); }; continue; }
+  devkit_claim_checkout "$dir" || continue
   judge "$dir"
   prune_logs "${dir##*/}"
 done
