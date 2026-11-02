@@ -21,8 +21,10 @@
 #       GATE_SLUG, so it is known before any fetch and a duplicate is never fetched. A checkout
 #       with no origin is keyed by its real path.
 #   devkit_origin_slug <dir>
-#       origin's owner/repo, lowercased (GitHub's are case-blind), from its URL: scp-like, ssh://,
-#       https:// or a local path (the last two components). No network.
+#       origin's owner/repo (devkit_url_slug of its URL). No network.
+#   devkit_url_slug <url>
+#       A git URL's owner/repo, lowercased (GitHub's are case-blind): scp-like, ssh://, https://
+#       or a local path (the last two components). dependency_merge.sh reads DEVKIT_URL's with it.
 
 # shellcheck disable=SC2034  # read by the sourcing job
 DEVKIT_CHECKOUT_PARENTS=("$HOME/projects/solo" "$HOME/projects/homelab")
@@ -41,9 +43,13 @@ devkit_checkouts() {
 }
 
 devkit_origin_slug() {
-  local url rest
+  local url
   url=$(git -C "$1" remote get-url origin 2>/dev/null) || return 1
-  url=${url%/}
+  devkit_url_slug "$url"
+}
+
+devkit_url_slug() {
+  local url=${1%/} rest
   url=${url%.git}
   rest=${url%[/:]*}
   printf '%s/%s\n' "${rest##*[/:]}" "${url##*[/:]}" | tr '[:upper:]' '[:lower:]'

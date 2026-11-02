@@ -5,7 +5,8 @@
 #
 # Usage: devkit/bin/node_toolchain.sh <repo-root>
 #   Prints the bin directory to prepend to PATH, or nothing when PATH's node already matches.
-#   Exit 0 ok, 1 cannot provide (no .nvmrc, bad version, download or checksum failure), 2 usage.
+#   Exit 0 ok, 1 cannot provide (no .nvmrc, a download or checksum failure), 2 usage, 3 the
+#   tree's own fault: .nvmrc holds no exact version (check_tree.sh calls that commit red).
 #
 # Installs land in $XDG_DATA_HOME/devkit/node/v<ver> (default ~/.local/share/devkit/node),
 # downloaded from nodejs.org over HTTPS and verified against that release's SHASUMS256.txt.
@@ -21,7 +22,7 @@ NVMRC="$ROOT/.nvmrc"
 VERSION=$(tr -d '[:space:]' < "$NVMRC"); VERSION=${VERSION#v}
 case "$VERSION" in
   [0-9]*.[0-9]*.[0-9]*) ;;
-  *) echo "node_toolchain: .nvmrc must hold an exact version (got '$VERSION')" >&2; exit 1 ;;
+  *) echo "node_toolchain: .nvmrc must hold an exact version (got '$VERSION')" >&2; exit 3 ;;
 esac
 
 if command -v node >/dev/null && [ "$(node --version 2>/dev/null)" = "v$VERSION" ]; then

@@ -1599,3 +1599,43 @@ none.
 **Decision**: the baseline is the sha-* tag of the version carrying `latest`; the compare's paths include each `previous_filename`; a `--repos` run reports and leaves the issue as is.
 **Axis**: better: three ways a stalled publisher read as alive are gone.
 **Consequence**: only the full hourly run files, rewrites or closes `publisher stalled`.
+
+## 2026-11-02 — The Mac's main check works in clones of its own, never a developer's checkout
+**Why**: #347: main_check.sh fetched and ran check_tree (a worktree for a whole plan's run) in the checkouts under ~/projects/solo, which every lane's worktrees share: a collision with a lane's git (a ref or index lock) read as an `error`, and the job wrote to repos people work in. #351: a fetch failing with no origin/main anywhere was silently "not ours".
+**Decision**: each repo gets `$STATE/clones/<name>`, made once as a local clone of the checkout (hard-linked objects, read-only to the checkout, no network) and pointed at the checkout's origin URL and core.sshCommand at every run; fetch, plan, check_tree and issue bodies use it. The checkout is only read (its origin, and its origin/main when the clone has none). A fetch failure is silent only when a last-known main is another's; unknown is an error. A checkout with no origin is no fleet repo.
+**Axis**: better: a background check can no longer race or leave state in a repo someone is working in.
+**Consequence**: a clone whose checkout is gone stays until removed by hand (`rm -rf ~/.local/state/devkit-main-check/clones/<name>`).
+
+## 2026-11-02 — The nightly job syncs only a main-check green devkit
+**Why**: dependency_merge.sh vendored devkit main's tip into every repo nightly, so one bad devkit merge reached the whole fleet within a day, before anything had checked it (no pre-merge gate).
+**Decision**: the sync's target is the newest of devkit main's 40 newest first-parent commits whose `main-check` status (#374, `_commit_status_lib.sh devkit_main_check_state`) is success, walked once per run; no green one syncs nothing, with one `devkit-sync: nothing synced` line naming the newest red. N=40: more than the busiest merge day yet (31, 2026-11-02) and ~ten 3 h windows at the usual rate; deeper would quietly sync a days-stale devkit past a long red. The job runs the repo's `devkit/bin/devkit-sync.sh <target>` (its `make devkit-sync` recipe, which cannot pass a ref; every vendored copy takes one) and refuses a commit vendoring anything else. A repo already past the target is `current`, never moved back.
+**Axis**: better: a devkit regression reaches no consumer until a fix is green; cost: the fleet trails devkit main by up to one check window (3 h).
+**Consequence**: devkit merges reach repos only after the Mac checks them; if main_check stops, syncs stop (the `nothing synced` line says why). The installer now retires apple-check only after main-check loads (#383).
+
+## 2026-11-02 — devkit's migration_check tests are hermetic against check_tree's environment
+**Why**: the Mac's first main check of devkit itself (#374) failed `quick`: check_tree exports `MIGRATION_BASE` to every job, and migration_check_test.py's fixtures ran the script with the checked commit as their base, which they do not have (8 failures). Only a main check of devkit could see it; a hand run never sets the variable.
+**Decision**: the test module drops `MIGRATION_BASE`, `MIGRATION_EDIT_OK` and `MIGRATION_FROZEN_OK` from its environment at import; each test that wants one passes it explicitly.
+**Consequence**: devkit's main can go green on the Mac, which the nightly sync now waits for (#385).
+
+## 2026-11-02 — A toolchain pin the commit got wrong is its red, never the box's
+**Why**: #321: every toolchain failure was `CHECK toolchain ERROR`, exit 2, the box's, so an inexact `.nvmrc`, two rust declarations or disagreeing `packageManager` pins recorded nothing: the publisher stopped at that main every window (the walk never reached an older green commit), no `main-red` named it, and only the dead-man noticed hours later.
+**Decision**: node_toolchain.sh, rust_toolchain.sh and package_manager_toolchain.sh exit 3 for the tree's own fault (a malformed, inexact or conflicting declaration, a package.json that is no JSON, a declared hash the tarball does not match); toolchain_path returns 3 when any step did (over 1), and check_tree prints `CHECK toolchain FAIL (<why>)` with verdict FAIL, `failed=toolchain`. A download, install or offline failure stays exit 1, the box's.
+**Axis**: better: a bad pin is a main-red on its commit within one window, and deploys walk past it.
+**Consequence**: a new provisioning script's declaration errors exit 3; a version that does not exist upstream (a 404) still reads as the box's.
+
+## 2026-11-02 — A host that deploys a branch gets only checked commits: DEPLOY_BRANCH
+**Why**: rollcall (Vercel Hobby) deployed every push to main to production, before any check. The brief preferred Vercel's `ignoreCommand` reading `main-check`, but that needs three secrets and four parts: a GitHub token in Vercel (the repo is private), a deploy hook URL in sops (not set up on this Mac: no sops, no age key, no secrets file) so a green commit skipped at push is redeployed, the ignore script, and a hook runner in main_check; and a hook builds main's head, not the checked commit.
+**Decision**: a literal plan line `DEPLOY_BRANCH=<branch>`; on a green verdict main_check pushes the checked sha to origin's `<branch>` (plain push: fast-forward only, never `main`; a branch already at or past it is left), inside the retried GitHub sync. Vercel's production branch becomes `production`; pushes to main build previews only. No token, no secret, no Vercel CLI: the Mac already pushes to these repos.
+**Consequence**: rollcall production trails main by up to one check window (3 h) and never takes a red commit; the urgent path is `git push origin main:production`. One owner step: Vercel → rollcall → Settings → Environments → Production → Branch Tracking: `production`. The same line fits homelab's deploy.sh later.
+
+## 2026-11-02 — secrets_check --staged reads the index, never the working copy
+**Why**: #74: `--staged` listed the staged paths but read their working-tree content, so a secret staged and then edited out of the working copy, or a staged file deleted from it, reached the commit through pre-commit. With no pre-merge gate (2026-11-02) the next full scan is check_tree on main, after the push: too late for a credential.
+**Decision**: the staged blobs, and the staged allow file, are written to a scratch tree with `git checkout-index` (NUL-separated paths) and every rule scans them there unchanged.
+**Axis**: better: pre-commit judges exactly what the commit holds.
+**Consequence**: an allow line counts in pre-commit only once it is staged, like the file it excuses.
+
+## 2026-11-02 — devkit's tests run with no colour and no agent, wherever they run
+**Why**: #393: devkit's own main check (launchd) and Actions failed 3 tests in clock_shift_contract.bats that passed for every agent. vitest 4.1 (tinyrainbow) colours its summary off a TTY unless NO_COLOR, TERM=dumb or an agent marker (`AI_AGENT`) says not to, and Claude Code exports `AI_AGENT`: the agent's own session hid a red that only a clean environment showed.
+**Decision**: `tests/setup_suite.bash`, the one place every bats run starts, also unsets `FORCE_COLOR` and std-env's agent markers (`AI_AGENT`, `CODEX_SANDBOX`, …) and exports `NO_COLOR=1`; shards_contract.bats holds it. A test needing colour or an agent sets it itself (as `as_agent` does).
+**Axis**: better: a test's verdict no longer depends on who runs it; a red main reproduces in a lane.
+**Consequence**: test 7's own `NO_COLOR=1` is gone. Python tests have no suite hook: a module whose script reads the environment drops its variables at import (migration_check_test.py, #388).

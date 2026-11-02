@@ -8,8 +8,10 @@
 # Usage: devkit/bin/package_manager_toolchain.sh <repo-root>
 #   Prints the bin directory to prepend to PATH (holding pnpm and pnpx), or nothing when no tracked
 #   package.json declares packageManager, or it names another manager (one stderr line: that
-#   is the repo's own tooling's). Exit 0 ok, 1 cannot provide (two declarations that disagree, an
-#   inexact version, a download or checksum failure), 2 usage.
+#   is the repo's own tooling's). Exit 0 ok, 1 cannot provide (a download or install failure),
+#   2 usage, 3 the tree's own fault (a package.json that is no JSON, two declarations that
+#   disagree, a malformed or inexact one, a declared hash the tarball does not match):
+#   check_tree.sh calls that commit red.
 #
 # Called by toolchain_path.sh after Node, so the npm that installs it is the pinned Node's. Installs
 # land in $XDG_DATA_HOME/devkit/pnpm/<ver> (default ~/.local/share/devkit/pnpm): `npm pack`
@@ -27,6 +29,7 @@ set -euo pipefail
 ROOT=$1
 HERE=$(dirname "${BASH_SOURCE[0]}")
 fail() { echo "package_manager_toolchain: $*" >&2; exit 1; }
+bad_decl() { echo "package_manager_toolchain: $*" >&2; exit 3; }
 
 FILES=()
 while IFS= read -r f; do
@@ -40,23 +43,37 @@ done < <(git -C "$ROOT" ls-files -- package.json '*/package.json' 2>/dev/null)
 devkit_python || fail "$DEVKIT_PYTHON_ERROR"
 
 # "<file>\t<declaration>" per file that declares one; json decides, the grep above only narrows.
+# Exit 3 only for a file that is no JSON object (the tree's); a Python that cannot run is the box's.
+RC=0
 DECLS=$(cd "$ROOT" && "$DEVKIT_PYTHON" -I -c '
 import json, sys
 for path in sys.argv[1:]:
-    with open(path, encoding="utf-8") as f:
-        value = json.load(f).get("packageManager")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("not a JSON object")
+    except ValueError as e:  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+        print(f"{path}: {e}", file=sys.stderr)
+        sys.exit(3)
+    value = data.get("packageManager")
     if isinstance(value, str) and value:
         print(f"{path}\t{value}")
-' "${FILES[@]}") || fail "cannot read packageManager from ${FILES[*]}"
+' "${FILES[@]}") || RC=$?
+case $RC in
+  0) ;;
+  3) bad_decl "cannot read packageManager from ${FILES[*]} (above)" ;;
+  *) fail "cannot run $DEVKIT_PYTHON to read packageManager from ${FILES[*]} (exit $RC)" ;;
+esac
 [ -n "$DECLS" ] || exit 0
 if [ "$(printf '%s\n' "$DECLS" | cut -f2 | sort -u | wc -l | tr -d ' ')" -gt 1 ]; then
-  fail "package.json files declare different package managers ($(printf '%s\n' "$DECLS" | tr '\t' ' ' | paste -sd, - | sed 's/,/, /g')); one version per toolchain per repo"
+  bad_decl "package.json files declare different package managers ($(printf '%s\n' "$DECLS" | tr '\t' ' ' | paste -sd, - | sed 's/,/, /g')); one version per toolchain per repo"
 fi
 FILE=$(printf '%s\n' "$DECLS" | head -n 1 | cut -f1)
 DECL=$(printf '%s\n' "$DECLS" | head -n 1 | cut -f2)
 
 [[ "$DECL" =~ ^([a-z]+)@([^+]*)(\+(sha1|sha224|sha256|sha384|sha512)\.([0-9a-f]+))?$ ]] \
-  || fail "$FILE packageManager '$DECL' is not <name>@<version>[+<algo>.<hex>]"
+  || bad_decl "$FILE packageManager '$DECL' is not <name>@<version>[+<algo>.<hex>]"
 NAME=${BASH_REMATCH[1]} VERSION=${BASH_REMATCH[2]} ALGO=${BASH_REMATCH[4]} HASH=${BASH_REMATCH[5]}
 # Another manager is the repo's own tooling's (npm comes with Node): provided by nothing here,
 # and no failure, so a hook or job that never calls it still runs.
@@ -65,23 +82,29 @@ if [ "$NAME" != pnpm ]; then
   exit 0
 fi
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] \
-  || fail "$FILE packageManager must hold an exact version (got '$VERSION')"
+  || bad_decl "$FILE packageManager must hold an exact version (got '$VERSION')"
 
-# check_hash <tarball>: fail unless it matches the declared +<algo>.<hex>; none declared passes.
-check_hash() {
+# hash_ok <tarball>: true when it matches the declared +<algo>.<hex> (none declared passes);
+# ACTUAL is its digest.
+hash_ok() {
   [ -n "$ALGO" ] || return 0
-  local bits=${ALGO#sha} digest actual
+  local bits=${ALGO#sha} digest
   if command -v "sha${bits}sum" >/dev/null; then digest=("sha${bits}sum"); else digest=(shasum -a "$bits"); fi
-  actual=$("${digest[@]}" "$1" | awk '{print $1}')
-  [ "$actual" = "$HASH" ] || fail "checksum mismatch for pnpm $VERSION: $FILE declares $ALGO.$HASH, the tarball is $ALGO.$actual"
+  ACTUAL=$("${digest[@]}" "$1" | awk '{print $1}')
+  [ "$ACTUAL" = "$HASH" ]
 }
 
 STORE="${XDG_DATA_HOME:-$HOME/.local/share}/devkit/pnpm"
 DEST="$STORE/$VERSION"
 # The install keeps its tarball, so a hash declared after the cache was filled is still checked.
+# A stored tarball that does not match is either side's fault: the registry's own tarball, which
+# npm checks against the registry's integrity, decides (a damaged store is the box's, exit 1).
+STORED=''
 if [ -x "$DEST/bin/pnpm" ]; then
-  check_hash "$DEST/pnpm.tgz"
-  echo "$DEST/bin"; exit 0
+  if hash_ok "$DEST/pnpm.tgz"; then echo "$DEST/bin"; exit 0; fi
+  STORED=$ACTUAL
+  [ "${DEVKIT_OFFLINE:-0}" != 1 ] \
+    || fail "the stored $DEST/pnpm.tgz is $ALGO.$STORED, not $FILE's $ALGO.$HASH, and DEVKIT_OFFLINE=1 cannot fetch the registry's to tell which is wrong"
 fi
 
 [ "${DEVKIT_OFFLINE:-0}" = 1 ] && fail "pnpm $VERSION not cached at $DEST and DEVKIT_OFFLINE=1"
@@ -90,13 +113,16 @@ mkdir -p "$STORE"
 # In the store, so the final mv is a rename on one filesystem.
 TMP=$(mktemp -d "$STORE/.install.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
-echo "package_manager_toolchain: installing pnpm $VERSION (declared in $FILE)" >&2
+[ -n "$STORED" ] || echo "package_manager_toolchain: installing pnpm $VERSION (declared in $FILE)" >&2
 PACKED=$(cd "$TMP" && npm pack "pnpm@$VERSION" --pack-destination "$TMP" --json --silent) \
   || fail "npm pack pnpm@$VERSION failed"
 TARBALL=$(printf '%s' "$PACKED" | "$DEVKIT_PYTHON" -I -c 'import json, sys; print(json.load(sys.stdin)[0]["filename"])') \
   || fail "npm pack pnpm@$VERSION printed no filename"
 [ -f "$TMP/$TARBALL" ] || fail "npm pack pnpm@$VERSION wrote no $TARBALL"
-check_hash "$TMP/$TARBALL"
+hash_ok "$TMP/$TARBALL" \
+  || bad_decl "checksum mismatch for pnpm $VERSION: $FILE declares $ALGO.$HASH, the registry's tarball is $ALGO.$ACTUAL"
+[ -z "$STORED" ] \
+  || fail "the stored $DEST/pnpm.tgz is damaged ($ALGO.$STORED; the registry's matches $FILE's $ALGO.$HASH): remove $DEST and rerun"
 (cd "$TMP" && npm install --global --prefix "$TMP/pnpm" --offline --ignore-scripts --no-audit --no-fund --silent "./$TARBALL") \
   || fail "npm install of $TARBALL failed"
 GOT=$(cd "$TMP" && "$TMP/pnpm/bin/pnpm" --version) || fail "the installed pnpm does not run"
@@ -104,8 +130,9 @@ GOT=$(cd "$TMP" && "$TMP/pnpm/bin/pnpm" --version) || fail "the installed pnpm d
 mv "$TMP/$TARBALL" "$TMP/pnpm/pnpm.tgz"
 # One rename, so DEST is absent or whole. Another install of this version may land first (a hook
 # beside a check): its DEST is kept, never deleted under a running pnpm, and mv, finding a
-# directory there, nests ours inside it, which is removed.
-mv "$TMP/pnpm" "$DEST"
+# directory there, nests ours inside it, which is removed. A third finds that nest still there
+# and fails to move (devkit #319): the install already in place is as good.
+mv "$TMP/pnpm" "$DEST" 2>/dev/null || [ -x "$DEST/bin/pnpm" ] || fail "cannot move pnpm $VERSION into $DEST"
 rm -rf "$DEST/pnpm"
 [ -x "$DEST/bin/pnpm" ] || fail "$DEST holds no bin/pnpm; remove it and rerun"
 echo "$DEST/bin"
