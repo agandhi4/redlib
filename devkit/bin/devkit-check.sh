@@ -258,8 +258,8 @@ check_plan() {
   done
   [ "$retired_set" -eq 0 ] || exit 1
   plan_literal_setting "$plan" GATE_CODEX_REVIEW '[01]' 'GATE_CODEX_REVIEW=0 or GATE_CODEX_REVIEW=1'
-  # pr_merge.sh's gate_plan_text form (bin/_gate_env.sh). The comment strip above cuts a reason
-  # at a `#`, so one holding it fails here, as gate_plan_text would not read it.
+  # The literal `NAME="<text>"` form merge_rules.sh read until 2026-11-02 (it reads neither line
+  # now). The comment strip above cuts a reason at a `#`, so one holding it fails here.
   plan_literal_setting "$plan" GATE_CODEX_REVIEW_REASON '"[^"$`\\]+"' \
     'GATE_CODEX_REVIEW_REASON="<why>", double-quoted, with no $, `, \, " or #'
   codex_review_setting "$plan"

@@ -13,7 +13,7 @@
 #              as run; repeat for a command that runs several runners (pytest then vitest).
 #              `=<min>` may be left out once the repo's ratchet holds the floor (Floors, below)
 #
-# Output (an API, like local_gate's GATE lines). The command's own output streams through
+# Output (an API). The command's own output streams through
 # unchanged (stderr merged into stdout); a copy is kept only to read the summaries. Then:
 #   TIER <tier> FAIL (exit <rc>, <s>s)                   the command failed: exits <rc>
 #   TIER <tier> FLOOR <runner> <n> < <min>               ran fewer tests than the floor: exit 1
@@ -21,6 +21,7 @@
 #   TIER <tier> OVERBUDGET <s>s (budget <b>s)            exit 1 only under TIER_BUDGET_ENFORCE=1,
 #                                                        never under DEVKIT_CLOCK_SHIFT (Clock shift)
 #   TIER <tier>: <s>s (budget <b>s) <runner>=<n>...      every check held: exit 0
+# The seconds are devkit_now's (bin/_load_lib.sh; DEVKIT_CLOCK_CMD is the test hook).
 # Under load the budget stretches (bin/_load_lib.sh: min(max(1-minute load / cores, gate slots
 # held), 2), sampled when the command starts and when it ends, the larger stretch kept, only
 # above 1.0) and both budget lines then read `(budget 110 s ×1.6 (load 2.0 at start, 13.1 at end
@@ -42,8 +43,7 @@
 # quick single test.
 # A bad invocation exits 2 before the command runs. A budget is reported, not failed (owner
 # 2026-10-29: load, not code, failed half the gates): TIER_BUDGET_ENFORCE=1 (default 0) makes the
-# OVERBUDGET line exit 1, as GATE_BUDGET_ENFORCE=1 does for local_gate's budgets; the nightly
-# budget watch (bin/budget_watch.sh) runs every tier that way on an idle box. Floors have no such switch: a count
+# OVERBUDGET line exit 1, for a run on an idle box that should fail on a slowdown. Floors have no such switch: a count
 # is deterministic, so a floor that fails is a real loss.
 #
 # Counted = tests that RAN: passed + failed (+ pytest xfailed/xpassed/error, vitest "expected
@@ -393,10 +393,10 @@ take_slot() {
 # output open.
 if [ "${DEVKIT_NOTICE_FD:-}" = 6 ]; then exec 6>&-; unset DEVKIT_NOTICE_FD; fi
 devkit_load_scale "$BUDGET" "$(held_slots)"
-start=$SECONDS
+start=$(devkit_now)
 DEVKIT_LOAD_SCALE=$LOAD_SCALE "$@" 2>&1 | tee "$LOG"
 rc=${PIPESTATUS[0]}
-secs=$((SECONDS - start))
+secs=$(($(devkit_now) - start))
 put_back=0
 put_back_inputs || put_back=1
 devkit_load_rescale "$(held_slots)"

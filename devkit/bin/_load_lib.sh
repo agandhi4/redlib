@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # Machine load, and budgets that stretch under it. Sourced; defines functions and runs nothing.
-# Used by: local_gate.sh (the load wait before a slot; each job's budget), tier_guard.sh (the
+# Used by: tier_guard.sh (the
 # tier's budget) and hook_steps.sh (the load note on its ledger rows, for a reader of the
 # seconds to divide out).
 #
@@ -23,6 +23,10 @@
 # land on E-cores and ran ~1.7x slower at ×1.0 against hw.ncpu's 10 (devkit #240's unit: 304 s
 # vs 240 at load 7.9). The ratio is measured, not guessed: ECORE_RATIO_DEFAULT below.
 #
+#   devkit_now                     the budgets' clock: whole seconds since the shell started
+#                                  ($SECONDS), the one clock every elapsed time a budget, a
+#                                  watchdog or a queue wait judges is read from (tier_guard.sh,
+#                                  _slot_lib.sh)
 #   devkit_loadavg                 "<1m> <5m>", or nothing when the load cannot be read
 #   devkit_ncpu                    the online core count, or nothing: a count of things (the
 #                                  admission pool's default size), never a load divisor
@@ -38,12 +42,19 @@
 #   devkit_load_rescale [<slots held>]
 #                                  after the command: samples again and keeps the larger stretch,
 #                                  the slots counting at the smaller of the two counts, its
-#                                  LOAD_NOTE naming both samples (tier_guard.sh, local_gate.sh
-#                                  jobs; a hook's ledger note keeps the start sample)
+#                                  LOAD_NOTE naming both samples (tier_guard.sh;
+#                                  a hook's ledger note keeps the start sample)
 # Test hooks, environment only: DEVKIT_LOADAVG_CMD (a command printing "<1m> <5m> ..."),
-# DEVKIT_NCPU (a core count; set, it is also the capacity, a box of equal cores) and
-# DEVKIT_SYSCTL_CMD (a command run as `<cmd> <key>` in place of `sysctl -n <key>`).
+# DEVKIT_NCPU (a core count; set, it is also the capacity, a box of equal cores),
+# DEVKIT_SYSCTL_CMD (a command run as `<cmd> <key>` in place of `sysctl -n <key>`) and
+# DEVKIT_CLOCK_CMD (a command printing devkit_now's seconds: a test's command advances it, so a
+# tier or job takes the seconds its budget is judged on without waiting them, whatever the box's
+# load; tests/clock_helpers.bash).
 # DEVKIT_ECORE_RATIO (environment) overrides the measured E/P throughput ratio, for another chip.
+
+devkit_now() {
+  if [ -n "${DEVKIT_CLOCK_CMD:-}" ]; then bash -c "$DEVKIT_CLOCK_CMD"; else echo "$SECONDS"; fi
+}
 
 devkit_loadavg() {
   if [ -n "${DEVKIT_LOADAVG_CMD:-}" ]; then

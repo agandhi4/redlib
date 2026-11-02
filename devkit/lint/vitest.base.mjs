@@ -1,9 +1,9 @@
 // vitest's per-test timeouts, stretched by the machine load the way gate and tier budgets are.
 //
 // Why (finplat #689, 2026-10-19): frontend-unit hit vitest's 5 s testTimeout at a load of 169
-// on 10 cores, while the tier's own budget had already stretched ×2. local_gate.sh (per job) and
-// tier_guard.sh (per tier) export the factor they applied as DEVKIT_LOAD_SCALE; this module reads
-// it once, when vitest loads the config. Unset, junk or <= 1 reads as 1, and it is capped at 2
+// on 10 cores, while the tier's own budget had already stretched ×2. tier_guard.sh (per tier)
+// exports the factor it applied as DEVKIT_LOAD_SCALE; this module reads it once, when vitest
+// loads the config. Unset, junk or <= 1 reads as 1, and it is capped at 2
 // like the budgets (bin/_load_lib.sh), so a test that really doubled still fails on a busy box.
 //
 // Gotcha: imports nothing but node builtins (eslint.base.mjs: nothing), for the same reason: it

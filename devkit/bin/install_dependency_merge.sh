@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Schedule (or remove) the nightly gated dependency merge on this Mac: fills devkit main's
+# Schedule (or remove) the nightly dependency merge on this Mac: fills devkit main's
 # templates/launchd/com.agandhi4.devkit.dependency-merge.plist and bootstraps it as a LaunchAgent.
 #
 # Usage: bin/install_dependency_merge.sh <repo-root>...   install, or replace the installed job
@@ -10,9 +10,9 @@
 # The toolchain is resolved here, into the plist, not left to launchd's PATH: devkit's python3
 # and uv (bin/_toolchain_lib.sh) go first on its PATH, and no python3 >= 3.11 refuses the install
 # (2026-10-22: the first run found only Xcode's 3.9 and errored every PR). Node needs nothing
-# here: each gate provisions its repo's .nvmrc pin (node_toolchain.sh) on any PATH.
-# Repo roots' origin/main must hold scripts/ci/gate_plan.sh with a literal GATE_SLUG and
-# GATE_STATE_NAME (gate_plan_main, the job's own check), and every path must be plain
+# here: each make provisions its repo's .nvmrc pin (node_toolchain.sh) on any PATH.
+# Repo roots' origin/main must hold scripts/ci/gate_plan.sh with a literal GATE_SLUG
+# (gate_plan_main, the job's own check), and every path must be plain
 # ([A-Za-z0-9._/~+@-]): it goes into XML and a sed replacement unescaped.
 # Exit 0 done, 1 launchctl or plutil failed, 2 usage, a bad path or devkit's main unreadable.
 set -uo pipefail

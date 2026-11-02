@@ -59,12 +59,12 @@
 # A malformed line is exit 2 naming file:line, before anything runs.
 #
 # Which collectors run: outside the gate (GATE_AREAS unset) all of them. Inside the gate
-# (local_gate.sh exports GATE_AREAS before the plan) an area collector runs when one of its
+# (the plan runner exports GATE_AREAS before the plan) an area collector runs when one of its
 # areas is in GATE_AREAS, or when GATE_AREAS holds `other` (a change outside the app halves may move
 # any number); `repo` collectors always run; `tooling` widens nothing (devkit/metrics/*,
 # metrics_collect.sh and metrics_ratchet.py classify as other, so a tooling-only diff cannot
 # move a metric, and its gate runs no tier anyway). A `job:<name>` collector runs iff
-# build/metrics/gate.json holds `gate.<name>.seconds`: local_gate.sh rewrites that file after
+# build/metrics/gate.json holds `gate.<name>.seconds`: the plan runner rewrites that file after
 # every job and the metrics job runs last, so the entry exists exactly when the job ran. Why a
 # job and not an area: a repo's gate_plan_extra may skip one job of an area (closet skips db
 # for .github/** and Playwright-only test/**), so "the area's group ran" is not "my input
@@ -113,7 +113,7 @@
 # be provided is exit 2 naming it.
 #
 # build/metrics/ before a run: only this conf's collector files (and their logs) are removed.
-# gate.json (local_gate.sh, every earlier job's seconds) and tier-*.json (tier_guard.sh, the
+# gate.json (the plan runner, every earlier job's seconds) and tier-*.json (tier_guard.sh, the
 # tiers that ran in this gate) were written before this job and are merged into the snapshot;
 # an `rm -rf build/metrics` here would silently drop them.
 #
@@ -140,10 +140,10 @@ RATCHET=$HERE/metrics_ratchet.py
 . "$HERE/_makefile_lib.sh"
 # shellcheck source=bin/_toolchain_lib.sh  # devkit_python, for floor_tiers before toolchain_path
 . "$HERE/_toolchain_lib.sh"
-# Where every collector writes, and where local_gate.sh and tier_guard.sh already wrote: the
+# Where every collector writes, and where the plan runner and tier_guard.sh already wrote: the
 # merge reads the whole directory.
 readonly COLLECT_DIR=build/metrics
-readonly GATE_JSON=build/metrics/gate.json   # local_gate.sh's job seconds: which jobs ran
+readonly GATE_JSON=build/metrics/gate.json   # the plan runner's job seconds: which jobs ran
 readonly SUBCOMMANDS="snapshot check tighten rebaseline"
 # A conf command that runs one of devkit's --list-out collectors (any path prefix: devkit/,
 # ../devkit/). Matched against " <command> " so the name may end the line.
@@ -364,9 +364,9 @@ plan_job_target() {
     # shellcheck source=bin/_paths_lib.sh
     . "$HERE/_paths_lib.sh"
     GATE_CODE_PATHS=  # the plan's alone, never the environment's (_paths_lib.sh header)
-    # shellcheck source=/dev/null  # the repo's plan, as local_gate.sh sources it
+    # shellcheck source=/dev/null  # the repo's plan, as its runner sources it
     . scripts/ci/gate_plan.sh
-    # shellcheck disable=SC2329  # the skeleton's helpers (local_gate.sh), which the plan calls
+    # shellcheck disable=SC2329  # the runner's helpers, which the plan calls
     {
       job() { [ "$1" != "$want" ] || { printf '%s\n' "$2" >&3; exit 0; }; }
       skip() { :; }

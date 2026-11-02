@@ -53,10 +53,9 @@
 #   devkit_sync_only <rev> <base> <paths>
 #       True when <paths> are a devkit sync at <rev>: every path but VENDOR_SYNC_BOUNDS passes
 #       vendoring_only (at least one must), and that bounds file, when listed, differs from
-#       <base>'s copy only by tightened bounds (metrics_ratchet.py tightens). Why: the nightly
-#       sync locks in the gains a devkit collector change measures (dependency_merge.sh
-#       lock_in_sync, devkit decisions 2026-10-28), and a tightening can only make the gate
-#       stricter, which the gate then verifies. Used where vendoring_only decided alone: the
+#       <base>'s copy only by tightened bounds (metrics_ratchet.py tightens). Why (devkit decisions
+#       2026-10-28): a sync may lock in the gains a devkit collector change measures, and a
+#       tightening can only make the ratchet stricter. Used where vendoring_only decided alone: the
 #       hooks' skip, make merge's Codex exemption and the nightly sync's own checks. <base> is a
 #       commit (never "" here); the bounds check needs the caller's devkit_python
 #       (bin/_toolchain_lib.sh), run only when the file is listed. Sets VENDORED_TREE.

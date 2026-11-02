@@ -121,37 +121,10 @@ carry_resolve() {
 }
 
 # carry_commit <root> <tree> <head> <main now> <pr>: print the merge commit of <main now> into
-# <head> with <tree>, as devkit's own commits are signed (devkit_commit_trailer).
+# <head> with <tree>, as devkit's own commits are signed (devkit_commit_trailer). merge_rules.sh
+# calls carry_plan with main now as the gated main too: no gate, only the conflict is judged.
 carry_commit() {
-  printf 'Merge main %s into PR #%s: only %s differs from the gated tree\n\nmake merge carried the gate of %s (bin/_merge_carry.sh): every other path is the tree\nthat gate tested, and both sides only appended entries to %s.\n\n%s\n' \
+  printf 'Merge main %s into PR #%s: %s resolved\n\nmake merge resolved GitHub'"'"'s conflict of %s with main (bin/_merge_carry.sh): both sides only\nappended entries to %s, and every other path is GitHub'"'"'s merge.\n\n%s\n' \
     "${4:0:12}" "$5" "$CARRY_PATH" "${3:0:12}" "$CARRY_PATH" "$(devkit_commit_trailer)" \
     | git -C "$1" commit-tree "$2" -p "$3" -p "$4" -F -
-}
-
-# A review carries the same way: a head that differs from a reviewed commit only by merges of
-# main (GitHub's update-branch, or carry_commit above) changes none of the PR's own lines, so
-# Codex's review of that commit, or its fallback record, is a review of the head (merge_rules.sh
-# carry_review). claude-kit's merge_driver.sh re-posted the record itself after update-branch,
-# with a suffix no merge parses.
-CARRY_REVIEW_DEPTH=20
-
-# main_merge_parents <root> <head> <main now>: the commits whose review carries to <head>,
-# nearest first. Walks first parents while the commit is a two-parent merge whose second parent
-# is on <main now> and whose tree is GitHub's merge of its parents, a resolved CARRY_PATH the
-# only difference allowed (a hand edit in a merge is a change nobody reviewed); prints each
-# first parent. Prints none when <head> is no such merge; 1 when git fails.
-main_merge_parents() {
-  local root=$1 commit=$2 main=$3 n=0 merge first second extra changed
-  while [ "$n" -lt "$CARRY_REVIEW_DEPTH" ]; do
-    merge=$(git -C "$root" rev-list --no-walk --parents "$commit") || return 1
-    read -r _ first second extra <<<"$merge"
-    [ -n "$second" ] && [ -z "$extra" ] || return 0
-    git -C "$root" merge-base --is-ancestor "$second" "$main" || return 0
-    carry_merge "$root" "$first" "$second" || return 1
-    changed=$(git -C "$root" diff-tree -r --no-renames --name-only "$CARRY_MERGED" "$commit^{tree}") || return 1
-    changed=$(printf '%s\n%s\n' "$changed" "$(cut -f2 <<<"$CARRY_CONFLICTS")" | grep -vxF "$CARRY_PATH" | grep .)
-    [ -z "$changed" ] || return 0
-    echo "$first"
-    commit=$first n=$((n + 1))
-  done
 }

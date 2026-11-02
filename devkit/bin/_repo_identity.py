@@ -1,6 +1,6 @@
 """Which repo a checkout is, and where its per-machine state lives: the names the hooks
-ledger, the gate state dir and the agent-cost ledger are keyed by. Loaded by path
-(`python3 -I` keeps bin/ off sys.path) by scorecard.py and gate_bite.py, so both read the
+ledger and the agent-cost ledger are keyed by. Loaded by path
+(`python3 -I` keeps bin/ off sys.path) by scorecard.py and bite.py, so both read the
 same files for the same checkout.
 """
 
@@ -54,10 +54,6 @@ def plan_declares(root: Path, name: str) -> bool:
     so plan_literal's bare-word form never reads it)."""
     plan = root / PLAN
     return plan.is_file() and bool(re.search(rf"^{re.escape(name)}=(?!\s|$|\"\"|'')", plan.read_text(errors="replace"), re.M))
-
-
-def gate_state_name(root: Path) -> str:
-    return plan_literal(root, "GATE_STATE_NAME")
 
 
 def state_home() -> Path:

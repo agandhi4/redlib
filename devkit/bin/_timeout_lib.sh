@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # Bounded commands, and a guard for a hung Docker daemon. Sourced; defines functions and runs
-# nothing. Used by: throwaway_pg.sh and boot_image.sh (devkit_docker_guard), local_gate.sh
-# (devkit_with_timeout around the plan's gate_cleanup; devkit_docker_ensure in require_docker).
+# nothing. Used by: throwaway_pg.sh, boot_image.sh, docker_bounded.sh and publish.sh
+# (devkit_docker_guard), and check_tree.sh (devkit_docker_ensure in its require_docker,
+# devkit_with_timeout around the plan's gate_cleanup).
 #
 # Why (2026-10-17): the OrbStack daemon wedged and every `docker rm -fv`, `docker ps` and
 # `docker inspect` hung for 12+ minutes. Inside a job only the 15-minute silence watchdog
@@ -30,8 +31,6 @@
 #                                         DEVKIT_ORBSTACK_START_PROBES times (default 60); sets
 #                                         DEVKIT_DOCKER_NOTE ("" or what it started). Never
 #                                         `orbctl stop` or restart: that kills every container.
-#                                         Used by local_gate.sh's require_docker, before the
-#                                         first job of a plan that needs Docker.
 
 # shellcheck source=bin/_awake_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_awake_lib.sh"
