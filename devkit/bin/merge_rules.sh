@@ -252,7 +252,7 @@ sync_exempt() {
 round_status=""
 check_rounds() {
   local verdict rc count latest source sha reviewer blocking
-  verdict=$("$DEVKIT_PYTHON" -I "$HERE/codex_review.py" rounds "$SLUG" "$PR" "$CAP")
+  verdict=$("$DEVKIT_PYTHON" -I "$HERE/codex_review.py" rounds "$SLUG" "$PR" "$CAP" "$rounds_head")
   rc=$?
   # Python's own uncaught-exception exit is 1 too: 1 with no verdict line is a crash, not a refusal.
   { [ "$rc" = 0 ] || { [ "$rc" = 1 ] && grep -q '^rounds' <<<"$verdict"; }; } \
@@ -288,6 +288,9 @@ check_rounds() {
   fi
 }
 
+# The head the rounds are judged at, and the filing too: only a round of it says which older
+# findings are fixed (codex_review.py). $head moves later only to a merge of main into it.
+rounds_head=$head
 if [ -n "${OWNER:-}" ]; then
   round_status="Owner override: $OWNER"
 else
@@ -400,7 +403,7 @@ if [ "$draft" = true ]; then
   echo "merge: PR #$PR was a draft; its review rounds allow the merge, so marked it ready"
 fi
 if [ -z "${OWNER:-}" ]; then
-  filed=$("$DEVKIT_PYTHON" -I "$HERE/codex_review.py" file "$SLUG" "$PR" "$CAP")
+  filed=$("$DEVKIT_PYTHON" -I "$HERE/codex_review.py" file "$SLUG" "$PR" "$CAP" "$rounds_head")
   case $? in
     0) ;;
     # Read afresh: a P0/P1 that arrived since check_rounds (header: nothing waits on Codex).

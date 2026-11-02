@@ -51,7 +51,8 @@ is README.md "Architecture". Invariants of the design:
   all exact. CI reads them (`*-version-file`). The gate (from the MERGED tree) and the hooks
   provision them through `toolchain_path.sh`, the one code path; never inline it again.
   `toolchain_check.sh` holds Dockerfiles, workflows and manifests to them. Never pin a
-  toolchain version anywhere else.
+  toolchain version anywhere else. A package manager's pin is `package.json`'s `packageManager`
+  (`package_manager_toolchain.sh`, after Node): recipes call bare `pnpm`, never `corepack`.
 - devkit's own .py tools run on `"$DEVKIT_PYTHON"` (`devkit_python`, `bin/_toolchain_lib.sh`) in
   bin/*.sh and on `bin/python.sh` in Makefiles, never a bare `python3`: under launchd that is
   Xcode's 3.9 (tests/toolchain_resolver.bats greps for it). The resolution is made once per
@@ -72,16 +73,28 @@ is README.md "Architecture". Invariants of the design:
   ever `make review`'s record (the gh shim refuses the marker without `DEVKIT_REVIEW_VERIFIED`);
   never hand-post one. `OWNER=` is the owner's, at a terminal; an agent never tries it.
 - Main is proven at deploy: `bin/publish.sh` runs `bin/check_tree.sh` (every job of the commit's
-  plan, clean worktree) and publishes only the newest green commit, never a red one, filing one
-  `main-red` issue per first bad commit. Only correctness fails a check: a flake is retried once
+  plan, clean worktree) on every new main, whatever it changes, and publishes only the newest green
+  commit, never a red one, filing one `main-red` issue per first bad commit. Image inputs decide
+  only the build: a green commit with none is `checked` (green recorded, `main-red` closed), never
+  skipped unchecked. Only correctness fails a check: a flake is retried once
   and files `flaky`; ratchets and budgets report or file issues, never fail it. `--ungated` is the
-  owner's alone. check_tree prints `CHECK <job> PASS|FAIL|REPORTED|SKIPPED …` and `CHECK VERDICT
-  PASS|FAIL head=<sha>` (an API, like the gate's).
+  owner's alone. Every plan declares `DEPLOY_KINDS=` (README "Deploy kinds"; the scorecard's
+  `deploy_kinds`), so a kind no publisher proves (`ios`, `mac`) is proven elsewhere. check_tree
+  prints `CHECK <job> PASS|FAIL|REPORTED|SKIPPED …` and `CHECK VERDICT PASS|FAIL head=<sha>` (an
+  API, like the gate's). A repo's checks start at most once per window
+  (`bin/_cadence_lib.sh`: the plan's `MAIN_CHECK_MINUTES`, default 180, at the slug's own minute),
+  never an environment knob; `--recheck`/`--ungated` are the urgent path; anything else that
+  checks main on a schedule uses the same lib.
 - A problem with the box never reads as a bad commit: docker down, or a job failing its run and
-  retry with a cause in check_tree's one `ENV_CAUSES` list, is exit 2 and records nothing. A red
+  retry with a cause in check_tree's one `ENV_CAUSES` list (an OS or daemon message, or a build
+  script naming a host tool the box lacks: cmake, libclang), is exit 2 and records nothing. A red
   record expires after 24 h (`publish.sh --recheck <sha>` sooner), a green commit closes
   `main-red`, a job is a FAIL after `CHECK_JOB_SECONDS` (1800), and the Mac's hourly
   `publisher_deadman.sh` (GitHub only) files `publisher stalled` when linux-box stops publishing.
+- An Apple app's main is proven on the Mac: `bin/apple_check.sh` (a LaunchAgent, each repo once
+  per cadence window) runs check_tree at a new main of a plan declaring `DEPLOY_KINDS` ios or mac,
+  and files and closes only its own `main-red` issues (`main is red on the Mac at …`,
+  `_issue_lib.sh` devkit_main_red_*).
 - A launchd job runs devkit main's copy of itself: its plist starts the job dir's `launcher.sh`
   (`bin/job_launcher.sh`, installed by `bin/_launchd_job_lib.sh`), never a path in a checkout, so
   a devkit merge reaches the next run with no fast-forward. A new job goes through the same lib.
@@ -91,7 +104,7 @@ is README.md "Architecture". Invariants of the design:
 - Time budgets (a job's, a tier's) report and never fail (owner 2026-10-29); correctness (tests, floors,
   ratchets) still fails. Never make a budget fail a PR again.
 - Test work on the box queues in one place: `bin/_slot_lib.sh`'s pool at its fixed path, every
-  tier admitted for its cost. A new entry point that runs suites goes through it (`slot_acquire`),
+  tier and every check_tree job admitted for its cost. A new entry point that runs suites goes through it (`slot_acquire`),
   never its own lock. A job's cost is the table's (`_slot_word_cost`); a plan `GATE_JOB_COSTS`
   entry is for what the table misprices.
 - A pytest or vitest tier must not rot with real time: the plan reruns it shifted (`GATE_JOBS_CLOCK`, README

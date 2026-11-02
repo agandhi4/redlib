@@ -4,11 +4,19 @@ on, and the record review_rules.sh posts (owner, 2026-11-02: a fixed number of r
 then merge; main is fixed forward).
 
 Usage:
-  codex_review.py rounds <owner/repo> <pr> <cap>   merge_rules.sh: the verdict, below
-  codex_review.py file <owner/repo> <pr> <cap>     merge_rules.sh, just before the merge: file
+  codex_review.py rounds <owner/repo> <pr> <cap> <head>
+                                                   merge_rules.sh: the verdict, below
+  codex_review.py file <owner/repo> <pr> <cap> <head>
+                                                   merge_rules.sh, just before the merge: file
                                                    every `unaddressed` finding as an issue, or
                                                    exit 1 with the verdict if one now blocks
-  codex_review.py record <head sha> <reviewer>     review_rules.sh: claude -p's JSON on stdin,
+  codex_review.py prior <owner/repo> <pr> <head> <out>
+                                                   review_rules.sh, before the reviewer: the
+                                                   older commits' findings `file` would file, as
+                                                   JSON in <out> and as the end of the
+                                                   reviewer's prompt on stdout (none when none)
+  codex_review.py record <head sha> <reviewer> <prior JSON file>
+                                                   review_rules.sh: claude -p's JSON on stdin,
                                                    the record comment's body on stdout
 
 A round is one review of any commit of the PR, either:
@@ -28,12 +36,18 @@ it may not, 2 when gh failed or answered in a shape this does not know (the merg
   unaddressed <priority>  <where>  <title>  <url|->  <key>
 The rules: rounds count once per reviewer per commit. Below the cap, an unresolved Codex thread
 of priority P0 or P1 blocks (`unresolved`), and so does one with no badge this knows (fail
-closed); a P0 or P1 in the latest round blocks too (`latest`), resolved or not: the fix wants a
-round of its own. At the cap the rounds are spent (owner 2026-11-02: a set number of rounds,
-then merge): only P0 and the unbadged still block, unresolved or a local P0 a later commit's
-round has not cleared; P1 joins P2 and below. Each finding that no longer blocks and is still
-open (a Codex thread, or the latest round's local finding) is `unaddressed`, which `file` opens
-as an issue, answers and resolves, so nothing a reviewer said is lost at the merge.
+closed); a P0 or P1 in any round of the latest round's commit, Codex's or local, blocks too
+(`latest`), resolved or not: the fix wants a round of its own. At the cap the rounds are spent
+(owner 2026-11-02: a set number of rounds, then merge): only P0 and the unbadged still block,
+unresolved or a local P0 a later commit's round has not cleared; P1 joins P2 and below. Each
+finding that no longer blocks and is still open is `unaddressed`, which `file` opens as an
+issue, answers and resolves, so nothing a reviewer said is lost at the merge: a Codex thread,
+or a local finding of any round not yet filed (one per file and title; an older commit's P0/P1
+the latest round dropped was fixed, and is not filed). An older commit's finding below that is
+filed unless the latest local round of <head> (the PR's, which merge_rules.sh read before the
+rounds) judged it fixed (`prior` in its record:
+review_rules.sh hands the reviewer those findings with the diff); one it never judged (no local
+round of the head, a finding added after it ran, a record without `prior`) is filed.
 Gotcha: REST names the bot `chatgpt-codex-connector[bot]`, GraphQL `chatgpt-codex-connector`.
 """
 
@@ -50,6 +64,9 @@ CODEX_LOGIN = "chatgpt-codex-connector"
 RECEIPT = "<!-- codex-review-receipt:v1 -->"
 REVIEWED_COMMIT = re.compile(r"\*\*Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`")
 # Ours: review_rules.sh's record, and the comment `file` leaves listing what it filed.
+# A record's JSON grows only by optional keys (`prior`, 2026-11-02), so the marker stays
+# v1: a new marker would need every Mac's gh shim reinstalled, and a stale one would let an
+# agent hand-post a record under it. A change a v1 reader would misread bumps it, with the shim.
 RECORD_MARKER = "<!-- devkit-review-record:v1"
 RECORD = re.compile(r"<!-- devkit-review-record:v1 (\{.*?\}) -->", re.DOTALL)
 FILED = re.compile(r"<!-- devkit-review-filed:v1 ([^ ]*) -->")
@@ -107,6 +124,8 @@ class Round:
     reviewer: str
     review_id: int | None = None  # a Codex PR review's id: its threads are its findings
     findings: list[Finding] = field(default_factory=list)
+    # A local round's judgment of older commits' findings, key -> still applies at its sha.
+    prior: dict[str, bool] = field(default_factory=dict)
 
 
 def gh(*args: str) -> str:
@@ -170,8 +189,12 @@ def local_round(comment: dict) -> Round | None:
     if any(f.priority not in PRIORITIES for f in findings):
         raise UnreadableError(
             f"review record {comment['html_url']} has a priority outside {PRIORITIES}")
+    judged = record.get("prior", [])
+    if not all(isinstance(j.get("key"), str) and isinstance(j.get("applies"), bool)
+               for j in judged):
+        raise UnreadableError(unknown)
     return Round(comment["created_at"], "local", record["sha"], record["reviewer"],
-                 findings=findings)
+                 findings=findings, prior={j["key"]: j["applies"] for j in judged})
 
 
 def codex_threads(slug: str, pr: int) -> list[tuple[Finding, int | None]]:
@@ -222,9 +245,11 @@ def read_rounds(slug: str, pr: int) -> tuple[list[Round], list[Finding], set[str
     return rounds, [f for f, _ in threads], filed
 
 
-def verdict(rounds: list[Round], codex: list[Finding], filed: set[str],
-            cap: int) -> tuple[list[str], list[Finding]]:
-    """The verdict lines (module docstring) and the unaddressed findings, from facts read."""
+def verdict(rounds: list[Round], codex: list[Finding], filed: set[str], cap: int,
+            pr_head: str) -> tuple[list[str], list[Finding]]:
+    """The verdict lines (module docstring) and the unaddressed findings, from facts read.
+    Only a round of `pr_head` judges older findings: one of a commit the PR has since moved past
+    judged code a push may have changed back (#354 Codex)."""
     # One round per reviewer per commit: rerunning a review of an unchanged head neither counts
     # again nor clears what an earlier run of it found (#288 review).
     count = len({(r.source, r.sha) for r in rounds})
@@ -239,20 +264,72 @@ def verdict(rounds: list[Round], codex: list[Finding], filed: set[str],
     blocking = [("unresolved", f) for f in codex if f.priority in blocks and not f.resolved]
     same: list[Finding] = []
     if latest is not None:
-        same = [f for r in rounds if (r.source, r.sha) == (latest.source, latest.sha)
+        # Every round of the latest round's commit, whoever ran it: a Codex round after a local
+        # P1 on the same head must not drop it unblocked and unfiled (#313 review).
+        same = [f for r in rounds if r is latest or same_commit(r.sha, latest.sha)
                 for f in r.findings]
         # An unresolved thread is listed above; a resolved one blocks only below the cap.
         blocking += [("latest", f) for f in same if f.priority in blocks
                      and (not f.thread or (f.resolved and not at_cap))]
     lines += [f"blocking\t{why}\t{f.line()}" for why, f in blocking]
     open_codex = [f for f in codex if f.priority not in blocks and not f.resolved]
-    # Every record of the latest commit, not the last one: a rerun that omits a P1 must not drop
-    # it unfiled at the cap (#291 Codex).
-    open_local = [f for f in (same if latest and latest.source == "local" else [])
-                  if f.priority not in blocks and f.key not in filed]
-    unaddressed = open_codex + open_local
+    head = latest.sha if latest else "-"
+    judged = head_judgment(rounds, pr_head)
+    unaddressed = open_codex + open_local(rounds, filed, blocks, head, judged)
     lines += [f"unaddressed\t{f.line()}\t{f.thread or f.key}" for f in unaddressed]
     return lines, unaddressed
+
+
+def head_judgment(rounds: list[Round], head: str) -> dict[str, bool]:
+    """The latest local round of the head's `prior`: what it saw of older commits' findings."""
+    return next((r.prior for r in reversed(rounds)
+                 if r.source == "local" and same_commit(r.sha, head)), {})
+
+
+def open_local(rounds: list[Round], filed: set[str], blocks: tuple[str, ...], head: str,
+               judged: dict[str, bool]) -> list[Finding]:
+    """Every local round's findings that no longer block and are not yet filed. A local finding
+    has no thread to resolve, so a later commit's round must not drop it (kitchen #62 lost two
+    P2s that way). Every record of the head counts, not the last one: a rerun that omits a P1
+    must not drop it unfiled at the cap (#291 Codex), nor a Codex round of the same commit after
+    it (#313 review). An older commit's P0/P1 that the latest round no longer raises was
+    presumably fixed, and is not filed; nor is an older finding `judged` fixed at the head (the
+    head's reviewer saw it with the diff), which drops its file and title for older rounds too.
+    Newest first, one per file and title: a rerun's restatement, or one already filed under
+    another key, files nothing twice."""
+
+    def same(f: Finding) -> tuple[str, str]:
+        # The line drifts between commits; the file and title do not.
+        return f.where.split(":", 1)[0], f.title
+
+    seen = {same(f) for r in rounds for f in r.findings if f.key and f.key in filed}
+    found = []
+    for r in reversed(rounds):
+        if r.source != "local":
+            continue
+        on_head = same_commit(r.sha, head)
+        held = blocks if on_head else BLOCKING
+        for f in r.findings:
+            if f.priority in held or f.key in filed or same(f) in seen:
+                continue
+            seen.add(same(f))
+            if on_head or judged.get(f.key, True):
+                found.append(f)
+    return found
+
+
+def prior_findings(rounds: list[Round], filed: set[str], head: str) -> list[dict]:
+    """What the head's reviewer judges (`prior`): the older commits' findings `file` would file
+    were the head reviewed with none of them judged. Judged afresh each round, so a rerun of the
+    head sees them all again."""
+    on_head = {f.key for r in rounds if same_commit(r.sha, head) for f in r.findings}
+    return [{"key": f.key, "priority": f.priority, "where": f.where, "title": f.title}
+            for f in open_local(rounds, filed, BLOCKING, head, {}) if f.key not in on_head]
+
+
+def same_commit(a: str, b: str) -> bool:
+    """Codex names its commit abbreviated (REVIEWED_COMMIT), a local record in full."""
+    return "-" not in (a, b) and (a.startswith(b) or b.startswith(a))
 
 
 def file_findings(slug: str, pr: int, findings: list[Finding]) -> list[str]:
@@ -288,8 +365,16 @@ def file_findings(slug: str, pr: int, findings: list[Finding]) -> list[str]:
     return done
 
 
-def record_body(sha: str, reviewer: str, claude_json: str) -> str:
-    """The record review_rules.sh posts: claude -p's structured output, as marker JSON and text."""
+def prior_section(prior: list[dict]) -> str:
+    """The end of the reviewer's prompt, never its stdin (review_rules.sh PROMPT)."""
+    lines = [f"- `{p['key']}` {p['priority']} `{p['where']}`: {p['title']}" for p in prior]
+    return "\n# Earlier findings\n" + "\n".join(lines) + "\n" if lines else ""
+
+
+def record_body(sha: str, reviewer: str, claude_json: str, prior: list[dict]) -> str:
+    """The record review_rules.sh posts: claude -p's structured output, as marker JSON and text.
+    `prior` is what the reviewer was asked to judge (prior_findings); a judgment of any other key
+    is dropped, and one it skipped stays unjudged, so it is filed."""
     out = json.loads(claude_json)
     if out.get("is_error") or not isinstance(out.get("structured_output"), dict):
         raise UnreadableError(f"the reviewer gave no structured findings ({out.get('subtype')})")
@@ -297,25 +382,53 @@ def record_body(sha: str, reviewer: str, claude_json: str) -> str:
                 for f in out["structured_output"]["findings"]]
     if any(f["priority"] not in PRIORITIES for f in findings):
         raise UnreadableError(f"the reviewer gave a priority outside {PRIORITIES}")
-    record = json.dumps({"sha": sha, "reviewer": reviewer, "findings": findings})
+    asked = {p["key"]: p for p in prior}
+    judged: dict[str, dict] = {}
+    for j in out["structured_output"].get("prior", []):
+        if j["key"] in asked and j["key"] not in judged and isinstance(j["applies"], bool):
+            judged[j["key"]] = {"key": j["key"], "applies": j["applies"], "reason": j["reason"]}
+    record = json.dumps({"sha": sha, "reviewer": reviewer, "findings": findings,
+                         "prior": list(judged.values())})
     # No `-->` inside the marker: it would end the comment early.
     record = record.replace("-->", "--\\u003e")
     text = "\n".join(f"- **{f['priority']}** `{f['where']}`: {f['title']}" for f in findings)
+    earlier = "".join(
+        f"- {'still applies' if j['applies'] else 'fixed'}: {asked[k]['priority']} "
+        f"`{asked[k]['where']}`: {asked[k]['title']} ({j['reason']})\n" for k, j in judged.items())
+    if earlier:
+        earlier = f"\nEarlier commits' findings, judged at this head:\n{earlier}"
     return (f"{RECORD_MARKER} {record} -->\n"
             f"**Local review** of `{sha[:12]}` by {reviewer} (`make review`)\n\n"
-            f"{text or 'No findings.'}\n")
+            f"{text or 'No findings.'}\n{earlier}")
+
+
+def is_sha(text: str) -> bool:
+    return re.fullmatch(r"[0-9a-f]{40}", text) is not None
+
+
+def is_pr_call(args: list[str], verbs: tuple[str, ...], head_at: int) -> bool:
+    """<verb> <owner/repo> <pr> and two more, the head sha at `head_at`: rounds, file, prior."""
+    return (len(args) == 5 and args[0] in verbs and "/" in args[1] and args[2].isdigit()
+            and is_sha(args[head_at]))
 
 
 def main() -> int:
     args = sys.argv[1:]
     try:
-        if len(args) == 3 and args[0] == "record" and re.fullmatch(r"[0-9a-f]{40}", args[1]):
-            print(record_body(args[1], args[2], sys.stdin.read()), end="")
+        if len(args) == 4 and args[0] == "record" and is_sha(args[1]):
+            with open(args[3], encoding="utf-8") as prior:
+                print(record_body(args[1], args[2], sys.stdin.read(), json.load(prior)), end="")
             return 0
-        if (len(args) == 4 and args[0] in ("rounds", "file") and "/" in args[1]
-                and args[2].isdigit() and re.fullmatch(r"[1-9][0-9]?", args[3])):
+        if is_pr_call(args, ("prior",), 3):
+            rounds, _, filed = read_rounds(args[1], int(args[2]))
+            prior = prior_findings(rounds, filed, args[3])
+            with open(args[4], "w", encoding="utf-8") as out:
+                json.dump(prior, out)
+            print(prior_section(prior), end="")
+            return 0
+        if is_pr_call(args, ("rounds", "file"), 4) and re.fullmatch(r"[1-9][0-9]?", args[3]):
             slug, pr, cap = args[1], int(args[2]), int(args[3])
-            lines, unaddressed = verdict(*read_rounds(slug, pr), cap)
+            lines, unaddressed = verdict(*read_rounds(slug, pr), cap, args[4])
             # `file` reads the rounds afresh: a blocker that arrived since `rounds` refuses here,
             # before anything is filed (#288 Codex). `unreviewed` is the caller's (exemptions).
             blocked = any(line.startswith("blocking\t") for line in lines)
@@ -324,11 +437,13 @@ def main() -> int:
             print("\n".join(lines))
             refused = blocked or (args[0] == "rounds" and "unreviewed" in lines)
             return 1 if refused else 0
-    except (UnreadableError, ValueError, KeyError, TypeError, AttributeError) as err:
+    except (UnreadableError, OSError, ValueError, KeyError, TypeError, AttributeError) as err:
         print(f"codex_review: {err}", file=sys.stderr)
         return 2
-    print("usage: codex_review.py rounds|file <owner/repo> <pr> <cap 1-99>\n"
-          "       codex_review.py record <head sha> <reviewer> <claude-json", file=sys.stderr)
+    print("usage: codex_review.py rounds|file <owner/repo> <pr> <cap 1-99> <head sha>\n"
+          "       codex_review.py prior <owner/repo> <pr> <head sha> <out JSON file>\n"
+          "       codex_review.py record <head sha> <reviewer> <prior JSON file> <claude-json",
+          file=sys.stderr)
     return 2
 
 

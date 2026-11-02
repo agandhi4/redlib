@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # Installing devkit's scheduled jobs as LaunchAgents. Sourced by install_dependency_merge.sh,
-# install_monthly_audit.sh and install_publisher_deadman.sh, after _vendor_paths.sh (DEVKIT_URL, fetch_devkit_main); defines
+# install_monthly_audit.sh, install_publisher_deadman.sh and install_apple_check.sh, after _vendor_paths.sh (DEVKIT_URL, fetch_devkit_main); defines
 # functions and runs nothing. Each failure prints one "<installer>: ..." line and exits: 2 for a
 # path, a fetch or a file, 1 for launchctl or plutil.
 #
