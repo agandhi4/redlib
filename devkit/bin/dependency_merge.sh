@@ -73,6 +73,11 @@
 #   cannot be read, never clean), and one `security` issue per repo, opened for a new id, rewritten
 #   as the ids change, closed when none is left. State: $XDG_STATE_HOME/devkit/vuln-watch/. Why
 #   (closet #437, 2026-10-26): `vuln.*` keys are report-only, so advisories reached main unseen.
+# Budgets: then bin/budget_watch.sh runs every gate job of the repo's plan on that main, admitted
+#   to the pool, with every time budget enforced: one uncounted `budgets: <slug> …` line and one
+#   `performance` issue per repo while a job is over on an idle box. State:
+#   $XDG_STATE_HOME/devkit/budget-watch/. Why (owner 2026-10-29): gates report budgets and never
+#   fail on them, so a real slowdown must surface somewhere that load does not.
 # Network: every call to GitHub (git fetch and push, gh) is retried after a transient failure
 #   (net); one still failing is the outcome `network`, never "branch exists" or a regression.
 # Power: a Mac macOS will sleep whatever caffeinate holds (lid closed on battery,
@@ -728,8 +733,6 @@ conf_commands() {
 # Vulnerabilities). Its one line is noted, never counted: an advisory is not a PR outcome.
 watch_vulns() {
   local conf=$WT/scripts/ci/metrics.conf out cmd line args=()
-  { net fetch_main "$WT" && git -C "$WT" checkout -q --detach refs/remotes/origin/main; } >/dev/null 8>&- \
-    || { note "vuln: $SLUG unmeasured (cannot move the worktree to origin main; git above)"; return 0; }
   if [ -f "$conf" ]; then
     out=$(conf_commands "$conf" 2>&1) \
       || { out=${out##*$'\n'}; note "vuln: $SLUG unmeasured (${out#"$WT/"})"; return 0; }
@@ -744,6 +747,27 @@ watch_vulns() {
   note "$line"
 }
 
+# watch_budgets: bin/budget_watch.sh over origin/main as watch_vulns left the worktree. Time budgets
+# report but never fail a PR's gate (devkit decisions 2026-10-29); this is where a real slowdown
+# fails, on an idle box after the night's merges. Its one line is noted, never counted.
+watch_budgets() {
+  local args=() line
+  [ "$DRY_RUN" = 0 ] || args+=(--dry-run)
+  line=$("$HERE/budget_watch.sh" --slug "$SLUG" --root "$WT" --state-dir "$STATE/budget-watch" \
+    ${args[@]+"${args[@]}"} 8>&-) || line="budgets: $SLUG unmeasured (budget_watch.sh exit $?; stderr above)"
+  note "$line"
+}
+
+# refresh_main: the worktree moved to origin/main as the night's merges left it, for both
+# watches. Failed, each watch is one `unmeasured` line and neither runs: on the pre-merge main
+# the budget watch would read a slowdown the night merged as a recovery (Codex, #278).
+refresh_main() {
+  { net fetch_main "$WT" && git -C "$WT" checkout -q --detach refs/remotes/origin/main; } >/dev/null 8>&- && return 0
+  note "vuln: $SLUG unmeasured (cannot move the worktree to origin main; git above)"
+  note "budgets: $SLUG unmeasured (cannot move the worktree to origin main; git above)"
+  return 1
+}
+
 run_repo() {
   local n head decision detail
   open_repo "$1" || return
@@ -754,7 +778,10 @@ run_repo() {
     if halted; then break; fi
     handle_pr "$n" "$head" "$decision" "$detail"
   done 3<<<"$PRS"
-  halted || watch_vulns
+  if ! halted && refresh_main; then
+    watch_vulns
+    halted || watch_budgets
+  fi
   cleanup_worktree
   halted || refresh_checkout
   summary "$SLUG"

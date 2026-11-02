@@ -3,8 +3,8 @@
 # every vendored devkit copy and the nightly job. Sourced; defines functions and runs nothing.
 # Callers source _load_lib.sh first (devkit_ncpu) and load gate.env's GATE_CAPACITY before
 # slot_pool_init (_gate_env.sh).
-# Used by: local_gate.sh (one admission per job, for that job's cost) and tier_guard.sh (one per
-# tier run outside a gate).
+# Used by: local_gate.sh (one admission per job, for that job's cost), tier_guard.sh (one per
+# tier run outside a gate) and gate_queue.sh (`make gate-queue`: the live pool, read-only).
 #
 # Why weighted and per job (devkit decisions 2026-10-26): the pool used to be GATE_SLOTS equal
 # slots, one per whole gate. It did cap the holders (2026-10-25/26 ledgers: never more than the
@@ -20,22 +20,27 @@
 #   slot_costs_check <who>     exit 2 on a GATE_JOB_COSTS entry that is not <job>=<units>
 #   slot_cost <name> [<make target>]
 #                              prints the units a job asks for: its GATE_JOB_COSTS entry (the
-#                              plan's `name=units ...`), else the heaviest word of the target (or
-#                              the name) in the table at _slot_word_cost; never above the capacity
+#                              plan's `name=units ...`), else the larger of the heaviest word of
+#                              the target (or the name) in the table at _slot_word_cost and its
+#                              SLOT_MEASURED_COSTS entry (Measured costs, below); never above the
+#                              capacity
 #   slot_acquire <prefix> <label> <cost> [<order>]
 #                              blocks until <cost> units are free and this waiter is first in
 #                              line (lowest <order>, default now in epoch seconds; the gate passes
 #                              its own start, so its later jobs queue ahead of a newer gate's),
 #                              printing `<prefix> waiting for capacity: <label> needs <c> of <cap>,
-#                              <u> in use (<holder> <c>, ...)[; queued behind <label>, ...]` at
-#                              once and, as a heartbeat ending ` (waited <n>s)`, every 30 s,
+#                              <u> in use (<holder> <c>, ...); position <k> of <n>[, behind
+#                              <label>, ...]` at once and, as a heartbeat ending ` (waited <n>s)`, every 30 s,
 #                              polling each second (Notices, below). Then sets SLOT_QUEUED
-#                              (whole seconds waited) and SLOT_USED (units in use once admitted)
+#                              (whole seconds waited) and SLOT_USED (units in use once admitted).
+#                              Exit 2 when its ticket disappears while it waits
 #   slot_release               gives back this process's units (and its place in line); callers
 #                              also run it from their EXIT trap
 #   slot_held_count            how many runs hold units now, the caller's own included: the
 #                              budgets' stretch (bin/_load_lib.sh, Slots)
 #   slot_notice <line>         prints a waiting line (Notices, below)
+#   slot_summary               `<u> of <cap> in use[ (<holder> <c>, ...)]; <n> waiting[ (<label>,
+#                              ...)]`: the pool now, the gate's `GATE slot queue:` line
 #   slot_others_units          the units held now by runs other than DEVKIT_SLOT_HOLDER's (every
 #                              holder's, outside one): tests/shards.sh's contention sample
 #   slot_held_above            true when DEVKIT_SLOT_HOLDER names a live process: this run is
@@ -66,6 +71,16 @@
 # now names another process (its start time differs), so a gate killed with -9 frees its units
 # within a second. No fd is held while a job runs, so a job's stray child (a dev server) holds
 # nothing either.
+#
+# Measured costs (devkit decisions 2026-10-28): the table is a guess at how many cores a job keeps
+# busy, and it guessed low where it mattered. Of the 23 gates over their whole-gate budget
+# 2026-10-26..28 none was charged a second of queueing (their totals are their jobs' own seconds,
+# within 5 s); every overrun was admitted jobs running slower than alone, 1.3-4.7x. devkit's unit
+# job runs four bats shards and asked for 2 units. So local_gate.sh times each job's CPU (user +
+# sys of its whole process tree), gate_record.py keeps $STATE/job-costs current from the newest
+# passing records (`<job>=<units> ...`, the busiest run's CPU seconds per wall second), and the
+# gate passes that in SLOT_MEASURED_COSTS. The table stays a floor: a container's CPU runs in the
+# Docker VM and a simulator's under launchd, where the job's rusage never sees it.
 #
 # Compat, until 2026-11-09 (two weeks of nightly devkit syncs; then delete _slot_legacy): a gate or
 # tier vendored before this file holds a flock on $GATE_LOCK or $GATE_LOCK.<n> (default
@@ -113,6 +128,24 @@ _slot_word_cost() {
   esac
 }
 
+# slot_measured_costs <who> <job-costs file>: SLOT_MEASURED_COSTS from a recorder's job-costs file
+# (Measured costs, above), or none, the table alone, when there is none or it is not
+# `<job>=<units> ...` (one stderr line naming <who>): a recorder's file never fails its reader.
+# Used by: local_gate.sh and budget_watch.sh, so the nightly prices jobs as the gate does.
+slot_measured_costs() {
+  local entry costs
+  SLOT_MEASURED_COSTS=""
+  [ -f "$2" ] || return 0
+  costs=$(cat "$2") || return 0
+  for entry in $costs; do
+    [[ "$entry" =~ ^[A-Za-z0-9_-]+=[1-9][0-9]*$ ]] || {
+      echo "$1: $2: '$entry' is not <job>=<units>; pricing jobs by the table" >&2
+      return 0
+    }
+  done
+  SLOT_MEASURED_COSTS=$costs
+}
+
 slot_cost() { # <name> [<make target>]
   local entry word c cost=0
   for entry in ${GATE_JOB_COSTS:-}; do
@@ -123,6 +156,9 @@ slot_cost() { # <name> [<make target>]
     [ -z "$c" ] || [ "$c" -le "$cost" ] || cost=$c
   done
   [ "$cost" -gt 0 ] || cost=2
+  for entry in ${SLOT_MEASURED_COSTS:-}; do
+    [ "${entry%%=*}" != "$1" ] || [ "${entry#*=}" -le "$cost" ] || cost=${entry#*=}
+  done
   _slot_clamp "$cost"
 }
 
@@ -165,11 +201,15 @@ _slot_legacy() {
 
 # _slot_scan: under the mutex. Deletes stale entries, then sets SLOT_USED (units held),
 # SLOT_OTHERS (those not held by DEVKIT_SLOT_HOLDER), SLOT_HOLDERS (`<label> <cost>, ...`),
-# SLOT_HOLDER_COUNT, SLOT_HEAD (the first live waiter's file name) and SLOT_AHEAD (`<label>, ...`
-# of the waiters before $SLOT_TICKET, if any).
+# SLOT_HOLDER_COUNT, SLOT_HEAD (the first live waiter's file name), SLOT_WAITERS (how many wait),
+# SLOT_POSITION (1-based place of $SLOT_TICKET, 0 for none), SLOT_AHEAD (`<label>, ...` of the
+# waiters before it), and, whole only with no ticket (slot_summary, gate_queue.sh), SLOT_WAITING
+# (`<label>, ...` of every waiter) and SLOT_ROWS (one
+# `held|wait<TAB><cost><TAB><pid|-><TAB><entry file|-><TAB><label>` line per run, in line order).
 _slot_scan() {
   local f line
   SLOT_USED=0 SLOT_OTHERS=0 SLOT_HOLDERS="" SLOT_HOLDER_COUNT=0 SLOT_HEAD="" SLOT_AHEAD=""
+  SLOT_WAITERS=0 SLOT_WAITING="" SLOT_POSITION=0 SLOT_ROWS=""
   for f in "$SLOT_DIR"/held/*; do
     [ -f "$f" ] || continue
     _slot_live "$f" || { rm -f "$f"; continue; }
@@ -177,21 +217,40 @@ _slot_scan() {
     [ "$SLOT_ENTRY_PID" = "${DEVKIT_SLOT_HOLDER:-}" ] || SLOT_OTHERS=$((SLOT_OTHERS + SLOT_ENTRY_COST))
     SLOT_HOLDER_COUNT=$((SLOT_HOLDER_COUNT + 1))
     SLOT_HOLDERS="$SLOT_HOLDERS${SLOT_HOLDERS:+, }$SLOT_ENTRY_LABEL $SLOT_ENTRY_COST"
+    _slot_row held "$f"
   done
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     SLOT_USED=$((SLOT_USED + SLOT_LEGACY_COST)) SLOT_OTHERS=$((SLOT_OTHERS + SLOT_LEGACY_COST))
     SLOT_HOLDER_COUNT=$((SLOT_HOLDER_COUNT + 1))
     SLOT_HOLDERS="$SLOT_HOLDERS${SLOT_HOLDERS:+, }${line% (older devkit)} $SLOT_LEGACY_COST (older devkit)"
+    SLOT_ROWS="$SLOT_ROWS${SLOT_ROWS:+$'\n'}held"$'\t'"$SLOT_LEGACY_COST"$'\t-\t-\t'"$line"
   done <<<"$(_slot_legacy)"
   # Waiters in line order: <order>.<pid>, numeric on both parts.
   while IFS= read -r f; do
     [ -n "$f" ] || continue
+    # Behind this waiter: counted, never checked. Every waiter scans each second and a check is
+    # a ps; whoever waits behind an entry, or a look with no ticket, reaps it.
+    if [ "$SLOT_POSITION" != 0 ]; then
+      SLOT_WAITERS=$((SLOT_WAITERS + 1))
+      continue
+    fi
     _slot_live "$SLOT_DIR/queue/$f" || { rm -f "$SLOT_DIR/queue/$f"; continue; }
     [ -n "$SLOT_HEAD" ] || SLOT_HEAD=$f
-    [ "$f" != "${SLOT_TICKET:-}" ] || break
-    SLOT_AHEAD="$SLOT_AHEAD${SLOT_AHEAD:+, }$SLOT_ENTRY_LABEL"
+    SLOT_WAITERS=$((SLOT_WAITERS + 1))
+    SLOT_WAITING="$SLOT_WAITING${SLOT_WAITING:+, }$SLOT_ENTRY_LABEL"
+    _slot_row wait "$SLOT_DIR/queue/$f"
+    if [ "$f" = "${SLOT_TICKET:-}" ]; then
+      SLOT_POSITION=$SLOT_WAITERS
+    else
+      SLOT_AHEAD="$SLOT_AHEAD${SLOT_AHEAD:+, }$SLOT_ENTRY_LABEL"
+    fi
   done <<<"$(for f in "$SLOT_DIR"/queue/*; do [ -f "$f" ] && echo "${f##*/}"; done | sort -t. -k1,1n -k2,2n)"
+}
+
+# _slot_row held|wait <entry file>: appends the entry _slot_live just read to SLOT_ROWS.
+_slot_row() {
+  SLOT_ROWS="$SLOT_ROWS${SLOT_ROWS:+$'\n'}$1"$'\t'"$SLOT_ENTRY_COST"$'\t'"$SLOT_ENTRY_PID"$'\t'"$2"$'\t'"$SLOT_ENTRY_LABEL"
 }
 
 # _slot_try <cost>: under the mutex. Admits this waiter when it heads the line and its cost fits.
@@ -215,8 +274,16 @@ slot_acquire() { # <prefix> <label> <cost> [<order>]
     exit 2
   fi
   until _slot_locked _slot_try "$3"; do
+    # Its ticket gone (the pool dir deleted under it, a test's teardown included), a waiter would
+    # poll forever, holding its caller's output open: a bats shard sat silent until the gate's
+    # watchdog stopped it (devkit #275).
+    [ -e "$SLOT_DIR/queue/$SLOT_TICKET" ] || {
+      echo "$1: lost its place in line: $SLOT_DIR/queue/$SLOT_TICKET is gone" >&2
+      SLOT_TICKET=""
+      exit 2
+    }
     if [ -z "$said" ] || [ $((SECONDS - said)) -ge 30 ]; then
-      slot_notice "$1 waiting for capacity: $2 needs $3 of $SLOT_CAPACITY, $SLOT_USED in use${SLOT_HOLDERS:+ ($SLOT_HOLDERS)}${SLOT_AHEAD:+; queued behind $SLOT_AHEAD}$(_slot_waited "$said" "$t0")"
+      slot_notice "$1 waiting for capacity: $2 needs $3 of $SLOT_CAPACITY, $SLOT_USED in use${SLOT_HOLDERS:+ ($SLOT_HOLDERS)}; position $SLOT_POSITION of $SLOT_WAITERS${SLOT_AHEAD:+, behind $SLOT_AHEAD}$(_slot_waited "$said" "$t0")"
       said=$SECONDS
     fi
     sleep 1
@@ -235,6 +302,11 @@ slot_release() {
 }
 
 slot_held_count() { _slot_locked _slot_scan; echo "$SLOT_HOLDER_COUNT"; }
+
+slot_summary() {
+  _slot_locked _slot_scan || return 1
+  echo "$SLOT_USED of $SLOT_CAPACITY in use${SLOT_HOLDERS:+ ($SLOT_HOLDERS)}; $SLOT_WAITERS waiting${SLOT_WAITING:+ ($SLOT_WAITING)}"
+}
 
 slot_others_units() { _slot_locked _slot_scan || return 1; echo "$SLOT_OTHERS"; }
 

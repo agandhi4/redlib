@@ -52,7 +52,9 @@ is README.md "Architecture". Invariants of the design:
   toolchain version anywhere else.
 - devkit's own .py tools run on `"$DEVKIT_PYTHON"` (`devkit_python`, `bin/_toolchain_lib.sh`) in
   bin/*.sh and on `bin/python.sh` in Makefiles, never a bare `python3`: under launchd that is
-  Xcode's 3.9 (tests/toolchain_resolver.bats greps for it).
+  Xcode's 3.9 (tests/toolchain_resolver.bats greps for it). The resolution is made once per
+  process tree (`DEVKIT_PYTHON_RESOLVED`, exported with the source and version): never re-probe
+  an inherited one, and never unset the marker while keeping `DEVKIT_PYTHON`.
 - A tool a gate job calls by bare name that this Mac installs off launchd's PATH is found by
   `_toolchain_lib.sh` (`devkit_tool`, one entry in `DEVKIT_TOOLCHAIN_TOOLS` plus its marker in
   `devkit_declared_tools`) and linked alone into the toolchain directory, never a second
@@ -67,9 +69,15 @@ is README.md "Architecture". Invariants of the design:
   per machine (`GATE_REMOTE_HOST` in `~/.config/devkit/gate.env`), never per repo, except a plan's
   literal `GATE_REMOTE=0` for a gate only a Mac can run.
 - Fail loudly on a missing tool (`flock`, `gh`) with the install hint; never degrade silently.
+- Time budgets (gate.total, a job's, a tier's) report and never fail a PR's gate (owner 2026-10-29); correctness
+  (tests, floors, ratchets) still fails, and the silence watchdog still stops a hung job as an error naming it. A
+  real slowdown is caught by the nightly budget watch (`bin/budget_watch.sh`, budgets enforced on an idle box, one
+  `performance` issue per repo). Never make a budget fail a PR again; tighten the watch instead.
 - Test work on the box queues in one place: `bin/_slot_lib.sh`'s pool at its fixed path, every gate
   job and hand-run tier admitted for its cost. A new entry point that runs suites goes through it
-  (`slot_acquire`), never its own lock; a job the cost table misprices gets a plan `GATE_JOB_COSTS` entry.
+  (`slot_acquire`), never its own lock. A gate job's cost is measured (its CPU, `job-costs`); the
+  table is the floor for work its rusage cannot see (Docker, a simulator), and a plan
+  `GATE_JOB_COSTS` entry is for what neither prices. `make gate-queue` shows the pool live.
 - A pytest or vitest tier must not rot with real time: the plan reruns it shifted (`GATE_JOBS_CLOCK`, README
   "Clock shift"), and what a shift cannot reach is a `scripts/ci/clock_shift.conf` line with its reason.
 - `ci-metrics` is `bin/metrics_collect.sh` over the repo's `scripts/ci/metrics.conf`, run as
@@ -99,6 +107,9 @@ make agent-cost                # append this project's merged-PR costs to docs/a
   sentence title. Consumers pick it up with
   their `devkit-sync` target; a devkit change that needs plan changes ships as devkit PR first, then
   one PR per consumer.
+- A lane's worktree lives at `.claude/worktrees/<branch>`, never beside the checkout; run
+  `make merge` from the main checkout, which then removes the lane's worktree and local branch
+  (a merge run inside the lane's worktree leaves it, with the command to remove it).
 - Record decisions in `docs/decisions.md` in the same PR (`## YYYY-MM-DD — title`, Why /
   Decision / Consequence, ≤ 8 lines).
 
