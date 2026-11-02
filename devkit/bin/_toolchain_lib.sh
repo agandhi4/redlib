@@ -55,9 +55,12 @@
 # has), and every homelab gate failed on tomllib and datetime.UTC. Every dry run had passed. Then
 # an `env -i` gate of devkit under the fixed PATH failed clock_shift_contract: uv is pip-installed
 # in mise's Python, so every uv repo's gate (finplat, orbit, locus, kitchen) would have failed too.
-# Cache: within a shell the first python success is reused; the exported DEVKIT_PYTHON carries it
-# to children, which re-check it with one interpreter start instead of searching again. A tool
-# needs none: children find it on PATH, in DEVKIT_TOOLCHAIN_BIN.
+# Cache: a python success exports DEVKIT_PYTHON_RESOLVED (the interpreter chosen) with its source
+# and version, and every later call in the process tree trusts them while DEVKIT_PYTHON still
+# names that executable: one probe per gate, merge or test, not two interpreter starts per child
+# (2026-11-01: ~100 serial seconds of the suite). A DEVKIT_PYTHON the marker does not match is
+# the explicit case: probed, an error if it does not qualify. A tool needs none: children find it
+# on PATH, in DEVKIT_TOOLCHAIN_BIN.
 # Floor: ruff.toml's target-version; vendored tools use tomllib and datetime.UTC (3.11).
 # Bash 3.2 (launchd runs dependency_merge.sh with /bin/bash): no associative arrays, no ${x^^}.
 
@@ -65,7 +68,6 @@
 DEVKIT_PYTHON_FLOOR=3.11
 # The tools devkit_tool knows: each also needs a devkit_declared_tools marker.
 DEVKIT_TOOLCHAIN_TOOLS='uv'
-_DEVKIT_PYTHON_RESOLVED=''
 
 # _devkit_python_probe <interpreter>: "<version> <real interpreter path>", or fail.
 _devkit_python_probe() {
@@ -140,7 +142,10 @@ _devkit_python_homebrew() {
 }
 
 devkit_python() {
-  if [ -n "$_DEVKIT_PYTHON_RESOLVED" ] && [ "$_DEVKIT_PYTHON_RESOLVED" = "${DEVKIT_PYTHON:-}" ]; then
+  # Inherited or this shell's own; the source and version come with it, so a marker without
+  # them (not one this lib ever exports) is no hit.
+  if [ -n "${DEVKIT_PYTHON_RESOLVED:-}" ] && [ "$DEVKIT_PYTHON_RESOLVED" = "${DEVKIT_PYTHON:-}" ] \
+    && [ -x "$DEVKIT_PYTHON" ] && [ -n "${DEVKIT_PYTHON_SOURCE:-}" ] && [ -n "${DEVKIT_PYTHON_VERSION:-}" ]; then
     return 0
   fi
   DEVKIT_PYTHON_ERROR='' _DEVKIT_PYTHON_TRIED='' _DEVKIT_HOMEBREW_PREFIXES=${HOMEBREW_PREFIX:-/opt/homebrew /usr/local}
@@ -163,7 +168,7 @@ devkit_python() {
     DEVKIT_PYTHON_ERROR="no python3 >= $DEVKIT_PYTHON_FLOOR on this box (tried PATH, mise, uv, Homebrew${_DEVKIT_PYTHON_TRIED:+: ${_DEVKIT_PYTHON_TRIED#; }}); install one (mise use -g python@3.14) or set DEVKIT_PYTHON"
     return 1
   fi
-  _DEVKIT_PYTHON_RESOLVED=$DEVKIT_PYTHON
+  export DEVKIT_PYTHON_RESOLVED=$DEVKIT_PYTHON DEVKIT_PYTHON_SOURCE DEVKIT_PYTHON_VERSION
 }
 
 # _devkit_tool_try <source> <candidate>: 0 and DEVKIT_TOOL set (absolute) when the candidate

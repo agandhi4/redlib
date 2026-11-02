@@ -6,6 +6,9 @@ a job's output. Read back by gate_bite.py (BITE: does enforcement act) through r
 Usage (local_gate.sh only; the job lines come on stdin, one `<name> <verdict> <seconds|->`):
   gate_record.py --logdir D --runs F --pr N --head SHA --main SHA --started ISO
                  --verdict pass|fail|error --seconds N [--over NAME]... [--total-seconds N]
+                 [--cpu NAME=SECONDS]... [--costs FILE]
+    --cpu gives a job's CPU seconds (its `cpu_seconds`); --costs rewrites FILE, after the record,
+    with each job's measured admission units (measured_costs) over the run records under D/../..
 Read back (pr_merge.sh: refuse a merge after main moved past the gated main):
   gate_record.py main-of <gate.json> <head>   the main SHA the gate of <head> ran on, or nothing
 Read back (dependency_merge.sh: whether a dependency PR's gate failed, and on what):
@@ -33,7 +36,7 @@ without this BITE and pr_merge.sh on this machine never saw it):
 Two files, both documented in README "Gate record":
   <logdir>/gate.json   {"schema_version": 2, "pr", "head", "main", "started", "finished",
                         "verdict", "seconds", "rules": [...], "jobs": {<name>: {"verdict",
-                        "seconds", "rules"[, "error"]}}, "gate.<job>.seconds": n,
+                        "seconds", "rules"[, "error"][, "cpu_seconds"]}}, "gate.<job>.seconds": n,
                         "gate.total.seconds": n}
                        <logdir> is the run's own dir (local_gate.sh "Run logs").
                        The flat `gate.*.seconds` keys are the metrics file's (build/metrics/
@@ -41,6 +44,8 @@ Two files, both documented in README "Gate record":
                        reads old and new records alike.
   <runs>               one tab-separated row per run, appended (RUNS_COLUMNS); `rules` is a JSON
                        array because a test name may hold commas and spaces.
+  <costs>              `<job>=<units> ...` on one line, read by the next gate (local_gate.sh
+                       "Concurrency", _slot_lib.sh "Measured costs").
 
 A job verdict is pass | fail | skip | budget (passed but over its enforced budget) | error (the
 gate's silence watchdog stopped it: the box failed, not the code, so its one rule is
@@ -62,9 +67,11 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import statistics
 import sys
+import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -141,6 +148,7 @@ class Job:
     seconds: int | None
     rules: tuple[str, ...]
     error: str | None = None  # the first error line behind a job:<name>:<hash> rule
+    cpu_seconds: int | None = None  # user + sys of the job's process tree (local_gate.sh --cpu)
 
 
 def log_rules(text: str) -> list[str]:
@@ -203,7 +211,19 @@ def job_rules(
     return tuple(rules), error
 
 
-def parse_jobs(lines: Iterator[str], logdir: Path, over: set[str]) -> list[Job]:
+def parse_cpu(entries: list[str]) -> dict[str, int]:
+    cpu: dict[str, int] = {}
+    for entry in entries:
+        name, sep, secs = entry.partition("=")
+        if not sep or not name or not secs.isdigit():
+            raise ValueError(f"--cpu {entry!r}: want `<name>=<whole seconds>`")
+        cpu[name] = int(secs)
+    return cpu
+
+
+def parse_jobs(
+    lines: Iterator[str], logdir: Path, over: set[str], cpu: dict[str, int] | None = None
+) -> list[Job]:
     jobs: list[Job] = []
     for raw in lines:
         if not raw.strip():
@@ -216,7 +236,7 @@ def parse_jobs(lines: Iterator[str], logdir: Path, over: set[str]) -> list[Job]:
         name, verdict, secs = parts
         seconds = None if secs == "-" else int(secs)
         rules, error = job_rules(name, verdict, logdir, over)
-        jobs.append(Job(name, verdict, seconds, rules, error))
+        jobs.append(Job(name, verdict, seconds, rules, error, (cpu or {}).get(name)))
     return jobs
 
 
@@ -228,6 +248,8 @@ def _job_doc(job: Job) -> dict[str, object]:
     }
     if job.error is not None:
         doc["error"] = job.error
+    if job.cpu_seconds is not None:
+        doc["cpu_seconds"] = job.cpu_seconds
     return doc
 
 
@@ -482,23 +504,31 @@ TYPICAL_MIN = 3
 TYPICAL_FILES = 300
 
 
-def typical_seconds(logs: Path, exclude: Path | None, names: list[str]) -> dict[str, int | None]:
-    """Per name, the median seconds (rounded up) of its newest TYPICAL_RUNS records with verdict
-    pass in the run records under `logs` (local_gate.sh "Run logs": <pr>/<head7>-<n>/gate.json;
-    `latest` links skipped), or None with fewer than TYPICAL_MIN. A budget or error verdict never
-    counts: an overrun must not raise the bar it overran."""
+def _recent_jobs(logs: Path, exclude: Path | None) -> Iterator[dict[str, object]]:
+    """The `jobs` map of each run record under `logs` (local_gate.sh "Run logs":
+    <pr>/<head7>-<n>/gate.json; `latest` links skipped), newest first, at most TYPICAL_FILES of
+    them; an unreadable record is skipped."""
     paths = [p for p in logs.glob("*/*/gate.json") if not p.parent.is_symlink()]
     if exclude is not None:
         paths = [p for p in paths if p.parent.resolve() != exclude.resolve()]
     paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    seen: dict[str, list[int]] = {name: [] for name in names}
     for path in paths[:TYPICAL_FILES]:
         try:
             jobs = json.loads(path.read_text(encoding="utf-8")).get("jobs")
         except (OSError, ValueError, AttributeError):
             continue
+        if isinstance(jobs, dict):
+            yield jobs
+
+
+def typical_seconds(logs: Path, exclude: Path | None, names: list[str]) -> dict[str, int | None]:
+    """Per name, the median seconds (rounded up) of its newest TYPICAL_RUNS records with verdict
+    pass in the run records under `logs` (_recent_jobs), or None with fewer than TYPICAL_MIN. A
+    budget or error verdict never counts: an overrun must not raise the bar it overran."""
+    seen: dict[str, list[int]] = {name: [] for name in names}
+    for jobs in _recent_jobs(logs, exclude):
         for name, got in seen.items():
-            job = jobs.get(name) if isinstance(jobs, dict) else None
+            job = jobs.get(name)
             if not isinstance(job, dict) or len(got) >= TYPICAL_RUNS:
                 continue
             secs = job.get("seconds")
@@ -510,6 +540,49 @@ def typical_seconds(logs: Path, exclude: Path | None, names: list[str]) -> dict[
         name: math.ceil(statistics.median(got)) if len(got) >= TYPICAL_MIN else None
         for name, got in seen.items()
     }
+
+
+# A job's measured admission cost: the busiest of its newest TYPICAL_RUNS passing records with
+# cpu_seconds, as CPU seconds per wall second, rounded, at least 1; under TYPICAL_MIN it has none.
+# The busiest, not the median: a run beside other work gets fewer cores and reads lower, never
+# higher, so the most a job kept busy is its own width (_slot_lib.sh "Measured costs"). Runs under
+# COST_MIN_SECONDS are left out: a few seconds of process start-up is no width.
+COST_MIN_SECONDS = 10
+
+
+def measured_costs(logs: Path) -> dict[str, int]:
+    ratios: dict[str, list[float]] = {}
+    for jobs in _recent_jobs(logs, None):
+        for name, job in jobs.items():
+            got = ratios.setdefault(name, [])
+            if not isinstance(job, dict) or len(got) >= TYPICAL_RUNS:
+                continue
+            secs, cpu = job.get("seconds"), job.get("cpu_seconds")
+            if (
+                job.get("verdict") == "pass"
+                and isinstance(secs, int)
+                and isinstance(cpu, int)
+                and secs >= COST_MIN_SECONDS
+            ):
+                got.append(cpu / secs)
+    return {
+        name: max(1, math.floor(max(got) + 0.5))
+        for name, got in sorted(ratios.items())
+        if len(got) >= TYPICAL_MIN
+    }
+
+
+def write_costs(path: Path, costs: dict[str, int]) -> None:
+    """Replaces `path` whole: a gate reading it mid-write would see half a line. The temporary
+    file is this writer's own, since two PRs' gates of one repo can finish at once (Codex, #275)."""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(" ".join(f"{name}={units}" for name, units in costs.items()) + "\n")
+        os.replace(tmp, path)
+    except OSError:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _cmd_typical(argv: list[str]) -> int:
@@ -537,6 +610,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seconds", type=int, required=True)
     p.add_argument("--total-seconds", type=int)
     p.add_argument("--over", action="append", default=[])
+    p.add_argument("--cpu", action="append", default=[])
+    p.add_argument("--costs", type=Path)
     return p
 
 
@@ -590,7 +665,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     args.over = set(args.over)
     try:
-        jobs = parse_jobs(iter(sys.stdin), args.logdir, args.over)
+        jobs = parse_jobs(iter(sys.stdin), args.logdir, args.over, parse_cpu(args.cpu))
         finished = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         record = build_record(args, jobs, finished)
         (args.logdir / "gate.json").write_text(
@@ -598,6 +673,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         with args.runs.open("a", encoding="utf-8") as fh:
             fh.write(runs_row(record, jobs))
+        if args.costs is not None:
+            write_costs(args.costs, measured_costs(args.logdir.parent.parent))
     except (OSError, ValueError) as exc:
         print(f"gate_record: {exc}", file=sys.stderr)
         return 2

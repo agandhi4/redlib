@@ -18,8 +18,8 @@
 #   TIER <tier> FAIL (exit <rc>, <s>s)                   the command failed: exits <rc>
 #   TIER <tier> FLOOR <runner> <n> < <min>               ran fewer tests than the floor: exit 1
 #   TIER <tier> FLOOR <runner> no summary line (floor <min>)                           exit 1
-#   TIER <tier> OVERBUDGET <s>s (budget <b>s)            exit 1, unless TIER_BUDGET_ENFORCE=0
-#                                                        or DEVKIT_CLOCK_SHIFT (Clock shift)
+#   TIER <tier> OVERBUDGET <s>s (budget <b>s)            exit 1 only under TIER_BUDGET_ENFORCE=1,
+#                                                        never under DEVKIT_CLOCK_SHIFT (Clock shift)
 #   TIER <tier>: <s>s (budget <b>s) <runner>=<n>...      every check held: exit 0
 # Under load the budget stretches (bin/_load_lib.sh: min(max(1-minute load / cores, gate slots
 # held), 2), sampled when the command starts and when it ends, the larger stretch kept, only
@@ -33,16 +33,17 @@
 # for its tier name's cost (unit 2, db 3, ...), holder `<repo>:<tier>`, so `make ci-unit` by hand
 # in four worktrees queues instead of piling onto the gates' load (2026-10-21). While it does not
 # fit it prints, at once and every 30 s (each heartbeat ending ` (waited <n>s)`),
-#   TIER <tier> waiting for capacity: <repo>:<tier> needs <c> of <cap>, <u> in use (<holder> <c>, ...)[; queued behind ...]
+#   TIER <tier> waiting for capacity: <repo>:<tier> needs <c> of <cap>, <u> in use (<holder> <c>, ...); position <k> of <n>[, behind ...]
 # then `TIER <tier> admitted (cost <c> of <cap>[, queued <n>s])`. The wait is before the budget
 # clock. Under a hook (bin/quiet_run.sh captures the step) the waiting lines, and the admitted
 # line after a wait, reach the hook's own output on its notice fd (bin/_slot_lib.sh, Notices),
 # so a queued pre-push says why it is quiet; the command runs with that fd closed. Inside a gate job (or another tier) DEVKIT_SLOT_HOLDER names a live holder and the tier
 # runs on its units, silently; TIER_SLOT=0 (default 1) stays out of the pool for a deliberately
 # quick single test.
-# A bad invocation exits 2 before the command runs. TIER_BUDGET_ENFORCE=0 (default 1) keeps
-# the OVERBUDGET line but not the failure, for a repo or box adopting budgets, exactly as
-# GATE_BUDGET_ENFORCE does for local_gate's job budgets. Floors have no such switch: a count
+# A bad invocation exits 2 before the command runs. A budget is reported, not failed (owner
+# 2026-10-29: load, not code, failed half the gates): TIER_BUDGET_ENFORCE=1 (default 0) makes the
+# OVERBUDGET line exit 1, as GATE_BUDGET_ENFORCE=1 does for local_gate's budgets; the nightly
+# budget watch (bin/budget_watch.sh) runs every tier that way on an idle box. Floors have no such switch: a count
 # is deterministic, so a floor that fails is a real loss.
 #
 # Counted = tests that RAN: passed + failed (+ pytest xfailed/xpassed/error, vitest "expected
@@ -242,7 +243,7 @@ parse_args() {
 }
 parse_args "$@"
 shift "$ARG_WORDS"
-ENFORCE=${TIER_BUDGET_ENFORCE:-1}
+ENFORCE=${TIER_BUDGET_ENFORCE:-0}
 [[ "$ENFORCE" =~ ^[01]$ ]] || die "TIER_BUDGET_ENFORCE must be 0 or 1 (got '$ENFORCE')"
 TAKE_SLOT=${TIER_SLOT:-1}
 [[ "$TAKE_SLOT" =~ ^[01]$ ]] || die "TIER_SLOT must be 0 or 1 (got '$TAKE_SLOT')"
@@ -468,7 +469,7 @@ judge_budget() {
     echo "tier_guard: over budget even though the tests passed; find the new cost (pytest --durations=30, vitest's slowest files) and cut it or move it down a tier, never raise the budget per run" >&2
     failed=1
   else
-    echo "TIER $TIER: over budget, not enforced (TIER_BUDGET_ENFORCE=0)"
+    echo "TIER $TIER: over budget, reported (budgets fail only under TIER_BUDGET_ENFORCE=1)"
   fi
 }
 judge_budget

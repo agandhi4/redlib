@@ -16,8 +16,10 @@
 #   IOS_DIAG_SOURCE     pull: the path inside the container, Library/Application Support/diagnostics
 #   IOS_DIAG_OUT        pull: diagnostics/<yyyymmdd-hhmmss>
 #   IOS_DEVICE          either: a device name, model ("iPhone 17 Pro"), CoreDevice UUID or
-#                       UDID; else the one paired, reachable physical iPhone devicectl lists
-#                       (two of them is exit 2, naming both with their models)
+#                       UDID, of the matches only the reachable ones (paired, tunnelState not
+#                       "unavailable") when any is, so an old phone of the same name loses;
+#                       else the one paired, reachable physical iPhone devicectl lists. Two
+#                       left is exit 2, naming each: name, model (CoreDevice UUID, UDID, tunnel)
 #
 # Gotchas this owns, each paid for once: the phone has two ids and the tools refuse each
 # other's (xcodebuild -destination takes the hardware UDID, devicectl the CoreDevice UUID), so
@@ -63,20 +65,26 @@ import sys
 path, want = sys.argv[1], sys.argv[2]
 with open(path, encoding="utf-8") as f:
     devices = json.load(f).get("result", {}).get("devices", [])
-rows = []
+matched, reachable = [], []
 for d in devices:
     hw, conn = d.get("hardwareProperties", {}), d.get("connectionProperties", {})
     props = d.get("deviceProperties", {})
+    tunnel = conn.get("tunnelState", "")
     row = (d.get("identifier", ""), hw.get("udid", ""), props.get("name", ""),
-           hw.get("marketingName", ""))
+           hw.get("marketingName", ""), tunnel)
+    up = conn.get("pairingState") == "paired" and tunnel != "unavailable"
     if want:
-        if want in row:
-            rows.append(row)
-    elif (hw.get("platform") == "iOS" and hw.get("reality") == "physical"
-          and conn.get("pairingState") == "paired" and conn.get("tunnelState") != "unavailable"):
-        rows.append(row)
+        if want in row[:4]:
+            matched.append(row)
+            if up:
+                reachable.append(row)
+    elif hw.get("platform") == "iOS" and hw.get("reality") == "physical" and up:
+        reachable.append(row)
+# A match keeps only its reachable rows when any is (two paired phones named alike, the old
+# one away); asked for by an id, the unreachable phone is still the one named.
+rows = (reachable or matched) if want else reachable
 if len(rows) != 1:
-    found = "; ".join(f"{n}, {m} ({c})" for c, _, n, m in rows) or "none"
+    found = "; ".join(f"{n}, {m} ({c}, {u}, {t or '-'})" for c, u, n, m, t in rows) or "none"
     sys.exit(f"want exactly one device{' matching ' + want if want else ' paired'}, found: {found}")
 print(rows[0][0], rows[0][1])
 PY

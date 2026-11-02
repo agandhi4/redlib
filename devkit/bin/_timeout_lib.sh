@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Bounded commands, and a guard for a hung Docker daemon. Sourced; defines functions and runs
 # nothing. Used by: throwaway_pg.sh and boot_image.sh (devkit_docker_guard), local_gate.sh
-# (devkit_with_timeout around the plan's gate_cleanup).
+# (devkit_with_timeout around the plan's gate_cleanup; devkit_docker_ensure in require_docker).
 #
 # Why (2026-10-17): the OrbStack daemon wedged and every `docker rm -fv`, `docker ps` and
 # `docker inspect` hung for 12+ minutes. Inside a job only the 15-minute silence watchdog
@@ -21,6 +21,17 @@
 #                                         holds the machine awake for the caller's lifetime, and
 #                                         on macOS a probe that times out gets one user-activity
 #                                         wake and one re-probe (bin/_awake_lib.sh).
+#   devkit_docker_check <who>             the same checks and probe without the exit: 0 when the
+#                                         daemon answers, else 1 with DEVKIT_DOCKER_ERROR (one
+#                                         line, no <who> prefix). Bad values are still exit 2.
+#   devkit_docker_ensure <who>            devkit_docker_check, and on macOS with OrbStack
+#                                         `Stopped` (orbctl status) one `orbctl start`, then the
+#                                         probe again, 1 s apart, up to
+#                                         DEVKIT_ORBSTACK_START_PROBES times (default 60); sets
+#                                         DEVKIT_DOCKER_NOTE ("" or what it started). Never
+#                                         `orbctl stop` or restart: that kills every container.
+#                                         Used by local_gate.sh's require_docker, before the
+#                                         first job of a plan that needs Docker.
 
 # shellcheck source=bin/_awake_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_awake_lib.sh"
@@ -54,16 +65,25 @@ devkit_with_timeout() {
 }
 
 devkit_docker_guard() {
-  local who=$1 rc=0
+  local who=$1
   [[ "${DOCKER_CALL_TIMEOUT:-180}" =~ ^[1-9][0-9]*$ ]] \
     || { echo "$who: DOCKER_CALL_TIMEOUT must be a whole number of seconds >= 1 (got '$DOCKER_CALL_TIMEOUT')" >&2; exit 2; }
+  devkit_docker_check "$who" || { echo "$who: $DEVKIT_DOCKER_ERROR" >&2; exit 1; }
+  # shellcheck disable=SC2329  # shadows the CLI for every later call in the sourcing script
+  docker() { devkit_with_timeout "${DOCKER_CALL_TIMEOUT:-180}" command docker "$@"; }
+}
+
+# shellcheck disable=SC2034  # DEVKIT_DOCKER_ERROR is this function's output, read by its callers
+devkit_docker_check() {
+  local who=$1 rc=0
+  DEVKIT_DOCKER_ERROR=""
   [[ "${DOCKER_PROBE_TIMEOUT:-15}" =~ ^[1-9][0-9]*$ ]] \
     || { echo "$who: DOCKER_PROBE_TIMEOUT must be a whole number of seconds >= 1 (got '$DOCKER_PROBE_TIMEOUT')" >&2; exit 2; }
-  command -v docker >/dev/null || { echo "$who: docker not found on PATH" >&2; exit 1; }
+  command -v docker >/dev/null || { DEVKIT_DOCKER_ERROR="docker not found on PATH"; return 1; }
   # devkit_with_timeout stops the command's children and its own sleep with pkill. Without it
   # both survive silently: a watcher slept out its full bound (180 s) holding the caller's file
   # descriptors, which kept a bats file waiting past its last test (2026-10-18).
-  command -v pkill >/dev/null || { echo "$who: pkill not found on PATH (procps: apt install procps)" >&2; exit 1; }
+  command -v pkill >/dev/null || { DEVKIT_DOCKER_ERROR="pkill not found on PATH (procps: apt install procps)"; return 1; }
   # Held before the probe: lanes idle between Docker calls, and a Mac asleep then is how the
   # OrbStack VM stays asleep through DarkWake (2026-10-22).
   devkit_stay_awake
@@ -72,17 +92,44 @@ devkit_docker_guard() {
     echo "$who: the docker daemon did not answer within ${DOCKER_PROBE_TIMEOUT:-15}s; woke the Mac (caffeinate -u -t 2), probing once more" >&2
     rc=0
     _devkit_docker_probe || rc=$?
-    [ "$rc" != 124 ] || { echo "$who: $(_devkit_orbstack_asleep_hint)" >&2; exit 1; }
+    [ "$rc" != 124 ] || { DEVKIT_DOCKER_ERROR=$(_devkit_orbstack_asleep_hint); return 1; }
   fi
   if [ "$rc" = 124 ]; then
-    echo "$who: the docker daemon did not answer within ${DOCKER_PROBE_TIMEOUT:-15}s (hung; restart Docker, then rerun)" >&2
-    exit 1
+    DEVKIT_DOCKER_ERROR="the docker daemon did not answer within ${DOCKER_PROBE_TIMEOUT:-15}s (hung; restart Docker, then rerun)"
+    return 1
   elif [ "$rc" != 0 ]; then
-    echo "$who: the docker daemon is not reachable (docker version exit $rc; is Docker running?)" >&2
-    exit 1
+    DEVKIT_DOCKER_ERROR="the docker daemon is not reachable (docker version exit $rc; is Docker running?)"
+    return 1
   fi
-  # shellcheck disable=SC2329  # shadows the CLI for every later call in the sourcing script
-  docker() { devkit_with_timeout "${DOCKER_CALL_TIMEOUT:-180}" command docker "$@"; }
+}
+
+# Why (redlib #67, 2026-11-01): OrbStack was stopped, and the gate ran quick and unit for ~135 s
+# before its image job found no daemon; the PR needed a full rerun. A stopped OrbStack is the one
+# state safe to fix unasked: it runs no containers to lose. A hung or asleep VM is left to
+# devkit_docker_check's wake and hint, never restarted here.
+# shellcheck disable=SC2034  # DEVKIT_DOCKER_NOTE is this function's output, read by its callers
+devkit_docker_ensure() {
+  local who=$1 probes=${DEVKIT_ORBSTACK_START_PROBES:-60} n=1 state
+  DEVKIT_DOCKER_NOTE=""
+  [[ "$probes" =~ ^[1-9][0-9]*$ ]] \
+    || { echo "$who: DEVKIT_ORBSTACK_START_PROBES must be a whole number >= 1 (got '$probes')" >&2; exit 2; }
+  devkit_docker_check "$who" && return 0
+  _devkit_on_macos && command -v orbctl >/dev/null || return 1
+  state=$(devkit_with_timeout "${DOCKER_PROBE_TIMEOUT:-15}" orbctl status 2>/dev/null) || :
+  [ "$state" = Stopped ] || return 1
+  echo "$who: OrbStack is stopped; starting it (orbctl start), then up to $probes probes 1 s apart" >&2
+  devkit_with_timeout "$probes" orbctl start </dev/null >/dev/null 2>&1 || :
+  # Counted probes, not elapsed seconds: the test steps the loop by its probe count, and a wait
+  # between probes only, so one probe (DEVKIT_ORBSTACK_START_PROBES=1) never sleeps.
+  until _devkit_docker_probe; do
+    if [ "$n" -ge "$probes" ]; then
+      DEVKIT_DOCKER_ERROR="OrbStack was stopped; orbctl start ran, but the docker daemon did not answer in $probes probe(s) 1 s apart (open OrbStack, then rerun)"
+      return 1
+    fi
+    n=$((n + 1))
+    sleep 1
+  done
+  DEVKIT_DOCKER_NOTE="OrbStack was stopped; started it (orbctl start), docker answered on probe $n"
 }
 
 _devkit_docker_probe() {

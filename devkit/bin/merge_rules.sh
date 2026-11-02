@@ -136,6 +136,14 @@
 # protection wants it up to date) become one `merge: refused: re-gate: …` line and exit 1, the
 # same as main moving before the call; any other gh failure exits with gh's code. homelab #128
 # (2026-10-22): Renovate's rebase push landed during the merge ("Head branch is out of date").
+# After the merge, the branch's local leftovers go (merge_cleanup): every worktree of this
+# repo checked out on the merged branch is removed when its tree is clean and its HEAD is the
+# merged head, then the local branch when its tip is that head; one `merge: removed …` line each.
+# Why (2026-11-01): lanes add a worktree per PR and nothing removed them after the merge, so
+# ~/projects/solo held 28 worktrees of merged PRs across four repos. Left in place, each with a
+# `merge: note:` line and the command: the worktree the caller stands in (a shell or agent left
+# in a removed directory fails every command after), a dirty tree, a HEAD that is not the merged
+# head (unpushed work), the main checkout. Cleanup never changes the exit code: the merge is done.
 # That one gh call, and only it, carries DEVKIT_MERGE_VERIFIED=<the full head sha>: no paid
 # GitHub features (owner, 2026-10-18), so a gh shim refuses any `pr merge` whose
 # --match-head-commit is not that value, and this is the fleet's only merge path. Any inherited
@@ -743,8 +751,49 @@ if [ "$rc" != 0 ] && [ -n "$codex_status" ] && [[ "$merged" == *"base branch pol
     echo "merge: PR #$PR still reads blocked after ${MERGE_RETRY_SECONDS:-30} s; not retrying"
   fi
 fi
+# merge_cleanup: the merged branch's local leftovers (header). Reads `git worktree list`
+# through $ROOT, which may itself be a lane worktree: the list is the repo's, whichever worktree
+# asks. Detached worktrees (the gate's) have no branch line and are never touched.
+merge_cleanup() {
+  [ -n "$branch" ] || return 0
+  local wt wt_branch wt_head main_wt cwd left=0
+  cwd=$(pwd -P)/  # physical: git prints worktree paths resolved (/tmp vs /private/tmp on macOS)
+  # The main checkout: the parent of the common dir, from any worktree.
+  main_wt=$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)") || return 0
+  while IFS=$'\t' read -r wt wt_branch wt_head; do
+    [ "$wt_branch" = "refs/heads/$branch" ] || continue
+    if [ "$wt" = "$main_wt" ]; then
+      echo "merge: note: the main checkout $wt is on $branch; git -C $wt checkout main"; left=1; continue
+    fi
+    case "$cwd" in "$wt"/*)
+      echo "merge: note: worktree $wt ($branch) is where this runs; leave it, then: git worktree remove $wt && git branch -D $branch"
+      left=1; continue ;;
+    esac
+    if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
+      echo "merge: note: worktree $wt ($branch) has uncommitted changes; left in place"; left=1; continue
+    fi
+    if [ "$wt_head" != "$head" ]; then
+      echo "merge: note: worktree $wt ($branch) is at ${wt_head:0:12}, not the merged head ${head:0:12}; left in place"; left=1; continue
+    fi
+    if git -C "$ROOT" worktree remove "$wt" 2>&1; then
+      echo "merge: removed worktree $wt ($branch)"
+    else
+      echo "merge: note: could not remove worktree $wt ($branch) (git above)"; left=1
+    fi
+  done < <(git -C "$ROOT" worktree list --porcelain \
+    | awk '/^worktree /{p=substr($0,10); h=""} /^HEAD /{h=substr($0,6)} /^branch /{print p "\t" substr($0,8) "\t" h}')
+  [ "$left" = 0 ] || return 0
+  local tip
+  tip=$(git -C "$ROOT" rev-parse -q --verify "refs/heads/$branch") || return 0
+  if [ "$tip" = "$head" ]; then
+    git -C "$ROOT" branch -D "$branch" >/dev/null 2>&1 && echo "merge: deleted local branch $branch"
+  else
+    echo "merge: note: local branch $branch is at ${tip:0:12}, not the merged head ${head:0:12}; left in place"
+  fi
+}
 if [ "$rc" = 0 ]; then
   [ -z "$merged" ] || printf '%s\n' "$merged"
+  merge_cleanup
   exit 0
 fi
 [ -z "$merged" ] || printf '%s\n' "$merged" >&2
