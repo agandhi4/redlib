@@ -15,7 +15,7 @@ CI_IMAGE ?= redlib:ci
 CI_BUILD_VERSION ?= $(shell git rev-parse --short=7 HEAD)
 
 .DEFAULT_GOAL := help
-.PHONY: help ci-quick ci-guards ci-lint ci-typecheck ci-unit test-live ci-image ci-smoke publish gate merge install hooks-check devkit-sync devkit-check toolchain-check workflows-check docs-check release-check secrets-check secrets-staged upstream-review pr ci-metrics metrics-snapshot metrics-tighten metrics-rebaseline
+.PHONY: help ci-quick ci-guards ci-lint ci-typecheck ci-unit test-live ci-image ci-smoke publish gate merge review install hooks-check devkit-sync devkit-check toolchain-check workflows-check docs-check release-check secrets-check secrets-staged upstream-review pr ci-metrics metrics-snapshot metrics-tighten metrics-rebaseline
 
 help: ## list targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
@@ -107,9 +107,15 @@ gate: ## make gate PR=<n> [GATE_ARGS=--no-post]
 pr: ## make pr BODY_FILE=<file> [TITLE=…] [DRAFT=1]; push, open the PR on origin (never a fork's parent)
 	devkit/bin/pr_create.sh
 
-merge: ## make merge PR=<n>; refused unless the head has local-gate success
+# The only merge path: squash-merges once the PR's review rounds allow it (Codex's, or
+# `make review`'s; DEVKIT_REVIEW_ROUNDS, devkit/bin/merge_rules.sh); never `gh pr merge` by hand.
+merge: ## make merge PR=<n> [OWNER='<reason>']; squash-merge once its review rounds allow it
 	@test -n "$(PR)" || { echo "usage: make merge PR=<number>" >&2; exit 2; }
 	devkit/bin/pr_merge.sh "$(PR)"
+
+review: ## make review PR=<n>; a local review round: claude -p over the diff, its record posted
+	@test -n "$(PR)" || { echo "usage: make review PR=<number>" >&2; exit 2; }
+	devkit/bin/pr_review.sh "$(PR)"
 
 # --fix rewrites core.hooksPath, so a tool that repointed it is undone by the next install.
 install: devkit-check ## one-time per checkout/worktree: install the git hooks (.githooks, steps in scripts/ci/hooks.conf)
