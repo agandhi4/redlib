@@ -4,17 +4,22 @@
 # failure it exists to catch, so it reads GitHub alone and never reaches for linux-box.
 #
 # Usage: bin/publisher_deadman.sh [--repos a,b] [--hours <n>]
-#   --repos  repos.json keys (default: all); a repo whose main plan has no PUBLISH_IMAGE is skipped
+#   --repos  repos.json keys (default: all); a repo whose main plan has no PUBLISH_IMAGE is skipped.
+#            Report only: the issue is the whole fleet's, so a partial run never files, rewrites or
+#            closes it (devkit #310: `--repos lib` closed an alert naming a stalled app)
 #   --hours  how long an unpublished image input may wait (default 6), past the repo's check
 #            window: publish.sh starts a check at most once per MAIN_CHECK_MINUTES (default 180,
 #            bin/_cadence_lib.sh), so a repo waits up to that long by design and is allowed
 #            --hours plus its window, in whole hours rounded up (9 by default: a 3 h wait and a
 #            check's length never page)
-# A repo is stalled when main has commits past its newest sha-* image, the newest of them is
-# older than that (the newest, not the oldest: docs and tests merges the publisher checks but
-# never builds pile up past the image, and a fresh code merge after them is no stall yet), they
-# change an image input (devkit_image_inputs_changed: the publisher's own test, so a run that
-# ended `checked` is alive and a docs merge is owed nothing); an open main-red issue is named beside it, never a
+# A repo is stalled when main has commits past the image `latest` carries (that version's sha-*
+# tag; the newest sha-* tag proves nothing, since publish.sh pushes sha-<7> before it moves
+# `latest`, devkit #308), the newest of them is older than that (the newest, not the oldest: docs
+# and tests merges the publisher checks but never builds pile up past the image, and a fresh code
+# merge after them is no stall yet), and they change an image input (devkit_image_inputs_changed:
+# the publisher's own test, so a run that ended `checked` is alive and a docs merge is owed
+# nothing; a rename counts both its paths, as the publisher's --no-renames diff does, devkit
+# #312). An open main-red issue is named beside it, never a
 # reason to stay quiet. One `publisher stalled` issue (label publisher-stalled) in
 # <owner>/devkit names every stalled repo: filed, or its body updated; closed with a comment once
 # a run finds none and could read every repo.
@@ -80,14 +85,22 @@ judge() {
   raw_file "$slug" .dockerignore "$tree/.dockerignore" || rc=$?
   [ "$rc" != 2 ] || { echo "DEADMAN $repo error (reading .dockerignore: $(tr '\n' ' ' <"$SCRATCH/gh.err"))"; return 1; }
   owner=${image#ghcr.io/}; pkg=${owner#*/}; owner=${owner%%/*}
-  # Newest first, as the API lists them; the publisher tags every image it pushes sha-<7>.
+  # Newest first, as the API lists them; the publisher tags every image it pushes sha-<7> and
+  # points `latest` at one of them (one digest, so one version carries both tags).
+  # Line 1: latest's sha-* tag ("" when none of the page carries it); line 2: whether any does.
   built=$(gh api "users/$owner/packages/container/$pkg/versions?per_page=30" \
-    --jq '[.[] | .metadata.container.tags[] | select(startswith("sha-"))][0] // ""') \
+    --jq '([.[] | .metadata.container.tags | select(index("latest")) | .[] | select(startswith("sha-"))][0] // ""),
+          ([.[] | .metadata.container.tags[] | select(startswith("sha-"))] | length > 0)') \
     || { echo "DEADMAN $repo error (reading $image's versions; gh above)"; return 1; }
-  [ -n "$built" ] || { echo "DEADMAN $repo skipped (no sha-* image yet: a first publish is the owner's)"; return 0; }
+  if [ -z "$(head -n 1 <<<"$built")" ]; then
+    [ "$(tail -n 1 <<<"$built")" = true ] || { echo "DEADMAN $repo skipped (no sha-* image yet: a first publish is the owner's)"; return 0; }
+    # sha-* pushes past the page with latest beyond it: no baseline, and never a reason to close.
+    echo "DEADMAN $repo error (no version among $image's 30 newest carries latest with a sha-* tag)"; return 1
+  fi
+  built=$(head -n 1 <<<"$built")
   # Line 1: the newest unpublished commit's age in hours (-1: none); then the changed paths.
   files=$(gh api "repos/$slug/compare/${built#sha-}...main" \
-    --jq '(.commits[-1].commit.committer.date // null | if . then (now - fromdateiso8601) / 3600 | floor else -1 end), (.files // [] | .[].filename)') \
+    --jq '(.commits[-1].commit.committer.date // null | if . then (now - fromdateiso8601) / 3600 | floor else -1 end), (.files // [] | .[] | .filename, (.previous_filename // empty))') \
     || { echo "DEADMAN $repo error (comparing ${built#sha-}...main; gh above)"; return 1; }
   age=$(head -n 1 <<<"$files")
   if [ "$age" -lt 0 ]; then echo "DEADMAN $repo ok (main is $built)"; return 0; fi
@@ -110,7 +123,9 @@ judge() {
 }
 
 for repo in $REPOS; do judge "$repo" || ERRORS=$((ERRORS + 1)); done
-if [ -n "$STALLED" ]; then
+if [ -n "$REPOS_ARG" ]; then
+  said="left as is: --repos reads part of the fleet"
+elif [ -n "$STALLED" ]; then
   said=$(devkit_issue_upsert "$OWNER/devkit" publisher-stalled "$TITLE" "publisher_deadman.sh on $(hostname), $(date -u +%Y-%m-%dT%H:%MZ): nothing was published for over ${HOURS}h past their check windows while these repos had image inputs to publish. The publisher (devkit-publish@<repo>.timer on linux-box, bin/publish.sh) is down, stopped or stuck: check \`systemctl list-timers 'devkit-publish@*'\` and \`journalctl -u 'devkit-publish@*'\` there.
 
 $STALLED

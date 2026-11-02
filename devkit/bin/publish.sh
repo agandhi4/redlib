@@ -314,7 +314,7 @@ main_red() {
 }
 
 # heal_main_red [<keep title>]: P passed, so every open main-red issue of the publisher's but the
-# current first bad commit's is over (never the Mac's: apple_check.sh closes its own). A gh error
+# current first bad commit's is over (never the Mac's: main_check.sh closes its own). A gh error
 # is a line, never the outcome.
 heal_main_red() {
   local said

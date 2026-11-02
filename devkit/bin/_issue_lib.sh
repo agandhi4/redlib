@@ -18,13 +18,13 @@
 #   devkit_main_red_title <evidence> <commit> [<where>]
 #       `main is red [<where> ]at <sha7>: <failed jobs>`, the jobs from check_tree's VERDICT line
 #       in <evidence> (its saved output). <where> keeps each checker's issues apart: publish.sh
-#       has none, apple_check.sh is `on the Mac`, so a green publish (which skips the Xcode jobs)
+#       has none, main_check.sh is `on the Mac`, so a green publish (which skips the Xcode jobs)
 #       never closes the Mac's issue, nor the Mac's green the publisher's.
 #   devkit_main_red_file <slug> <commit> <evidence> <lead> [<where>]
 #       One main-red issue for <commit>, the first bad one: <lead>, then <evidence> less its
 #       passing lines, last 40. Prints and exits as devkit_issue_file.
 #   devkit_main_red_heal <slug> <comment> [<keep title>] [<where>]
-#       Close <where>'s open main-red issues but <keep title>. Used by: publish.sh, apple_check.sh.
+#       Close <where>'s open main-red issues but <keep title>. Used by: publish.sh, main_check.sh.
 # The labels are in github/labels.json; the `gh label create` covers a repo not yet synced to it
 # (it fails, harmlessly, when the label exists).
 

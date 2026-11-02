@@ -877,17 +877,17 @@ def wired_codex_review(repo: Repo) -> None:
 
 
 # What proves main for each deploy kind a plan declares (README "Publish", "Deploy kinds"). Read
-# as gate_plan_literal reads it (bin/apple_check.sh does, for ios and mac): unquoted, commas.
+# as gate_plan_literal reads it (bin/main_check.sh does): unquoted, commas.
 DEPLOY_KINDS_LINE = re.compile(r"^DEPLOY_KINDS=([A-Za-z0-9._,/-]*)[ \t]*(?:#.*)?$", re.M)
 PUBLISH_IMAGE_LINE = re.compile(r"^PUBLISH_IMAGE=[A-Za-z0-9._,/-]+[ \t]*(?:#.*)?$", re.M)
-APPLE_PROOF = "apple_check.sh on the Mac (check_tree.sh at each new main, hourly)"
+MAC_PROOF = "main_check.sh on the Mac (check_tree.sh at a new main, once per window)"
 DEPLOY_KINDS = {
     "image": "publish.sh on linux-box (check_tree.sh before latest moves)",
-    "ios": APPLE_PROOF,
-    "mac": APPLE_PROOF,
-    "hosted": "its host applies main itself (homelab's hosts, Vercel); nothing re-checks main",
-    "library": "no deploy; nothing re-checks main after merge",
-    "tooling": "no deploy; nothing re-checks main after merge",
+    "ios": MAC_PROOF,
+    "mac": MAC_PROOF,
+    "hosted": "its host applies main itself (homelab's hosts, Vercel); " + MAC_PROOF,
+    "library": "no deploy; " + MAC_PROOF,
+    "tooling": "no deploy; " + MAC_PROOF,
 }
 NO_DEPLOY_KINDS = frozenset({"library", "tooling"})
 
