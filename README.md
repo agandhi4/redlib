@@ -182,7 +182,8 @@ The listener opens only after the OAuth bootstrap against Reddit succeeds, so a 
 | `make ci-unit` | `cargo test` with line coverage, offline, under a time budget and a test-count floor |
 | `make ci-image` | builds the Dockerfile for this host's platform and checks its `APP_VERSION` |
 | `make test-live` | the `#[ignore]`d tests that call live Reddit, serially; gates nothing |
-| `make gate PR=<n>` | the merge gate: the PR merged into `origin/main`, posting the `local-gate` status |
+| `make review PR=<n>` | one local review round (when Codex is out of budget), its record posted on the PR |
+| `make merge PR=<n>` | the only merge: squash-merges once the review rounds allow it |
 | `make help` | every target |
 
 ## Architecture
@@ -193,7 +194,7 @@ One Rust binary (hyper server, `src/main.rs` router) that proxies Reddit's JSON 
 
 This fork runs one instance (`reddit.box`), so it carries one deployment path; upstream's recipes (Docker Compose and CLI, Podman Quadlets, systemd, launchd, Replit/Heroku, NetBSD) were removed with the files they used. See [upstream's README](https://github.com/redlib-org/redlib#deployment) for those.
 
-- **Image:** linux-box's `devkit-publish@redlib.timer` (homelab `hosts/linux-box/publish.list`) runs `make publish` (`devkit/bin/publish.sh`) every 5 min: once every commit since `latest` passed the gate and one changed an image input, it builds `ghcr.io/agandhi4/redlib` at `main`, runs `make ci-smoke` on it, pushes `sha-<7>` and `latest`, and creates the git tag `ship-<YYYY-MM-DD>-<sha7>`. Nothing is published from a Mac or by hand. The bare `<sha7>` is the image's `APP_VERSION`, its OCI version label and the version in the page footer.
+- **Image:** linux-box's `devkit-publish@redlib.timer` (homelab `hosts/linux-box/publish.list`) runs `make publish` (`devkit/bin/publish.sh`): at most once per 3 h window it runs every plan job at the new `main` (`devkit/bin/check_tree.sh`); a red `main` files a `main-red` issue and ships nothing. When `main` is green and changed an image input, it builds `ghcr.io/agandhi4/redlib` at `main`, runs `make ci-smoke` on it, pushes `sha-<7>` and `latest`, and creates the git tag `ship-<YYYY-MM-DD>-<sha7>`. Nothing is published from a Mac or by hand. The bare `<sha7>` is the image's `APP_VERSION`, its OCI version label and the version in the page footer.
 - **Stack:** the compose file lives in the homelab repo (`stacks/redlib/docker-compose.yml`); its hourly `deploy.sh update` timer pulls `latest`. Instance settings are env vars there.
 
 ## Tracking upstream
