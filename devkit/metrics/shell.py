@@ -41,7 +41,7 @@ Keys (docs/metrics-keys.md), each behind its flag; `<scope>` is `--scope`:
                                                   uses, so it errs towards alive). Not seen: a
                                                   caller outside the set (a Makefile recipe) and
                                                   a name built at run time (`cmd_$1`).
-                                                  The plan hooks bin/local_gate.sh calls
+                                                  The plan hooks the plan runner calls
                                                   (gate_plan, gate_plan_extra, gate_cleanup)
                                                   are entry points, never dead, and so is each
                                                   `--entry NAME` (repeatable), the repo's
@@ -127,7 +127,7 @@ SCOPE = re.compile(r"[A-Za-z0-9_-]+")  # the key's middle segment: no dots, no w
 SHELLCHECK = Path(__file__).resolve().parent.parent / "bin" / "shellcheck.sh"
 COUNTED_LEVELS = {"error": "shellcheck_errors", "warning": "shellcheck_warnings"}
 MAIN = "<main>"
-# The functions a repo defines for devkit to call (bin/local_gate.sh's plan contract): alive
+# The functions a repo defines for devkit to call (the plan contract, bin/_paths_lib.sh): alive
 # though nothing in the repo names them.
 ENTRY_POINTS = frozenset({"gate_plan", "gate_plan_extra", "gate_cleanup"})
 # A guard's taken side ends in one of these, or in a function whose body ends in `exit`. Not

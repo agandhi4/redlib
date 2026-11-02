@@ -20,7 +20,7 @@
 #            those are only what devkit-sync writes. It fails printing the form to add. A human's
 #            commit and a merge commit (git writes its message) pass untouched. Why a hook
 #            (owner, 2026-10-18): the convention lived only in briefs.
-# A check that applied writes its ledger rows (header: Timings), so gate_bite.py counts it.
+# A check that applied writes its ledger rows (header: Timings), so bite.py counts it.
 # Each step is "<label>=<make target>[:<override>]". Steps call the gate's own ci-* targets,
 # never raw tools, so a hook cannot drift from the gate. They run in order and stop at the
 # first failure. A conf lists steps only: devkit decides which of them a change needs.
@@ -45,7 +45,7 @@
 #
 # Vendoring only: a pre-commit whose staged paths only vendor devkit (devkit/ at the tree
 # .devkit-rev records, .devkit-rev, byte-exact base copies: devkit-sync's commit), with at most
-# tightened bounds beside them (the nightly sync's lock-in), runs no step and prints one line;
+# tightened bounds beside them, runs no step and prints one line;
 # _hook_vendoring_only says why.
 #
 # Overrides, for a repo whose layout or target naming the defaults misjudge (most need none):
@@ -62,7 +62,7 @@
 # hook). <repo> is the MAIN checkout's directory name (the parent of the common git dir), so a
 # commit in a worktree (.claude/worktrees/<branch>) lands in the repo's file, not <branch>.tsv;
 # scorecard.py derives the same name. The scorecard's WIRED (`hooks.ledger`: a row in 30 d) and
-# gate_bite.py (failed steps) read it; the owner's budgets stand: pre-commit <= 30 s, pre-push
+# bite.py (failed steps) read it; the owner's budgets stand: pre-commit <= 30 s, pre-push
 # <= 60 s (2026-10-13).
 # <globs> are comma-separated, no spaces, one override per step. A glob is a bash `case`
 # pattern over the whole repo-relative path, as in scripts/ci/gate_plan.sh: `*` also matches
@@ -131,11 +131,11 @@
 # the hook, as it fails the gate. Nothing is provisioned when no step will run, including when
 # path scoping skips every step.
 
-# shellcheck source=/dev/null  # bin/toolchain_path.sh: toolchain_path, shared with local_gate.sh
+# shellcheck source=/dev/null  # bin/toolchain_path.sh: toolchain_path
 . "$(dirname "${BASH_SOURCE[0]}")/toolchain_path.sh"
-# shellcheck source=bin/_paths_lib.sh  # the path classification, shared with local_gate.sh
+# shellcheck source=bin/_paths_lib.sh  # the path classification, shared with publish.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_paths_lib.sh"
-# shellcheck source=bin/_load_lib.sh  # devkit_load_scale, shared with local_gate.sh and tier_guard.sh
+# shellcheck source=bin/_load_lib.sh  # devkit_load_scale, shared with tier_guard.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_load_lib.sh"
 # shellcheck source=bin/_trailer_lib.sh  # devkit_trailer_ok and devkit_is_agent for the commit-msg trailer step
 . "$(dirname "${BASH_SOURCE[0]}")/_trailer_lib.sh"
@@ -332,7 +332,7 @@ _hook_missing_node_modules() {
 
 # <hook> <push input> <changed paths> <remote>: true when the change only vendors devkit, with
 # at most a tightening of the bounds (_vendor_paths.sh devkit_sync_only), as devkit-sync's own
-# commit and the nightly sync's lock-in do: pre-commit judges the index against HEAD, pre-push
+# commit does: pre-commit judges the index against HEAD, pre-push
 # the one commit it pushes against its merge base with <remote>'s main (a push of several tips
 # runs every step). Sets
 # HOOK_VENDORED_TREE. Why skip the repo's steps for it (closet, 2026-10-19): the sync commits and
@@ -414,7 +414,7 @@ _hook_msg_trailer() {
 
 # <root> <hook> <label> <start epoch> <rc> [note]: one timing line in the per-machine hooks
 # ledger (header comment above); the note column joins [note] and the hook's load note with a
-# space; gate_bite.py reads columns 1-5, the scorecard column 1. Best effort: an unwritable
+# space; bite.py reads columns 1-5, the scorecard column 1. Best effort: an unwritable
 # state dir never fails a hook.
 _hook_record() {
   local root=$1 hook=$2 label=$3 start=$4 rc=$5 note=${6:-} dir row

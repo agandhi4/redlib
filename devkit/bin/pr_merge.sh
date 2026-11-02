@@ -20,10 +20,15 @@
 # plan is exit 2.
 # Residual: this entry is the checkout's own. devkit-check holds a consumer's devkit/ to the
 # devkit commit its .devkit-rev names, and every such commit since this one carries this entry.
+# `--rules review_rules.sh` runs that script of main's the same way: `make review PR=<n>`
+# (bin/pr_review.sh), whose record counts as a review round, so a branch must not choose its own
+# reviewer either.
 # Exit: merge_rules.sh's (0 merged, 1 refused, 2 usage or environment, else gh's own code).
 set -uo pipefail
 
-usage() { echo "usage: $0 <pr-number>"; }
+usage() { echo "usage: $0 [--rules review_rules.sh] <pr-number>"; }
+RULES=merge_rules.sh
+if [ "${1:-}" = --rules ] && [ "${2:-}" = review_rules.sh ]; then RULES=$2; shift 2; fi
 [ $# -eq 1 ] || { usage >&2; exit 2; }
 case "$1" in
   -h|--help) usage; exit 0 ;;
@@ -41,9 +46,9 @@ fetch_main "$ROOT" || { echo "merge: cannot fetch origin main, whose rules decid
 # The full ref: a local branch named origin/main would otherwise win.
 MAIN=$(git -C "$ROOT" rev-parse --verify -q refs/remotes/origin/main) \
   || { echo "merge: no origin/main after the fetch" >&2; exit 2; }
-if ! git -C "$ROOT" cat-file -e "$MAIN:${PREFIX}merge_rules.sh" 2>/dev/null; then
-  echo "merge: origin/main ${MAIN:0:12} has no ${PREFIX}merge_rules.sh (its devkit predates main-decided rules); this checkout's rules decide"
-  exec "$HERE/merge_rules.sh" "$ROOT" "$1"
+if ! git -C "$ROOT" cat-file -e "$MAIN:${PREFIX}$RULES" 2>/dev/null; then
+  echo "merge: origin/main ${MAIN:0:12} has no ${PREFIX}$RULES (its devkit predates main-decided rules); this checkout's rules decide"
+  exec "$HERE/$RULES" "$ROOT" "$1"
 fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/devkit-merge.XXXXXX") || exit 2
@@ -56,4 +61,4 @@ if [ -z "${GATE_PLAN:-}" ]; then
   export GATE_PLAN=$TMP/gate_plan.sh
 fi
 echo "merge: rules and plan from origin/main ${MAIN:0:12}"
-"$TMP/${PREFIX}merge_rules.sh" "$ROOT" "$1"
+"$TMP/${PREFIX}$RULES" "$ROOT" "$1"

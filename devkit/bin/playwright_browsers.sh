@@ -18,7 +18,7 @@
 # Idempotency is Playwright's: install skips revisions already in its cache. This script keeps no
 # cache of its own and never inspects Playwright's.
 # Node comes from the nearest .nvmrc between the project dir and the git toplevel, via
-# node_toolchain.sh, the same way local_gate.sh provisions it; without one, PATH's node is used.
+# node_toolchain.sh, the same way hook_steps.sh provisions it; without one, PATH's node is used.
 set -euo pipefail
 
 usage() { echo "usage: $0 [--with-deps] [--project-dir <dir>] [browser...]" >&2; exit 2; }

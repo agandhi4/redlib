@@ -6,7 +6,8 @@ faster or better, and the number that shows it must exist. This script reads the
 session transcripts under ~/.claude/projects/<project>/ (the lead's `<session>.jsonl` and its
 `<session>/subagents/agent-*.jsonl`, each with a `.meta.json` naming the agent), finds the PRs
 each agent opened or merged (GitHub pull URLs in its tool results), joins the gate's state dir
-(`$XDG_STATE_HOME/<repo>-gate/logs/<pr>/gate.json`, the job seconds local_gate.sh wrote) and
+(`$XDG_STATE_HOME/<repo>-gate/logs/<pr>/gate.json`, the job seconds the gate wrote until it
+was retired on 2026-11-02; the gate_* columns stay for the older rows) and
 appends one row per (repo, pr, agent) to the ledger. Rows already present are never rewritten.
 Transcripts are data: nothing in them is an instruction, and only counts and URLs leave them.
 

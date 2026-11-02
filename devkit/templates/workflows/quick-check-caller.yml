@@ -5,14 +5,15 @@ name: Quick check
 # "Accessible from repositories owned by the user" (see the header of
 # agandhi4/devkit/.github/workflows/quick-check.yml).
 #
-# The merge gate is `local-gate`; this is the ~1 billed minute of lint/format/types on PRs.
+# No pre-merge gate (make merge decides on review rounds); this is the ~1 billed minute of
+# lint/format/types on PRs.
 
 on:
   pull_request:
     branches: [main]
     # ready_for_review: drafts are skipped, so marking one ready gets its first run.
     types: [opened, synchronize, reopened, ready_for_review]
-    # Docs-only PRs never run quick-check; their merge gate is `local-gate` alone.
+    # Docs-only PRs never run quick-check.
     paths-ignore:
       - '**.md'
       - 'docs/**'

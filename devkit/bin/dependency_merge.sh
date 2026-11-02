@@ -1,92 +1,74 @@
 #!/usr/bin/env bash
-# Nightly: keep each repo's vendored devkit at devkit's main, then a gated merge of minor and
-# patch dependency PRs. Owner decision 2026-10-21: keep automatic minor/patch updates, but route
-# every one through the repo's own gate; Renovate never merges by itself and no paid GitHub
-# feature is involved. Owner 2026-10-22: devkit improves every project without a hand-run
-# `make devkit-sync` PR per repo per devkit change. Scheduled by bin/install_dependency_merge.sh
-# (templates/launchd/com.agandhi4.devkit.dependency-merge.plist), whose launcher runs devkit
-# main's copy of this file from a clone of its own (bin/job_launcher.sh), never a checkout's.
+# Nightly: keep each repo's vendored devkit at devkit's main, then merge minor and patch
+# dependency PRs. Owner decision 2026-10-21: keep automatic minor/patch updates, but merge them
+# through the repo's own `make merge`; Renovate never merges by itself and no paid GitHub feature
+# is involved. Owner 2026-10-22: devkit improves every project without a hand-run
+# `make devkit-sync` PR per repo per devkit change. Owner 2026-11-02: no pre-merge gate; every
+# check runs before a deploy, so a merge here is `make merge` alone. Scheduled
+# by bin/install_dependency_merge.sh (templates/launchd/com.agandhi4.devkit.dependency-merge.plist),
+# whose launcher runs devkit main's copy of this file from a clone of its own
+# (bin/job_launcher.sh), never a checkout's.
 #
 # Usage: bin/dependency_merge.sh [--max <n>] [--dry-run] <repo-root>...
-#   <repo-root>  a checkout whose scripts/ci/gate_plan.sh has literal GATE_SLUG and
-#                GATE_STATE_NAME lines and whose Makefile has `gate` and `merge`
-#   --max <n>    PRs gated per repo per run (default 3); the rest wait for the next run
-#   --dry-run    print what each PR would get; no gate, merge, comment or log line
+#   <repo-root>  a checkout whose scripts/ci/gate_plan.sh has a literal GATE_SLUG line and whose
+#                Makefile has `merge`
+#   --max <n>    PRs merged per repo per run (default 3); the rest wait for the next run
+#   --dry-run    print what each PR would get; no merge, comment or log line
 #
-# Per repo: fetch origin main and add a detached worktree of it, so the plan (GATE_SLUG,
-# GATE_STATE_NAME) and the vendored devkit are main's, never a developer's branch.
-# The devkit sync comes first, so the dependency PRs gate on the newest devkit. A repo whose main
-# has no .devkit-rev (devkit itself) has none. Against $DEVKIT_URL's main, fetched into the repo:
+# Per repo: fetch origin main and add a detached worktree of it, so the plan (GATE_SLUG) and the
+# vendored devkit are main's, never a developer's branch.
+# The devkit sync comes first, so the dependency PRs merge onto the newest devkit. A repo whose
+# main has no .devkit-rev (devkit itself) has none. Against $DEVKIT_URL's main, fetched into the
+# repo:
 #   - main's .devkit-rev names it, or a commit vendoring the same tree (a tests/-only change):
 #     `current`. One not on devkit's main (vendored from a branch): skipped, never moved back.
 #   - else the one open PR labelled devkit-sync is reused when its branch is
-#     devkit-sync/<main sha7>, it vendors that commit and it merges cleanly into main, so a head
-#     whose gate failed stays that head (the marker below skips it) and is never re-gated in a
-#     loop (one whose head is not the job's commit, job_sync_commit, is left alone). Otherwise, in a second worktree of main, `make devkit-sync` with
-#     DEVKIT_COMMIT_TRAILER set to the model-agnostic default (a person's devkit.trailer config
-#     never signs a job's commit), checked to vendor only (_vendor_paths.sh vendoring_only and
-#     vendored_from, the very test pr_merge.sh's Codex exemption applies, so a sync that would
-#     need a review is refused here, not pushed), force-pushed to devkit-sync/<sha7> and opened
-#     as a draft (no Codex run, no fleet Workflow; pr_merge.sh readies it) with the devkit commit
-#     range and the docs/decisions.md titles it adds. Any other open devkit-sync PR is closed as
-#     superseded. The pre-push hook skips the repo's steps for it (hook_steps.sh vendoring only).
-#     Every step reruns to the same end, so a run stopped at any one resumes the next night: a
-#     devkit-sync/<sha7> already there with no open labelled PR is a run's own unfinished work when
-#     its tip is the job's commit and no PR on it was ever closed or merged (adopt_sync_branch),
-#     and is pushed over and opened; a person's commit there, or a PR closed by hand, is refused.
-#     After the sync, every other devkit-sync/* branch whose tip is the job's commit, vendoring a
-#     devkit commit main has moved past, with no open PR, is deleted (`pruned`, prune_sync_branches).
-#   - then gated and merged as below, counting toward --max. A fail is a devkit regression: one
-#     comment per head, the PR left open, the next devkit change opening its successor. Except a
-#     fail on gains alone (gate_record.py gains: every failure of the code is a metrics key the
-#     ratchet measured BETTER and asks to lock in, as when devkit #268 re-counted shell branches):
-#     lock_in_sync rebuilds the sync commit with those bounds tightened (metrics_ratchet.py
-#     lock-in, the reason `devkit <sha7> re-measured: <key> <old>→<new>, ...` in its message),
-#     pushes it over the head and gates it once more; a second fail is the regression as above.
-#     Still a sync (devkit_sync_only), so make merge asks no Codex review of it. A loss (WORSE,
-#     MISSING) is never settled here: the metrics-rebaseline label, by hand, makes it a repo
-#     change under the normal Codex rule. Merged: the worktree moves to the new main.
+#     devkit-sync/<main sha7>, it vendors that commit and it merges cleanly into main (one whose
+#     head is not the job's commit, job_sync_commit, is left alone). Otherwise, in a second
+#     worktree of main, `make devkit-sync` with DEVKIT_COMMIT_TRAILER set to the model-agnostic
+#     default (a person's devkit.trailer config never signs a job's commit), checked to vendor
+#     only (_vendor_paths.sh vendoring_only and vendored_from, the very test merge_rules.sh's
+#     review exemption applies, so a sync that would need a review is refused here, not pushed),
+#     force-pushed to devkit-sync/<sha7> and opened as a draft (merge_rules.sh readies it) with
+#     the devkit commit range and the docs/decisions.md titles it adds. Any other open
+#     devkit-sync PR is closed as superseded. The pre-push hook skips the repo's steps for it
+#     (hook_steps.sh vendoring only). Every step reruns to the same end, so a run stopped at any
+#     one resumes the next night: a devkit-sync/<sha7> already there with no open labelled PR is
+#     a run's own unfinished work when its tip is the job's commit and no PR on it was ever
+#     closed or merged (adopt_sync_branch), and is pushed over and opened; a person's commit
+#     there, or a PR closed by hand, is refused. After the sync, every other devkit-sync/* branch
+#     whose tip is the job's commit, vendoring a devkit commit main has moved past, with no open
+#     PR, is deleted (`pruned`, prune_sync_branches).
+#   - then merged as below, counting toward --max. Merged: the worktree moves to the new main.
+#     A devkit regression shows on the repo's main, fixed forward like any change; the checks
+#     that catch it run before a deploy, never here.
 # _dependency_pr.py classifies the open Renovate and Dependabot PRs against main, oldest first;
 # majors and unreadable update types are skipped and listed. Then, per minor/patch PR:
-#   - behind main: gated like any PR. The gate tests the merge into the current main and
-#     pr_merge.sh merges only onto the main it gated, so a branch that is not rebased is no risk;
-#     waiting for a rebase was (homelab #128, 2026-10-22): with Renovate's rebaseWhen
-#     behind-base-branch, each merge this run made had Renovate force-push every other open
-#     branch, racing the next merge. renovate/default.json keeps rebaseWhen auto (conflicts only,
-#     no automerge and no up-to-date protection in this fleet), and Dependabot rebases only on a
-#     conflict too.
+#   - behind main: merged like any PR (GitHub squash-merges onto main now). Waiting for a rebase
+#     was the risk (homelab #128, 2026-10-22): with Renovate's rebaseWhen behind-base-branch, each
+#     merge this run made had Renovate force-push every other open branch, racing the next merge.
+#     renovate/default.json keeps rebaseWhen auto (conflicts only, no automerge and no up-to-date
+#     protection in this fleet), and Dependabot rebases only on a conflict too.
 #   - conflicting: `git merge-tree` of the head into the current origin/main fails. Skipped.
-#   - this head already failed a gate here (the marker comment below): skipped until it moves.
-#   - else `make gate PR=<n> GATE_ARGS="--expect-head <head>"`, whose jobs queue for capacity
-#     like any gate. PASS: `make merge PR=<n>`; a refusal to re-gate (main or the head moved
-#     after the gate, or GitHub refused the merge for it: pr_merge.sh's `re-gate:` lines) is
-#     "skipped behind", and the next run gates the new tree. Otherwise the verdict is the gate
-#     record's (gate_record.py verdict-of), never make's exit code: make exits 2 for any failed recipe.
-#     fail with a job failing on the PR's code: one PR comment per head naming the failing jobs
-#     and rules (gate_record.py failures). error, no record of the head, or only machine
-#     failures (a gate step such as worktree, toolchain or a conflict; the silence watchdog; a
-#     budget overrun under load: `failures --code-only` is empty): logged with no comment and
-#     no marker, so the next run retries the head. A Dependabot head is never parked on the box.
+#   - else `make merge PR=<n>`: merged, or `refused` with merge_rules.sh's reason (a bot's
+#     manifest-only diff needs no review; one that changes more is refused until someone
+#     reviews it, and the next run tries again); a `run make merge PR=<n> again` refusal (the
+#     head or main moved under the merge) is "skipped behind", retried next run.
 # Vulnerabilities: after its PRs, each repo's worktree moves to origin/main and bin/vuln_watch.py
 #   reruns the repo's metrics.conf vuln.py lines on devkit main's collector: one uncounted
 #   `vuln: <slug> …` line (a NEW critical/high id named; `unmeasured (<why>)` when OSV or the conf
 #   cannot be read, never clean), and one `security` issue per repo, opened for a new id, rewritten
 #   as the ids change, closed when none is left. State: $XDG_STATE_HOME/devkit/vuln-watch/. Why
 #   (closet #437, 2026-10-26): `vuln.*` keys are report-only, so advisories reached main unseen.
-# Budgets: then bin/budget_watch.sh runs every gate job of the repo's plan on that main, admitted
-#   to the pool, with every time budget enforced: one uncounted `budgets: <slug> …` line and one
-#   `performance` issue per repo while a job is over on an idle box. State:
-#   $XDG_STATE_HOME/devkit/budget-watch/. Why (owner 2026-10-29): gates report budgets and never
-#   fail on them, so a real slowdown must surface somewhere that load does not.
 # Network: every call to GitHub (git fetch and push, gh) is retried after a transient failure
 #   (net); one still failing is the outcome `network`, never "branch exists" or a regression.
 # Power: a Mac macOS will sleep whatever caffeinate holds (lid closed on battery,
 #   _awake_lib.sh's devkit_sleep_forced) stops the run before its next repo or PR, with one
 #   `skipped run: <reason>` line and exit 0, as the kill switch does.
 # Output: one `dependency-merge: <slug>#<n> <outcome> <detail>` line per PR (the sync's line is
-#   `<slug>` alone until it has a PR), outcome one of merged failed error network refused skipped
-#   closed pruned current would-sync would-prune would-gate, appended with a UTC stamp to
-#   $XDG_STATE_HOME/devkit/dependency-merge.log; the gate and merge output of a PR go to
+#   `<slug>` alone until it has a PR), outcome one of merged network refused skipped closed
+#   pruned current would-sync would-prune would-merge, appended with a UTC stamp to
+#   $XDG_STATE_HOME/devkit/dependency-merge.log; the merge output of a PR goes to
 #   $XDG_STATE_HOME/devkit/dependency-merge/<repo>-<n>.log. Then the checkout given is fast-forwarded
 #   (refresh_checkout: one `checkout fast-forwarded` or `checkout stale` line, uncounted) and
 #   one summary line per repo.
@@ -97,7 +79,7 @@
 set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
-# shellcheck source=bin/_gate_env.sh
+# shellcheck source=bin/_gate_env.sh  # gate_plan_main, fetch_main
 . "$HERE/_gate_env.sh"
 # shellcheck source=bin/_toolchain_lib.sh
 . "$HERE/_toolchain_lib.sh"
@@ -110,7 +92,6 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
 # shellcheck source=bin/_metrics_conf_lib.sh  # metrics_conf_parse, the vuln watch's conf reader
 . "$HERE/_metrics_conf_lib.sh"
 
-readonly MARKER=devkit-dependency-merge
 readonly SYNC_LABEL=devkit-sync
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}/devkit
 OFF=${XDG_CONFIG_HOME:-$HOME/.config}/devkit/dependency-merge.off
@@ -137,13 +118,13 @@ parse_args() {
 }
 
 require_tools() {
-  # Before any repo: without one every gate fails the same way, logged as N per-PR box errors
+  # Before any repo: without one every merge fails the same way, logged as N per-PR box errors
   # (2026-10-22: launchd's PATH had only Xcode's 3.9, then no uv). The toolchain directory goes
   # first on PATH, too, so a repo whose vendored devkit predates _toolchain_lib.sh still runs its
   # bare python3 and uv calls on it.
   devkit_preflight gh git make flock -- "${REPOS[@]}" \
-    || { echo "dependency-merge: $DEVKIT_PREFLIGHT_ERROR; no repo gated" >&2; exit 2; }
-  devkit_toolchain_bin || { echo "dependency-merge: $DEVKIT_PYTHON_ERROR; no repo gated" >&2; exit 2; }
+    || { echo "dependency-merge: $DEVKIT_PREFLIGHT_ERROR; no repo merged" >&2; exit 2; }
+  devkit_toolchain_bin || { echo "dependency-merge: $DEVKIT_PYTHON_ERROR; no repo merged" >&2; exit 2; }
   export PATH="$DEVKIT_TOOLCHAIN_BIN:$PATH"
 }
 
@@ -151,8 +132,8 @@ parse_args "$@"
 require_tools
 
 # halted: true, saying why once, when the run must stop before its next repo or PR: the kill
-# switch, or a Mac macOS will sleep whatever caffeinate holds (header, Power), where every gate
-# would refuse and each PR log an error.
+# switch, or a Mac macOS will sleep whatever caffeinate holds (header, Power), where every merge
+# would fail and each PR log an error.
 HALT_SAID=0
 halted() {
   local why
@@ -169,7 +150,7 @@ halted() {
 halted && exit 0
 
 mkdir -p "$STATE/dependency-merge" || exit 2
-# fd 8 is the run lock; every make below closes it (8>&-), so a process a gate leaves behind
+# fd 8 is the run lock; every make below closes it (8>&-), so a process a merge leaves behind
 # cannot hold it into the next night.
 exec 8>>"$STATE/dependency-merge.lock"
 flock -n 8 || { echo "dependency-merge: another run holds $STATE/dependency-merge.lock; not running"; exit 0; }
@@ -246,7 +227,7 @@ record_fail() { record "$1" "$(net_outcome "$2" "$3")" "$4"; }
 # summary <label>: the counts of the outcomes recorded since the last summary, in a fixed order.
 summary() {
   local outcome n counts=""
-  for outcome in merged failed error network refused skipped closed pruned current would-sync would-prune would-gate; do
+  for outcome in merged error network refused skipped closed pruned current would-sync would-prune would-merge; do
     n=$(tr ' ' '\n' <<<"$OUTCOMES" | grep -cx -- "$outcome")
     [ "$n" = 0 ] || counts="${counts:+$counts, }$outcome $n"
   done
@@ -254,88 +235,49 @@ summary() {
   OUTCOMES=""
 }
 
-# failure_comment <n> <head> <failures> <kind>: the PR comment for a failed gate, marked with its
-# head. <kind> is dependency or devkit-sync.
-# shellcheck disable=SC2016  # the backticks are markdown code spans, not command substitution
-failure_comment() {
-  printf '<!-- %s head=%s -->\n' "$MARKER" "$2"
-  if [ "$4" = devkit-sync ]; then
-    printf '`make gate PR=%s` failed on head %s (bin/dependency_merge.sh, the nightly devkit sync): ' "$1" "${2:0:12}"
-    printf "devkit's main breaks this repo, a devkit regression (or a bug this repo relied on). "
-    printf 'This PR stays open and is not gated again; the next devkit change opens its successor. '
-    printf 'Gains alone were locked in by the job and gated again (lock_in_sync); a metrics key worse than its bound '
-    printf 'wants the metrics-rebaseline label by hand, which makes this a repo change, under the normal Codex rule.\n\n'
-  else
-    printf '`make gate PR=%s` failed on head %s (bin/dependency_merge.sh, the nightly dependency merge). ' "$1" "${2:0:12}"
-    printf 'This PR stays open; the nightly run gates it again once its head changes.\n\n'
-  fi
-  printf '%s\n' "${3:-no gate record of this head; see the log below}" | sed 's/^/- /'
-  printf '\nLog on %s: `%s`\n' "$(hostname -s)" "$PR_LOG"
+# main_wants_gate: true while $WT's vendored merge rules predate devkit #288 and still want the
+# head's local-gate success (`GATE_CONTEXT=local-gate` in devkit/bin/merge_rules.sh). Such a
+# main also vendors the real gate, so its own `make gate` posts what its rules read; without it
+# every PR, the devkit-sync that brings the new rules included, is refused every night (review of
+# #292). Remove once every repo's main has synced past #288.
+main_wants_gate() {
+  grep -qs '^readonly GATE_CONTEXT=local-gate' "$WT/devkit/bin/merge_rules.sh"
 }
 
-# gate_pr <slug> <state name> <n> <head> <kind> [<locked>]: gate, then merge or comment, and
-# record the outcome. <kind> (dependency, devkit-sync) words the comment and a failure's record.
-# <locked>: lock_in_sync's reason, for the head it made; that head's gains are a failure.
-gate_pr() {
-  local slug=$1 n=$3 head=$4 kind=$5 locked=${6:-} rc gate_json verdict failures refusal regression="" gains
-  gate_json=${XDG_STATE_HOME:-$HOME/.local/state}/$2/logs/$n/gate.json
+# merge_pr <slug> <n> <head>: `make merge PR=<n>` from main's worktree, and the outcome; first
+# `make gate` pinned to the head while main's rules still want it (main_wants_gate).
+merge_pr() {
+  local slug=$1 n=$2 head=$3 refusal
   PR_LOG=$STATE/dependency-merge/${slug#*/}-$n.log
-  [ -n "$locked" ] || : >"$PR_LOG"  # the re-gate after a lock-in follows the first gate's log
-  make -C "$WT" gate PR="$n" GATE_ARGS="--expect-head $head" >>"$PR_LOG" 2>&1 8>&-
-  rc=$?
-  if [ "$rc" = 0 ]; then
-    if make -C "$WT" merge PR="$n" >>"$PR_LOG" 2>&1 8>&-; then
-      record "$slug#$n" merged "head ${head:0:12}${locked:+ ($locked)}"
-    else
-      refusal=$(grep -E '^merge: refused: ' "$PR_LOG" | tail -n 1)
-      case "$refusal" in
-        "merge: refused: re-gate: "*) record "$slug#$n" skipped "behind (${refusal#merge: refused: re-gate: }); the next run re-gates" ;;
-        *) record "$slug#$n" refused "${refusal:-make merge failed; see $PR_LOG}" ;;
-      esac
-    fi
+  : >"$PR_LOG"
+  if main_wants_gate && ! make -C "$WT" gate PR="$n" GATE_ARGS="--expect-head $head" >>"$PR_LOG" 2>&1 8>&-; then
+    record "$slug#$n" error "make gate failed under main's pre-#288 merge rules, which want local-gate; retried next run; see $PR_LOG"
     return 0
   fi
-  verdict=$("$DEVKIT_PYTHON" -I "$HERE/gate_record.py" verdict-of "$gate_json" "$head")
-  if [ "$verdict" != fail ]; then
-    record "$slug#$n" error "make gate exit $rc, gate verdict ${verdict:-unrecorded} (the box, not the PR); see $PR_LOG"
+  if make -C "$WT" merge PR="$n" >>"$PR_LOG" 2>&1 8>&-; then
+    record "$slug#$n" merged "head ${head:0:12}"
     return 0
   fi
-  failures=$("$DEVKIT_PYTHON" -I "$HERE/gate_record.py" failures "$gate_json" "$head")
-  if [ -z "$("$DEVKIT_PYTHON" -I "$HERE/gate_record.py" failures --code-only "$gate_json" "$head")" ]; then
-    record "$slug#$n" error "only the machine failed (gate step, silence or budget; not the PR): $(paste -sd ';' - <<<"${failures:-whole-gate budget}"); see $PR_LOG"
-    return 0
-  fi
-  if [ "$kind" = devkit-sync ] && [ -z "$locked" ]; then
-    gains=$("$DEVKIT_PYTHON" -I "$HERE/gate_record.py" gains "$gate_json" "$head")
-    if [ -n "$gains" ]; then
-      lock_in_sync "$n" "$head" "$gains" || return 0
-      gate_pr "$slug" "$2" "$n" "$SYNC_HEAD" "$kind" "$SYNC_LOCKED"
-      return
-    fi
-  fi
-  [ "$kind" != devkit-sync ] || regression="devkit regression: "
-  if net gh pr comment "$n" --repo "$slug" --body "$(failure_comment "$n" "$head" "$failures" "$kind")" >/dev/null; then
-    record "$slug#$n" failed "$regression$(paste -sd ';' - <<<"${failures:-no gate record}"); commented"
-  else
-    record "$slug#$n" failed "$regression$(paste -sd ';' - <<<"${failures:-no gate record}"); comment not posted (gh above)"
-  fi
+  refusal=$(grep -E '^merge: refused: ' "$PR_LOG" | tail -n 1)
+  # The head or main moved under the merge (merge_rules.sh's "moved … again" refusals): retried
+  # next run. A conflict's "rebase it …, then make merge again" is a refusal, never behind.
+  case "$refusal" in
+    *" moved "*"; make merge PR=$n again"|*"new head after"*"; make merge PR=$n again") record "$slug#$n" skipped "behind (${refusal#merge: refused: }); the next run merges again" ;;
+    "merge: refused: "*) record "$slug#$n" refused "${refusal#merge: refused: }" ;;
+    *) record "$slug#$n" error "make merge failed with no refusal line; see $PR_LOG" ;;
+  esac
 }
 
-# check_pr <slug> <n> <head>: print why PR <n> is not gated now, or nothing.
+# check_pr <n> <head>: print why PR <n> is not merged now, or nothing.
 check_pr() {
-  local slug=$1 n=$2 head=$3 bodies
+  local n=$1 head=$2
   # refs/worktree/ is private to this worktree and goes with it: the checkout's refs stay as they were.
   net fetch_main "$WT" "+pull/$n/head:refs/worktree/dependency-pr" \
     || { echo "$(net_outcome $? error) cannot fetch main and PR #$n (git above)"; return; }
   [ "$(git -C "$WT" rev-parse refs/worktree/dependency-pr)" = "$head" ] \
     || { echo "skipped head moved since the PR list; next run"; return; }
   git -C "$WT" merge-tree --write-tree origin/main "$head" >/dev/null 2>&1 \
-    || { echo "skipped conflicts with main, Renovate will rebase"; return; }
-  bodies=$(net gh api "repos/$slug/issues/$n/comments" --paginate --jq '.[].body') \
-    || { echo "$(net_outcome $? error) cannot read PR #$n's comments (gh above)"; return; }
-  if grep -qF "<!-- $MARKER head=$head -->" <<<"$bodies"; then
-    echo "skipped its gate already failed on head ${head:0:12} (see its comment); a new head retries"
-  fi
+    || echo "skipped conflicts with main, Renovate will rebase"
 }
 
 # list_prs <slug>: _dependency_pr.py's lines for the open PRs against main. The list never asks
@@ -358,15 +300,14 @@ list_prs() {
 # repo_error <label> <why>: one line, and the repo counts as not read.
 repo_error() { echo "dependency-merge: $1: cannot run: $2" >&2; return 1; }
 
-# open_repo <dir>: set ROOT (<dir>, resolved), SLUG, STATE_NAME, PRS (_dependency_pr.py lines)
-# and WT (a detached worktree of origin/main now, whose plan and vendored devkit run every gate
-# and merge).
+# open_repo <dir>: set ROOT (<dir>, resolved), SLUG, PRS (_dependency_pr.py lines) and WT (a
+# detached worktree of origin/main now, whose plan and vendored devkit run every merge).
 open_repo() {
   local root
   root=$(cd "$1" 2>/dev/null && pwd -P) || { repo_error "$1" "not a directory"; return; }
   ROOT=$root
   net gate_plan_main "$root" || { repo_error "$root" "$PLAN_ERROR"; return; }
-  SLUG=$PLAN_SLUG STATE_NAME=$PLAN_STATE_NAME
+  SLUG=$PLAN_SLUG
   PRS=$(list_prs "$SLUG") || { repo_error "$SLUG" "cannot list its open PRs (gh or _dependency_pr.py above)"; return; }
   WT=$STATE/dependency-merge/wt-${SLUG#*/}
   git -C "$root" worktree remove --force "$WT" >/dev/null 2>&1
@@ -374,22 +315,24 @@ open_repo() {
   git -C "$root" worktree add -q --detach "$WT" "$PLAN_MAIN" || { WT=""; repo_error "$SLUG" "cannot add a worktree of main (git above)"; return; }
 }
 
-# handle_pr <n> <head> <decision> <detail> [<kind>]: record a skip, or gate (GATED counts toward
-# --max) when <decision> is gate or pushed (below). <kind> is gate_pr's, dependency by default.
+# handle_pr <n> <head> <decision> <detail>: record a skip, or merge when <decision> is gate or
+# pushed (below; _dependency_pr.py still says `gate` for a PR that may merge). Only a merge (or a
+# dry run's would-merge) counts toward --max: a refused PR, retried every night until a review
+# lands, must not take the slot of a newer one that could merge (review, #292).
 handle_pr() {
-  local n=$1 head=$2 kind=${5:-dependency} why=""
+  local n=$1 head=$2 why=""
   case $3 in gate|pushed) ;; *) record "$SLUG#$n" skipped "$4"; return ;; esac
-  [ "$GATED" -lt "$MAX" ] || { record "$SLUG#$n" skipped "limit of $MAX gated per run reached; next run"; return; }
-  # pushed: a head this run just made on a fresh main. It has no failed gate and cannot conflict,
-  # and GitHub may not have moved refs/pull/<n>/head to it yet, which check_pr would call moved.
-  [ "$3" = pushed ] || why=$(check_pr "$SLUG" "$n" "$head")
+  [ "$MERGED" -lt "$MAX" ] || { record "$SLUG#$n" skipped "limit of $MAX merged per run reached; next run"; return; }
+  # pushed: a head this run just made on a fresh main. It cannot conflict, and GitHub may not
+  # have moved refs/pull/<n>/head to it yet, which check_pr would call moved.
+  [ "$3" = pushed ] || why=$(check_pr "$n" "$head")
   [ -z "$why" ] || { record "$SLUG#$n" "${why%% *}" "${why#* }"; return; }
-  GATED=$((GATED + 1))
   if [ "$DRY_RUN" = 1 ]; then
-    record "$SLUG#$n" would-gate "$4: make gate PR=$n, then make merge PR=$n on PASS"
+    record "$SLUG#$n" would-merge "$4: make merge PR=$n"
   else
-    gate_pr "$SLUG" "$STATE_NAME" "$n" "$head" "$kind"
+    merge_pr "$SLUG" "$n" "$head"
   fi
+  case $LAST_OUTCOME in merged|would-merge) MERGED=$((MERGED + 1)) ;; esac
 }
 
 # sync_body <old> <new>: the devkit-sync PR's body, read from the devkit history fetched into $WT.
@@ -397,8 +340,8 @@ handle_pr() {
 sync_body() {
   local titles
   printf 'Nightly devkit sync (devkit/bin/dependency_merge.sh): `make devkit-sync` from %s to %s. ' "${1:0:7}" "${2:0:7}"
-  printf 'It only vendors (devkit/, .devkit-rev, base copies) code reviewed and gated on devkit main, so `make merge` '
-  printf 'asks no Codex review of it (pr_merge.sh); the gate judges its effect on this repo.\n\n'
+  printf 'It only vendors (devkit/, .devkit-rev, base copies) code reviewed on devkit main, so `make merge` '
+  printf 'asks no review of it (merge_rules.sh); its effect on this repo is judged before a deploy.\n\n'
   printf 'Devkit commits %s..%s:\n' "${1:0:7}" "${2:0:7}"
   # GitHub refuses a body over 65536 characters; a repo far behind lists the newest 50.
   git -C "$WT" log --no-merges --format='- %h %s' -n 50 "$1..$2"
@@ -410,8 +353,8 @@ sync_body() {
 }
 
 # reusable_sync <head> <upstream>: true when the open sync PR's <head> (fetched to
-# refs/worktree/devkit-sync) still vendors <upstream> and merges cleanly into main, so pushing a
-# fresh sync over it would only discard its gate record.
+# refs/worktree/devkit-sync) still vendors <upstream> and merges cleanly into main, so a fresh
+# sync would only repeat it.
 reusable_sync() {
   local rev
   [ "$(git -C "$WT" rev-parse refs/worktree/devkit-sync)" = "$1" ] || return 1
@@ -419,8 +362,8 @@ reusable_sync() {
   [ "${rev%% *}" = "$2" ] && git -C "$WT" merge-tree --write-tree origin/main "$1" >/dev/null 2>&1
 }
 
-# job_sync_commit <dir> <commit>: true when <commit> is a sync commit as push_sync (or
-# lock_in_sync) makes it: subject "Update devkit to ...", the model-agnostic trailer, one parent
+# job_sync_commit <dir> <commit>: true when <commit> is a sync commit as push_sync makes it:
+# subject "Update devkit to ...", the model-agnostic trailer, one parent
 # on origin/main and nothing but vendoring (and tightened bounds) on top of it. A person's commit
 # on the branch, or the job's amended with other paths, is not.
 job_sync_commit() {
@@ -517,39 +460,6 @@ push_sync() {
     || { record_fail "$SLUG" $? skipped "cannot push $branch (moved since this run read it: a person's push?); not overwritten; see $log"; return 1; }
 }
 
-# lock_in_sync <n> <head> <gains>: the sync PR's gate failed on gains alone (header): in a fresh
-# worktree of <head>, rebuild its one commit with each `<key>=<value>` of <gains> locked in
-# (metrics_ratchet.py lock-in, which refuses anything but a tightening) and the reason in its
-# message, check it is still the job's sync commit (job_sync_commit), and push it over <head>.
-# Rebuilt on main, not amended: the pre-commit hook then judges vendoring plus tightened bounds
-# (devkit_sync_only) and runs none of the repo's steps, as for push_sync's commit. Sets SYNC_HEAD
-# and SYNC_LOCKED (the reason); else records why and returns 1.
-lock_in_sync() {
-  local n=$1 head=$2 log=$STATE/dependency-merge/${SLUG#*/}-devkit-sync.log
-  local branch=$SYNC_LABEL/${SYNC_NEW:0:7} gains=() line moved message
-  while IFS= read -r line; do gains+=("$line"); done <<<"$3"
-  SYNC_WT=$STATE/dependency-merge/sync-${SLUG#*/}
-  remove_worktree "$SYNC_WT"
-  git -C "$WT" worktree add -q --detach "$SYNC_WT" "$head" >>"$log" 2>&1 \
-    || { SYNC_WT=""; record "$SLUG#$n" error "cannot add a worktree of its head to lock in its gains; see $log"; return 1; }
-  moved=$("$DEVKIT_PYTHON" -I "$HERE/metrics_ratchet.py" lock-in --bounds "$SYNC_WT/$VENDOR_SYNC_BOUNDS" "${gains[@]}" 2>>"$log") \
-    || { record "$SLUG#$n" error "metrics_ratchet.py lock-in refused its gains ($(paste -sd ' ' - <<<"$3")); see $log"; return 1; }
-  SYNC_LOCKED="devkit ${SYNC_NEW:0:7} re-measured: $(sed -E 's/^ratchet ([^ ]+) ([^ ]+) -> ([^ ]+)$/\1 \2→\3/' <<<"$moved" | paste -sd ',' - | sed 's/,/, /g')"
-  message=$(git -C "$SYNC_WT" log -1 --format=%B "$head" | grep -vxF "$DEVKIT_DEFAULT_TRAILER")
-  message=$(printf '%s\n\n%s; the gate measured each BETTER than its bound, so the nightly sync locks it in (dependency_merge.sh lock_in_sync).\n\n%s\n' \
-    "$message" "$SYNC_LOCKED" "$DEVKIT_DEFAULT_TRAILER")
-  { git -C "$SYNC_WT" reset -q --soft HEAD^ && git -C "$SYNC_WT" add -- "$VENDOR_SYNC_BOUNDS" \
-      && git -C "$SYNC_WT" commit -q -F - <<<"$message"; } >>"$log" 2>&1 8>&- \
-    || { record "$SLUG#$n" error "cannot commit its locked-in bounds (a refused commit?); see $log"; return 1; }
-  SYNC_HEAD=$(git -C "$SYNC_WT" rev-parse HEAD)
-  job_sync_commit "$SYNC_WT" "$SYNC_HEAD" \
-    || { record "$SLUG#$n" refused "its lock-in is not a sync commit of vendoring and tightened bounds; not pushed"; return 1; }
-  net git -C "$SYNC_WT" push -q "--force-with-lease=refs/heads/$branch:$head" origin "HEAD:refs/heads/$branch" \
-    >>"$log" 2>&1 8>&- \
-    || { record_fail "$SLUG#$n" $? skipped "cannot push its lock-in to $branch (moved since this run read it: a person's push?); see $log"; return 1; }
-  note "$SLUG#$n locked in ${SYNC_HEAD:0:12}: $SYNC_LOCKED; gating it again"
-}
-
 # open_sync_pr <n or ""> <old> <log>: update PR <n>'s body and label, or open the draft PR for the
 # branch push_sync pushed. Sets SYNC_PR; else records why and returns 1.
 open_sync_pr() {
@@ -603,8 +513,8 @@ sync_behind() {
 }
 
 # find_sync_pr <open sync PR lines>: set SYNC_REUSE to the open PR on devkit-sync/<upstream sha7>
-# and fetch its head, and set SYNC_PR, SYNC_HEAD and SYNC_NEW too when that head can be gated as it
-# is (reusable_sync). Else records why and returns 1.
+# and fetch its head, and set SYNC_PR, SYNC_HEAD and SYNC_NEW too when that head can be merged as
+# it is (reusable_sync). Else records why and returns 1.
 find_sync_pr() {
   local n branch head
   SYNC_REUSE="" SYNC_REUSE_HEAD="" SYNC_PR="" SYNC_HEAD="" SYNC_NEW=""
@@ -619,7 +529,7 @@ find_sync_pr() {
 }
 
 # sync_devkit: bring main's vendored devkit to devkit's main (header): record why not, or reuse or
-# open the one devkit-sync PR and gate it (handle_pr). Merged: $WT moves to the new main.
+# open the one devkit-sync PR and merge it (handle_pr). Merged: $WT moves to the new main.
 sync_devkit() {
   local open log decision=gate
   sync_behind || return 0
@@ -644,10 +554,10 @@ sync_devkit() {
     decision=pushed
   fi
   close_superseded "$open"
-  handle_pr "$SYNC_PR" "$SYNC_HEAD" "$decision" "devkit-sync ${SYNC_OLD:0:7}..${SYNC_NEW:0:7}" devkit-sync
+  handle_pr "$SYNC_PR" "$SYNC_HEAD" "$decision" "devkit-sync ${SYNC_OLD:0:7}..${SYNC_NEW:0:7}"
   [ "$LAST_OUTCOME" = merged ] || return 0
   { net fetch_main "$WT" && git -C "$WT" checkout -q --detach refs/remotes/origin/main; } \
-    || record "$SLUG" error "cannot move the worktree to the new main (git above); its dependency PRs gate on the old devkit"
+    || record "$SLUG" error "cannot move the worktree to the new main (git above); its dependency PRs merge under the old devkit's rules"
 }
 
 # prune_sync_branches: delete each devkit-sync/* branch on origin this job left behind: its tip is
@@ -747,41 +657,25 @@ watch_vulns() {
   note "$line"
 }
 
-# watch_budgets: bin/budget_watch.sh over origin/main as watch_vulns left the worktree. Time budgets
-# report but never fail a PR's gate (devkit decisions 2026-10-29); this is where a real slowdown
-# fails, on an idle box after the night's merges. Its one line is noted, never counted.
-watch_budgets() {
-  local args=() line
-  [ "$DRY_RUN" = 0 ] || args+=(--dry-run)
-  line=$("$HERE/budget_watch.sh" --slug "$SLUG" --root "$WT" --state-dir "$STATE/budget-watch" \
-    ${args[@]+"${args[@]}"} 8>&-) || line="budgets: $SLUG unmeasured (budget_watch.sh exit $?; stderr above)"
-  note "$line"
-}
-
-# refresh_main: the worktree moved to origin/main as the night's merges left it, for both
-# watches. Failed, each watch is one `unmeasured` line and neither runs: on the pre-merge main
-# the budget watch would read a slowdown the night merged as a recovery (Codex, #278).
+# refresh_main: the worktree moved to origin/main as the night's merges left it, for the vuln
+# watch. Failed, the watch is one `unmeasured` line and does not run.
 refresh_main() {
   { net fetch_main "$WT" && git -C "$WT" checkout -q --detach refs/remotes/origin/main; } >/dev/null 8>&- && return 0
   note "vuln: $SLUG unmeasured (cannot move the worktree to origin main; git above)"
-  note "budgets: $SLUG unmeasured (cannot move the worktree to origin main; git above)"
   return 1
 }
 
 run_repo() {
   local n head decision detail
   open_repo "$1" || return
-  GATED=0
+  MERGED=0
   halted || { sync_devkit; prune_sync_branches; }
   while IFS=$'\t' read -r n head _ decision detail <&3; do
     [ -n "$n" ] || continue  # the here-string of an empty list is one empty line
     if halted; then break; fi
     handle_pr "$n" "$head" "$decision" "$detail"
   done 3<<<"$PRS"
-  if ! halted && refresh_main; then
-    watch_vulns
-    halted || watch_budgets
-  fi
+  if ! halted && refresh_main; then watch_vulns; fi
   cleanup_worktree
   halted || refresh_checkout
   summary "$SLUG"

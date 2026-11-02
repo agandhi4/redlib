@@ -2,8 +2,8 @@
 # Put a tree's pinned toolchains first on PATH: Node from .nvmrc (node_toolchain.sh), Rust from
 # rust-toolchain.toml or rust-toolchain (rust_toolchain.sh), and devkit's python3 and uv
 # (_toolchain_lib.sh) for the vendored tools and a repo's own bare python3 and uv calls. Sourced;
-# defines toolchain_path and runs nothing. Used by local_gate.sh (on the merged worktree) and
-# hook_steps.sh (on the hook's checkout), so a hook runs the same node/cargo the gate does on a
+# defines toolchain_path and runs nothing. Used by
+# hook_steps.sh (on the hook's checkout), so a hook runs the same node/cargo a job does on a
 # machine whose PATH has none (redlib's Mac has no Rust) or the wrong one (the Mac's Node 25).
 #
 #   toolchain_path <tree>    # 0 ok; 1 a declared toolchain cannot be provided
