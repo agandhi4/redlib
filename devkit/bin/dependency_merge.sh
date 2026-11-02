@@ -9,12 +9,24 @@
 # whose launcher runs devkit main's copy of this file from a clone of its own
 # (bin/job_launcher.sh), never a checkout's.
 #
-# Usage: bin/dependency_merge.sh [--max <n>] [--dry-run] <repo-root>...
+# Usage: bin/dependency_merge.sh [--max <n>] [--dry-run] [--under <dir>]... [<repo-root>...]
 #   <repo-root>  a checkout whose scripts/ci/gate_plan.sh has a literal GATE_SLUG line and whose
 #                Makefile has `merge`
+#   --under <dir>  discover the repos among <dir>'s checkouts (below); repeatable
 #   --max <n>    PRs merged per repo per run (default 3); the rest wait for the next run
 #   --dry-run    print what each PR would get; no merge, comment or log line
 #
+# Repos: the roots given, plus, under each --under <dir> (with neither, _checkouts_lib.sh's
+# DEVKIT_CHECKOUT_PARENTS: ~/projects/solo and ~/projects/homelab), every checkout
+# (devkit_checkouts) whose freshly fetched origin/main has a plan with a literal GATE_SLUG and
+# either .devkit-rev (it vendors devkit) or VENDOR_PATHS (devkit itself). Any other checkout is
+# skipped without a line. A fetch that fails or hangs (header, Network) judges the last-known
+# origin/main: a repo that qualified gets one `cannot run` line and is skipped, any other none. A
+# second checkout of an origin slug, a root's or another found one's, is never fetched or run
+# (_checkouts_lib.sh devkit_claim_checkout: roots first, then the scan's order; named in the line
+# below). Found under the run lock, at run time, never at install (2026-11-02: instalite-relay,
+# cloned after the install, was never synced): one uncounted `repos: <n> under <dirs>: <names>`
+# line.
 # Per repo: fetch origin main and add a detached worktree of it, so the plan (GATE_SLUG) and the
 # vendored devkit are main's, never a developer's branch.
 # The devkit sync comes first, so the dependency PRs merge onto the newest devkit. A repo whose
@@ -62,6 +74,9 @@
 #   (closet #437, 2026-10-26): `vuln.*` keys are report-only, so advisories reached main unseen.
 # Network: every call to GitHub (git fetch and push, gh) is retried after a transient failure
 #   (net); one still failing is the outcome `network`, never "branch exists" or a regression.
+#   Every git network call is bounded and never prompts (_timeout_lib.sh devkit_git_guard,
+#   DEVKIT_GIT_TIMEOUT): a remote that waits on a password or a host key, or never answers,
+#   fails that repo alone (devkit #366).
 # Power: a Mac macOS will sleep whatever caffeinate holds (lid closed on battery,
 #   _awake_lib.sh's devkit_sleep_forced) stops the run before its next repo or PR, with one
 #   `skipped run: <reason>` line and exit 0, as the kill switch does.
@@ -91,16 +106,22 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
 . "$HERE/_awake_lib.sh"
 # shellcheck source=bin/_metrics_conf_lib.sh  # metrics_conf_parse, the vuln watch's conf reader
 . "$HERE/_metrics_conf_lib.sh"
+# shellcheck source=bin/_checkouts_lib.sh  # DEVKIT_CHECKOUT_PARENTS, devkit_checkouts, devkit_claim_checkout
+. "$HERE/_checkouts_lib.sh"
+# shellcheck source=bin/_timeout_lib.sh  # devkit_git_guard
+. "$HERE/_timeout_lib.sh"
+devkit_git_guard dependency-merge
 
 readonly SYNC_LABEL=devkit-sync
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}/devkit
 OFF=${XDG_CONFIG_HOME:-$HOME/.config}/devkit/dependency-merge.off
 LOG=$STATE/dependency-merge.log
 
-usage() { echo "usage: dependency_merge.sh [--max <n>] [--dry-run] <repo-root>..."; }
+usage() { echo "usage: dependency_merge.sh [--max <n>] [--dry-run] [--under <dir>]... [<repo-root>...]"; }
 MAX=3
 DRY_RUN=0
 REPOS=()
+PARENTS=()
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -108,28 +129,67 @@ parse_args() {
         [ $# -ge 2 ] && [[ "$2" =~ ^[1-9][0-9]*$ ]] || { usage >&2; exit 2; }
         MAX=$2; shift ;;
       --dry-run) DRY_RUN=1 ;;
+      --under)
+        [ $# -ge 2 ] || { usage >&2; exit 2; }
+        PARENTS+=("$2"); shift ;;
       -h|--help) usage; exit 0 ;;
       -*) usage >&2; exit 2 ;;
       *) REPOS+=("$1") ;;
     esac
     shift
   done
-  [ "${#REPOS[@]}" -gt 0 ] || { usage >&2; exit 2; }
+  [ "${#REPOS[@]}" -gt 0 ] || [ "${#PARENTS[@]}" -gt 0 ] || PARENTS=("${DEVKIT_CHECKOUT_PARENTS[@]}")
+}
+
+# repo_error <label> <why>: one line, and the repo counts as not read.
+repo_error() { echo "dependency-merge: $1: cannot run: $2" >&2; return 1; }
+
+# vendors_devkit <checkout>: true, with VENDOR_SLUG its GATE_SLUG, when its last-fetched
+# origin/main has .devkit-rev or VENDOR_PATHS and a plan with a literal GATE_SLUG (header, Repos).
+vendors_devkit() {
+  local m
+  m=$(git -C "$1" rev-parse --verify -q refs/remotes/origin/main) || return 1
+  git -C "$1" cat-file -e "$m:.devkit-rev" 2>/dev/null || git -C "$1" cat-file -e "$m:VENDOR_PATHS" 2>/dev/null || return 1
+  VENDOR_SLUG=$(gate_plan_literal <(git -C "$1" show "$m:scripts/ci/gate_plan.sh" 2>/dev/null) GATE_SLUG)
+  [ -n "$VENDOR_SLUG" ]
+}
+
+# discover_roots: add to REPOS each checkout under PARENTS whose origin/main, fetched now (the
+# refspec naming main, so a --single-branch clone has one too), vendors_devkit, setting
+# DISCOVERED to their names and FOUND to their count. A second checkout of a root's or a found
+# one's origin is left out unfetched (TWICE names it): run twice, its sync and --max would run
+# twice, and the second pass would judge the sync PR the first had just opened. One whose fetch
+# fails is judged by its last-known main and, qualifying, skipped with its `cannot run` line:
+# running it would only fetch, and maybe hang, again.
+DISCOVERED="" FOUND=0 TWICE=""
+discover_roots() {
+  local dir root err
+  [ "${#PARENTS[@]}" -gt 0 ] || return 0
+  for root in ${REPOS[@]+"${REPOS[@]}"}; do
+    devkit_claim_checkout "$root" || :
+  done
+  while IFS= read -r dir; do
+    devkit_claim_checkout "$dir" || { TWICE="${TWICE:+$TWICE, }${dir##*/} ($DEVKIT_SLUG)"; continue; }
+    if err=$(fetch_main "$dir" 2>&1 >/dev/null); then err=""; else err=${err:-git exit $?}; fi
+    vendors_devkit "$dir" || continue
+    [ -z "$err" ] || { repo_error "$dir" "git fetch origin main failed: ${err//$'\n'/ }"; continue; }
+    REPOS+=("$dir")
+    DISCOVERED="${DISCOVERED:+$DISCOVERED }${dir##*/}" FOUND=$((FOUND + 1))
+  done < <(devkit_checkouts "${PARENTS[@]}")
 }
 
 require_tools() {
-  # Before any repo: without one every merge fails the same way, logged as N per-PR box errors
+  # Before any repo is run: without one every merge fails the same way, logged as N per-PR box errors
   # (2026-10-22: launchd's PATH had only Xcode's 3.9, then no uv). The toolchain directory goes
   # first on PATH, too, so a repo whose vendored devkit predates _toolchain_lib.sh still runs its
   # bare python3 and uv calls on it.
-  devkit_preflight gh git make flock -- "${REPOS[@]}" \
+  devkit_preflight gh git make flock -- ${REPOS[@]+"${REPOS[@]}"} \
     || { echo "dependency-merge: $DEVKIT_PREFLIGHT_ERROR; no repo merged" >&2; exit 2; }
   devkit_toolchain_bin || { echo "dependency-merge: $DEVKIT_PYTHON_ERROR; no repo merged" >&2; exit 2; }
-  export PATH="$DEVKIT_TOOLCHAIN_BIN:$PATH"
+  case ":$PATH:" in *":$DEVKIT_TOOLCHAIN_BIN:"*) ;; *) export PATH="$DEVKIT_TOOLCHAIN_BIN:$PATH" ;; esac
 }
 
 parse_args "$@"
-require_tools
 
 # halted: true, saying why once, when the run must stop before its next repo or PR: the kill
 # switch, or a Mac macOS will sleep whatever caffeinate holds (header, Power), where every merge
@@ -148,12 +208,16 @@ halted() {
   HALT_SAID=1
 }
 halted && exit 0
+require_tools
 
 mkdir -p "$STATE/dependency-merge" || exit 2
 # fd 8 is the run lock; every make below closes it (8>&-), so a process a merge leaves behind
 # cannot hold it into the next night.
 exec 8>>"$STATE/dependency-merge.lock"
 flock -n 8 || { echo "dependency-merge: another run holds $STATE/dependency-merge.lock; not running"; exit 0; }
+# Under the lock: discovery fetches every checkout, which must not race a run's own fetches.
+discover_roots
+[ "$FOUND" = 0 ] || require_tools  # the found repos' declared tools (a uv.lock's uv)
 
 WT=""
 SYNC_WT=""
@@ -235,25 +299,11 @@ summary() {
   OUTCOMES=""
 }
 
-# main_wants_gate: true while $WT's vendored merge rules predate devkit #288 and still want the
-# head's local-gate success (`GATE_CONTEXT=local-gate` in devkit/bin/merge_rules.sh). Such a
-# main also vendors the real gate, so its own `make gate` posts what its rules read; without it
-# every PR, the devkit-sync that brings the new rules included, is refused every night (review of
-# #292). Remove once every repo's main has synced past #288.
-main_wants_gate() {
-  grep -qs '^readonly GATE_CONTEXT=local-gate' "$WT/devkit/bin/merge_rules.sh"
-}
-
-# merge_pr <slug> <n> <head>: `make merge PR=<n>` from main's worktree, and the outcome; first
-# `make gate` pinned to the head while main's rules still want it (main_wants_gate).
+# merge_pr <slug> <n> <head>: `make merge PR=<n>` from main's worktree, and the outcome.
 merge_pr() {
   local slug=$1 n=$2 head=$3 refusal
   PR_LOG=$STATE/dependency-merge/${slug#*/}-$n.log
   : >"$PR_LOG"
-  if main_wants_gate && ! make -C "$WT" gate PR="$n" GATE_ARGS="--expect-head $head" >>"$PR_LOG" 2>&1 8>&-; then
-    record "$slug#$n" error "make gate failed under main's pre-#288 merge rules, which want local-gate; retried next run; see $PR_LOG"
-    return 0
-  fi
   if make -C "$WT" merge PR="$n" >>"$PR_LOG" 2>&1 8>&-; then
     record "$slug#$n" merged "head ${head:0:12}"
     return 0
@@ -296,9 +346,6 @@ list_prs() {
     done
   } | "$DEVKIT_PYTHON" -I "$HERE/_dependency_pr.py"
 }
-
-# repo_error <label> <why>: one line, and the repo counts as not read.
-repo_error() { echo "dependency-merge: $1: cannot run: $2" >&2; return 1; }
 
 # open_repo <dir>: set ROOT (<dir>, resolved), SLUG, PRS (_dependency_pr.py lines) and WT (a
 # detached worktree of origin/main now, whose plan and vendored devkit run every merge).
@@ -681,8 +728,9 @@ run_repo() {
   summary "$SLUG"
 }
 
+[ "${#PARENTS[@]}" = 0 ] || note "repos: $FOUND under ${PARENTS[*]}: ${DISCOVERED:-none vendors devkit}${TWICE:+; a second checkout, not run: $TWICE}"
 read_any=0
-for repo in "${REPOS[@]}"; do
+for repo in ${REPOS[@]+"${REPOS[@]}"}; do
   if halted; then break; fi
   run_repo "$repo" && read_any=1
 done

@@ -1,8 +1,9 @@
 # shellcheck shell=bash
-# Bounded commands, and a guard for a hung Docker daemon. Sourced; defines functions and runs
-# nothing. Used by: throwaway_pg.sh, boot_image.sh, docker_bounded.sh and publish.sh
-# (devkit_docker_guard), and check_tree.sh (devkit_docker_ensure in its require_docker,
-# devkit_with_timeout around the plan's gate_cleanup).
+# Bounded commands, and guards for a hung Docker daemon and a hung git remote. Sourced; defines
+# functions and runs nothing. Used by: throwaway_pg.sh, boot_image.sh, docker_bounded.sh and
+# publish.sh (devkit_docker_guard), check_tree.sh (devkit_docker_ensure in its require_docker,
+# devkit_with_timeout around the plan's gate_cleanup), and the jobs that fetch every checkout,
+# dependency_merge.sh and apple_check.sh (devkit_git_guard).
 #
 # Why (2026-10-17): the OrbStack daemon wedged and every `docker rm -fv`, `docker ps` and
 # `docker inspect` hung for 12+ minutes. Inside a job only the 15-minute silence watchdog
@@ -22,6 +23,15 @@
 #                                         holds the machine awake for the caller's lifetime, and
 #                                         on macOS a probe that times out gets one user-activity
 #                                         wake and one re-probe (bin/_awake_lib.sh).
+#   devkit_git_guard <who>                from here on every network `git` call (fetch, push, pull,
+#                                         ls-remote, clone) in the sourcing script is bounded by
+#                                         DEVKIT_GIT_TIMEOUT (default 120 s:
+#                                         an incremental fetch or a push), one stderr line
+#                                         naming a stop; and git is non-interactive:
+#                                         GIT_TERMINAL_PROMPT=0 (exported to children too), and
+#                                         unless GIT_SSH_COMMAND or GIT_SSH is set, the repo's
+#                                         ssh command in BatchMode with a ConnectTimeout. Bad
+#                                         values are exit 2.
 #   devkit_docker_check <who>             the same checks and probe without the exit: 0 when the
 #                                         daemon answers, else 1 with DEVKIT_DOCKER_ERROR (one
 #                                         line, no <who> prefix). Bad values are still exit 2.
@@ -143,4 +153,48 @@ _devkit_orbstack_asleep_hint() {
   printf '%s' "the docker daemon still did not answer after a wake; likely the OrbStack VM asleep after system sleep"
   [ -z "$last" ] || printf ' (last vmgr event: %s)' "$last"
   printf '%s\n' ". Remedy in order: \`caffeinate -u -t 2\` and rerun; only as a last resort \`orbctl stop && orbctl start\`, which kills every container"
+}
+
+# Why (devkit #366, 2026-11-02): the nightly dependency merge and the Mac's apple check fetch
+# every checkout under the parents, unrelated ones too, and one remote waiting on a credential
+# prompt, an SSH host key prompt or a dead network stalled the whole run. A prompt now fails at
+# once; a silent remote is stopped. BatchMode is added per call to the repo's own ssh command
+# (core.sshCommand, say a deploy key's `ssh -i`, else ssh), never exported over it, and never
+# when the caller set GIT_SSH_COMMAND or GIT_SSH: the environment beats the config, so an
+# exported one would drop every per-repo key.
+devkit_git_guard() {
+  local who=$1
+  [[ "${DEVKIT_GIT_TIMEOUT:-120}" =~ ^[1-9][0-9]*$ ]] \
+    || { echo "$who: DEVKIT_GIT_TIMEOUT must be a whole number of seconds >= 1 (got '$DEVKIT_GIT_TIMEOUT')" >&2; exit 2; }
+  command -v pkill >/dev/null || { echo "$who: pkill not found on PATH (procps: apt install procps)" >&2; exit 2; }
+  export GIT_TERMINAL_PROMPT=0
+  # shellcheck disable=SC2329  # shadows the CLI for every later call in the sourcing script
+  git() {
+    local a sub='' skip=0 rc=0 ssh pre=()
+    # The subcommand is the first word that is not a global option or its value (-C <dir>).
+    for a in "$@"; do
+      if [ "$skip" = 1 ]; then skip=0; pre+=("$a"); continue; fi
+      case "$a" in
+        -C|-c|--git-dir|--work-tree|--namespace) skip=1 ;;
+        -*) ;;
+        *) sub=$a; break ;;
+      esac
+      pre+=("$a")
+    done
+    case "$sub" in
+      fetch|push|pull|ls-remote|clone) ;;
+      *) command git "$@"; return ;;
+    esac
+    if [ -n "${GIT_SSH_COMMAND:-}${GIT_SSH:-}" ]; then
+      devkit_with_timeout "${DEVKIT_GIT_TIMEOUT:-120}" command git "$@" || rc=$?
+    else
+      ssh=$(command git ${pre[@]+"${pre[@]}"} config --get core.sshCommand) || ssh=ssh
+      devkit_with_timeout "${DEVKIT_GIT_TIMEOUT:-120}" \
+        env GIT_SSH_COMMAND="$ssh -o BatchMode=yes -o ConnectTimeout=30" git "$@" || rc=$?
+    fi
+    # Never worded as a transient failure: a remote that hung once hangs again, and a retry
+    # (dependency_merge.sh's net) would only spend another bound on it.
+    [ "$rc" != 124 ] || echo "git $sub: no answer within ${DEVKIT_GIT_TIMEOUT:-120}s; stopped" >&2
+    return "$rc"
+  }
 }
