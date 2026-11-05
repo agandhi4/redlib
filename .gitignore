@@ -11,3 +11,7 @@ redlib.toml
 
 # web-ext signing output (signed .xpi lands here)
 web-ext-artifacts/
+
+# Claude Code: only the root settings.json is shared
+**/.claude/*
+!/.claude/settings.json
