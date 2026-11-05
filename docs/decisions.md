@@ -280,3 +280,8 @@ Consequence: a version bump no longer costs a cold dependency build in the gate 
 Why: devkit retired the pre-merge gate (devkit 2026-11-02), but AGENTS.md, the README, docs/fork.md and the Makefile still told agents to run `make gate` and wait for `local-gate`.
 Decision: a PR merges on review rounds (`@codex review` or `make review PR=<n>`, capped at `DEVKIT_REVIEW_ROUNDS`); linux-box's publisher proves main with `check_tree.sh` at most once per 3 h window and ships only green commits. `GATE_STATE_NAME` is dropped (nothing reads it).
 Consequence: `make gate` remains as devkit's stub. The plan file keeps its name, `scripts/ci/gate_plan.sh`.
+
+## 2026-11-05 — Vuln pass: lockfile clears the zstd chain and pulldown-cmark
+Why: the OSV collector listed 16 (1 high): pulldown-cmark 0.13.5 RUSTSEC-2026-0433 (quadratic nested wikilinks; unreachable, `model.rs` builds `Parser::new` without `ENABLE_WIKILINKS`), zstd 0.13.3 (0391) and zstd-safe 7.2.4 (0395–0406, 12), plus bincode and unsafe-libyaml.
+Decision: lockfile only: pulldown-cmark 0.13.6, zstd 0.13.4, zstd-safe 7.4.0. The fixed zstd stays inside wreq's `^0.13.3`, so the 2026-10-29 "waits on wreq" no longer holds. Cargo.toml is untouched, as upstream's is.
+Consequence: 16 → 2. Left, each a replacement: bincode (RUSTSEC-2025-0141, #82) and serde_yaml's unsafe-libyaml (RUSTSEC-2024-0449, #83). Recheck at the monthly upstream sync whether upstream replaced either.
