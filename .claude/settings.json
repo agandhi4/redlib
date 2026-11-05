@@ -1,0 +1,30 @@
+{
+  "extraKnownMarketplaces": {
+    "claude-kit": {
+      "source": { "source": "github", "repo": "agandhi4/claude-kit" }
+    }
+  },
+  "enabledPlugins": {
+    "core@claude-kit": true,
+    "review@claude-kit": true,
+    "build@claude-kit": true,
+    "work-loop@claude-kit": true,
+    "guard@claude-kit": true,
+    "graph@claude-kit": false,
+    "fork-sync@claude-kit": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(make ci-quick)",
+      "Bash(make ci-lint)",
+      "Bash(make ci-unit)",
+      "Bash(make ci-guards)",
+      "Bash(make ci-check)",
+      "Bash(make metrics-snapshot)",
+      "Bash(make metrics-tighten)",
+      "Bash(make scorecard)",
+      "Bash(make help)"
+    ],
+    "deny": ["Read(.env*)"]
+  }
+}
