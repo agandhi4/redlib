@@ -1,7 +1,7 @@
 """Which repo a checkout is, and where its per-machine state lives: the names the hooks
 ledger and the agent-cost ledger are keyed by. Loaded by path
-(`python3 -I` keeps bin/ off sys.path) by scorecard.py and bite.py, so both read the
-same files for the same checkout.
+(`python3 -I` keeps bin/ off sys.path) by scorecard.py, bite.py and _output_floor.py, so each
+reads the same files for the same checkout.
 """
 
 from __future__ import annotations
@@ -58,6 +58,12 @@ def plan_declares(root: Path, name: str) -> bool:
 
 def state_home() -> Path:
     return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+
+
+def output_cache(home: Path) -> Path:
+    """scorecard.py --fleet's OUTPUT cache, which merge_rules.sh's floor gate reads
+    (_output_floor.py): one path for the writer and the reader."""
+    return home / "devkit" / "scorecard" / "output.json"
 
 
 def hooks_ledger(root: Path, home: Path) -> Path:

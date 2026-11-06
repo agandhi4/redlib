@@ -26,6 +26,7 @@
 # Likewise GATE_CODEX_RUNNING_MAX_MIN, one `GATE_CODEX_RUNNING_MAX_MIN=<minutes>` line (pr_merge.sh).
 # Likewise GATE_CODE_PATHS, one unquoted `GATE_CODE_PATHS=<prefix>[,<prefix>...]` line: the gate
 # sources it, the hooks and pr_merge.sh read the literal, and they must classify alike.
+# Likewise GATE_KIT, one `GATE_KIT=1` line in a kit's plan (merge_rules.sh's Kind trailer reads it).
 #
 # Also: the baseline files `devkit new` writes and a hand-built repo silently lacks (kitchen had
 # no scorecard.json, 2026-10-23), each named with the one command that creates it
@@ -267,6 +268,7 @@ check_plan() {
     'GATE_CODEX_RUNNING_MAX_MIN=<whole minutes, 1-999999>, unquoted (45)'
   plan_literal_setting "$plan" GATE_CODE_PATHS '[A-Za-z0-9._/-]+(,[A-Za-z0-9._/-]+)*' \
     'GATE_CODE_PATHS=<prefix>[,<prefix>...], unquoted (plugins/,templates/)'
+  plan_literal_setting "$plan" GATE_KIT 1 'GATE_KIT=1, in a kit repo only'
   plan_image_excludes "$plan"
 }
 # check_publish_contract: the header's publish contract.

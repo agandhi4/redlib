@@ -50,6 +50,10 @@ reads the same changed files on stdin and prints every path they touch, one per 
 removes code). For bin/merge_rules.sh's docs-only exemption, which classifies them with
 _paths_lib.sh. Exit 2 when stdin is not that, or a path is empty or holds a newline (one line per
 path is the contract: "a.py\nb.md" must never read as two paths).
+
+  _dependency_pr.py bot <login>
+prints `renovate` or `dependabot` and exits 0 when <login> is that app's (bot() below), else exits
+1 printing nothing. For bin/merge_rules.sh's Kind trailer: a dependency bot's PR is tooling.
 """
 
 from __future__ import annotations
@@ -314,6 +318,11 @@ def _documents(text: str) -> list[object]:
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["bot"] and len(sys.argv) == 3:
+        name = bot(sys.argv[2])
+        if name:
+            print(name)
+        return 0 if name else 1
     if sys.argv[1:] == ["paths"]:
         try:
             touched = paths(sys.stdin.read())

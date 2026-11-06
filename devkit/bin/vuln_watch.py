@@ -213,13 +213,16 @@ def gh(*args: str, stdin: str | None = None) -> str:
     return proc.stdout
 
 
-def open_issue(slug: str) -> tuple[int, str, str] | None:
-    """(number, title, body) of the open issue this script keeps, or None."""
-    listed = gh("issue", "list", "--repo", slug, "--state", "open", "--label", LABEL,
-                "--limit", "200", "--json", "number,title,body")  # fmt: skip
-    for issue in json.loads(listed or "[]"):
-        if MARKER in (issue.get("body") or ""):
-            return int(issue["number"]), issue.get("title") or "", issue["body"]
+def open_issue(slug: str) -> tuple[int, str, str, bool] | None:
+    """(number, title, body, labelled) of the open issue this script keeps, or None: found by
+    MARKER among the open LABEL issues, else among the unlabelled ones (one ensure_label could
+    not label). Two narrow lists, never one unfiltered scan a busy repo's 200 newest would cut."""
+    for narrow, labelled in ((["--label", LABEL], True), (["--search", "no:label"], False)):
+        listed = gh("issue", "list", "--repo", slug, "--state", "open", *narrow,
+                    "--limit", "200", "--json", "number,title,body")  # fmt: skip
+        for issue in json.loads(listed or "[]"):
+            if MARKER in (issue.get("body") or ""):
+                return int(issue["number"]), issue.get("title") or "", issue["body"], labelled
     return None
 
 
@@ -240,17 +243,40 @@ def sync_issue(slug: str, found: dict[str, Advisory], first_seen: dict[str, str]
             return "; no open issue (closed by hand; the next new id opens one)"
         if dry_run:
             return "; would open an issue"
-        url = gh("issue", "create", "--repo", slug, "--label", LABEL, "--title", title,
+        missing = ensure_label(slug)
+        label = [] if missing else ["--label", LABEL]
+        url = gh("issue", "create", "--repo", slug, *label, "--title", title,
                  "--body-file", "-", stdin=body)  # fmt: skip
-        return f"; issue #{url.strip().rsplit('/', 1)[-1]} opened"
-    number, old_title, old_body = issue
-    if (old_title, old_body.rstrip("\n")) == (title, body.rstrip("\n")):
+        unlabelled = f" without the {LABEL} label ({missing})" if missing else ""
+        return f"; issue #{url.strip().rsplit('/', 1)[-1]} opened{unlabelled}"
+    number, old_title, old_body, labelled = issue
+    same = (old_title, old_body.rstrip("\n")) == (title, body.rstrip("\n"))
+    if same and labelled:
         return f"; issue #{number} unchanged"
     if dry_run:
         return f"; would update issue #{number}"
-    gh("issue", "edit", str(number), "--repo", slug, "--title", title, "--body-file", "-",
+    # An issue filed unlabelled gets the label once it can be made; until then the line says so.
+    missing = "" if labelled else ensure_label(slug)
+    if same and missing:
+        return f"; issue #{number} unchanged, still without the {LABEL} label ({missing})"
+    label = [] if labelled or missing else ["--add-label", LABEL]
+    gh("issue", "edit", str(number), "--repo", slug, "--title", title, *label, "--body-file", "-",
        stdin=body)  # fmt: skip
     return f"; issue #{number} updated"
+
+
+def ensure_label(slug: str) -> str:
+    """Create LABEL in a repo that lacks it; "" when it is there, else why it could not be.
+    Why (kitchen, 2026-11-02): `gh issue create --label security` failed in a repo with no such
+    label, and a new high advisory went unfiled until the next night. A security finding is
+    never dropped over a label: one that cannot be created is left off, and the line says so."""
+    try:
+        gh("label", "create", LABEL, "--repo", slug, "--color", "B60205",
+           "--description", "A vulnerability or credential finding")  # fmt: skip
+    except GhError as exc:
+        if "already exists" not in str(exc):
+            return str(exc)
+    return ""
 
 
 def describe(adv: Advisory) -> str:

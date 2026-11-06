@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Nightly: keep each repo's vendored devkit at devkit's main, then merge minor and patch
-# dependency PRs. Owner decision 2026-10-21: keep automatic minor/patch updates, but merge them
-# through the repo's own `make merge`; Renovate never merges by itself and no paid GitHub feature
-# is involved. Owner 2026-10-22: devkit improves every project without a hand-run
+# Nightly: keep each repo's vendored devkit within a week of devkit's main (weekly sync), then
+# merge minor and patch dependency PRs. Owner decision 2026-10-21: keep automatic minor/patch
+# updates, but merge them through the repo's own `make merge`; Renovate never merges by itself
+# and no paid GitHub feature is involved. Owner 2026-10-22: devkit improves every project without a hand-run
 # `make devkit-sync` PR per repo per devkit change. Owner 2026-11-02: no pre-merge gate; every
 # check runs before a deploy, so a merge here is `make merge` alone. Scheduled
 # by bin/install_dependency_merge.sh (templates/launchd/com.agandhi4.devkit.dependency-merge.plist),
@@ -38,6 +38,13 @@
 #   - main's .devkit-rev names it, a commit past it, or a commit vendoring the same tree (a
 #     tests/-only change): `current`. One not on devkit's main (vendored from a branch): skipped,
 #     never moved back.
+#   - weekly (owner 2026-11-04): one whose commit date is under SYNC_MIN_AGE_DAYS (7) before the
+#     target's, while the oldest devkit commit past it is under 7 days old (devkit_epoch), is
+#     `current enough (<n>d behind <sha7>, <k> commits, the oldest <w>d old; …)`, unless a commit
+#     in the range has a `Devkit-Sync: now` line (the urgent fix's escape hatch: a line in the
+#     devkit PR's body, which devkit's squash commit message is), which syncs that night with one
+#     `devkit-sync: <slug> forced by <sha7>'s Devkit-Sync: now` line. A hand-run
+#     `make devkit-sync` syncs any time. Dependency PRs still merge every night.
 #   - else the one open PR labelled devkit-sync is reused when its branch is
 #     devkit-sync/<target sha7>, it vendors that commit and it merges cleanly into main (one whose
 #     head is not the job's commit, job_sync_commit, is left alone). Otherwise, in a second
@@ -117,6 +124,8 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
 . "$HERE/_timeout_lib.sh"
 # shellcheck source=bin/_commit_status_lib.sh  # devkit_main_check_state, the sync's green target
 . "$HERE/_commit_status_lib.sh"
+# shellcheck source=bin/_load_lib.sh  # devkit_epoch, the clock the sync's oldest pending change waits on
+. "$HERE/_load_lib.sh"
 devkit_git_guard dependency-merge
 
 readonly SYNC_LABEL=devkit-sync
@@ -584,6 +593,30 @@ devkit_green() {
   note "devkit-sync: nothing synced: $GREEN_WHY"
 }
 
+# The sync's cadence (header): weekly, not nightly. Why (owner 2026-11-04): 152 sync PRs in 30
+# days across 9 repos, ~19% of all app commits, each a main commit and a deploy for a few lines
+# of tooling. Two ages, either one due: the target's commit date against .devkit-rev's, and the
+# oldest pending devkit commit's against the run's clock (devkit_epoch), so a change followed by
+# a quiet devkit main still lands within the week instead of waiting for a later commit.
+readonly SYNC_MIN_AGE_DAYS=7
+# sync_due: true when main's vendored devkit (SYNC_OLD) is SYNC_MIN_AGE_DAYS older than the target,
+# or the oldest commit in between is that old, or one carries a `Devkit-Sync: now` line (one line
+# names it); else records it `current enough`.
+sync_due() {
+  local range=$SYNC_OLD..$SYNC_UPSTREAM days waited commits forced
+  days=$(( ($(git -C "$WT" log -1 --format=%ct "$SYNC_UPSTREAM") - $(git -C "$WT" log -1 --format=%ct "$SYNC_OLD")) / 86400 ))
+  waited=$(( ($(devkit_epoch) - $(git -C "$WT" log --reverse --format=%ct "$range" | head -n 1)) / 86400 ))
+  commits=$(git -C "$WT" rev-list --count "$range")
+  [ "$days" -lt "$SYNC_MIN_AGE_DAYS" ] && [ "$waited" -lt "$SYNC_MIN_AGE_DAYS" ] || return 0
+  forced=$(git -C "$WT" log -1 --format=%H -i --grep='^Devkit-Sync: *now *$' "$range")
+  if [ -n "$forced" ]; then
+    note "devkit-sync: $SLUG forced by ${forced:0:7}'s Devkit-Sync: now (${days}d behind, $commits commits)"
+    return 0
+  fi
+  record "$SLUG" current "enough (${days}d behind ${SYNC_UPSTREAM:0:7}, $commits commits, the oldest ${waited}d old; syncs at ${SYNC_MIN_AGE_DAYS}d or on a Devkit-Sync: now trailer)"
+  return 1
+}
+
 # sync_behind: set SYNC_OLD and SYNC_UPSTREAM (the sync's green target, devkit_green) and return
 # 0 when main's vendored devkit should move to it (header); else record why not (nothing for a
 # repo vendoring none, or when no devkit main is green: devkit_green said so once).
@@ -606,6 +639,7 @@ sync_behind() {
     || { record "$SLUG" current "devkit at ${SYNC_OLD:0:7}, past ${SYNC_UPSTREAM:0:7}, the newest green devkit main"; return 1; }
   [ "$(cd "$WT" && vendor_tree_of "$SYNC_UPSTREAM")" != "${rev#* }" ] \
     || { record "$SLUG" current "devkit at ${SYNC_OLD:0:7}; main ${SYNC_UPSTREAM:0:7} vendors the same tree"; return 1; }
+  sync_due
 }
 
 # find_sync_pr <open sync PR lines>: set SYNC_REUSE to the open PR on devkit-sync/<upstream sha7>

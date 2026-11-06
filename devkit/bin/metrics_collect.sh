@@ -115,7 +115,8 @@
 # build/metrics/ before a run: only this conf's collector files (and their logs) are removed.
 # gate.json (the plan runner, every earlier job's seconds) and tier-*.json (tier_guard.sh, the
 # tiers that ran in this gate) were written before this job and are merged into the snapshot;
-# an `rm -rf build/metrics` here would silently drop them.
+# an `rm -rf build/metrics` here would silently drop them. Nothing else there is merged
+# (merge_snapshot): those, and this conf's collector files, are the snapshot's whole input.
 #
 # Findings: a collector whose command runs devkit's metrics/python.py, ts.mjs, rust.py, shell.py or jscpd.mjs gets
 # `--list-out build/metrics/<name>.findings.txt` appended (nothing to declare in the conf; a
@@ -603,10 +604,18 @@ run_collectors() {
 }
 
 # ---- merge, then the ratchet ----------------------------------------------------------------------
-# merge_snapshot: every collector's and tier's JSON into OUT, the skipped collectors named.
+# merge_snapshot: the snapshot's sources into OUT, the skipped collectors named. The sources are
+# a set, never the directory: this conf's collectors' <name>.json, the plan runner's gate.json
+# and tier_guard's tier-*.json. Any other JSON there (a hand-run `vuln.py --findings` list,
+# another conf's leftovers) is not a snapshot and is left out, not merged (finplat 2026-11-05:
+# a findings list there failed `make metrics-tighten` with "must be a JSON object").
 merge_snapshot() {
   local inputs=() merge_args=() f name
-  for f in "$COLLECT_DIR"/*.json; do
+  for name in ${NAMES[@]+"${NAMES[@]}"}; do
+    f=$COLLECT_DIR/$name.json
+    [ -f "$f" ] && inputs+=("$f")
+  done
+  for f in "$GATE_JSON" "$COLLECT_DIR"/tier-*.json; do
     [ -f "$f" ] && inputs+=("$f")
   done
   for name in ${SKIPPED[@]+"${SKIPPED[@]}"}; do merge_args+=(--skipped "$name"); done

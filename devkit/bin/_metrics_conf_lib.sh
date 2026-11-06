@@ -57,6 +57,11 @@ metrics_conf_parse() {
     where=$conf:$line_no
     [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]] \
       || die "$conf:$line_no: collector name '$name' must match [A-Za-z0-9_-]+ (it names build/metrics/<name>.json)"
+    # gate.json is the plan runner's and tier-*.json tier_guard's: a collector of that name would
+    # have its file cleared before the run and merged twice (metrics_collect.sh merge_snapshot).
+    case "$name" in
+      gate|tier-*) die "$conf:$line_no: collector name '$name' is reserved (build/metrics/$name.json is the gate's or a tier's)" ;;
+    esac
     for seen in ${NAMES[@]+"${NAMES[@]}"}; do
       [ "$seen" != "$name" ] || die "$conf:$line_no: collector '$name' declared twice"
     done
