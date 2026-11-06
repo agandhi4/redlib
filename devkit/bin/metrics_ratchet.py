@@ -99,8 +99,9 @@ Key shape (docs/metrics-keys.md): flat dotted keys `<domain>.<scope>.<stat>`, nu
 no whitespace. A collector file may also be nested objects (flattened to dotted keys) or
 finplat's `make metrics` envelope `{"commit": ..., "metrics": {nested}, "schema_version": 1}`;
 lists, strings, booleans and nulls are not metrics and are skipped, matching finplat's
-`_flatten`. `merge` turns the collector outputs (`build/metrics/*.json`, each at least one
-number) into one snapshot; a key two collectors both emit is an error, not a silent overwrite.
+`_flatten`. `merge` turns the collector outputs (each at least one number) into one snapshot;
+a key two collectors both emit is an error, not a silent overwrite. metrics_collect.sh passes
+its conf's `build/metrics/<name>.json`, gate.json and tier-*.json, never the whole directory.
 
 The snapshot `merge` writes (schema 2) names where each key came from, so `check` can tell a
 collector that did not run from a metric that vanished:

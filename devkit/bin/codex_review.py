@@ -74,6 +74,15 @@ REVIEWED_COMMIT = re.compile(r"\*\*Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`")
 RECORD_MARKER = "<!-- devkit-review-record:v1"
 RECORD = re.compile(r"<!-- devkit-review-record:v1 (\{.*?\}) -->", re.DOTALL)
 FILED = re.compile(r"<!-- devkit-review-filed:v1 ([^ ]*) -->")
+# The gh shim refuses any body holding RECORD_TOKEN without DEVKIT_REVIEW_VERIFIED, so a finding
+# whose text quotes it (a review of the shim or of this file) could never be filed and was lost
+# (claude-kit #45). `file` breaks the token with a word joiner (U+2060) in what it posts: it reads
+# the same, and no reader parses it as a record.
+RECORD_TOKEN = "devkit-review-record:v1"
+
+
+def defang(text: str) -> str:
+    return text.replace(RECORD_TOKEN, "devkit-review-record\u2060:v1")
 ISSUE_KEY = re.compile(r"<!-- devkit-review-finding:v1 (#\d+ [^ ]+) -->")
 PRIORITIES = ("P0", "P1", "P2", "P3")
 # "-" is a Codex comment with no badge this knows: fail closed, as if it were P1, so a badge
@@ -355,12 +364,13 @@ def file_findings(slug: str, pr: int, findings: list[Finding]) -> list[str]:
         for m in [ISSUE_KEY.search(issue.get("body") or "")] if m}
     for f in findings:
         key = f"#{pr} {f.thread or f.key}"
+        where, text = defang(f.where), defang(f.title)
         issue = filed.get(key)
         if issue is None:
             body = (f"<!-- devkit-review-finding:v1 {key} -->\nUnaddressed review finding from "
                     f"#{pr}, filed by `make merge` (devkit bin/codex_review.py).\n\n"
-                    f"**{f.priority}** `{f.where}`: {f.title}\n\n{f.url}\n")
-            title = f"title=Review finding (#{pr}): {f.title[:180]}"
+                    f"**{f.priority}** `{where}`: {text}\n\n{f.url}\n")
+            title = f"title=Review finding (#{pr}): {text[:180]}"
             issue = json.loads(gh("api", f"repos/{slug}/issues", "-f", title, "-f", f"body={body}"))
         if f.thread:
             gh("api", "graphql", "-f", f"query={REPLY}", "-f", f"id={f.thread}",
@@ -369,7 +379,7 @@ def file_findings(slug: str, pr: int, findings: list[Finding]) -> list[str]:
         else:
             gh("api", f"repos/{slug}/issues/{pr}/comments", "-f",
                f"body=<!-- devkit-review-filed:v1 {f.key} -->\nFiled as #{issue['number']} "
-               f"(make merge): {f.priority} `{f.where}`: {f.title}\n")
+               f"(make merge): {f.priority} `{where}`: {text}\n")
         done.append(f"filed\t{issue['html_url']}\t{f.priority}\t{f.where}\t{f.title}")
     return done
 

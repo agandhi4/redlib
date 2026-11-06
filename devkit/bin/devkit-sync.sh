@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Update the vendored devkit/ to upstream and record what was vendored.
 # Usage: devkit/bin/devkit-sync.sh [--stage] [ref]      (default: main)      or: make devkit-sync
+# By hand it syncs any time. The nightly job (devkit's dependency_merge.sh) syncs a repo weekly:
+# once 7 days behind green devkit, or the night a devkit commit carries `Devkit-Sync: now`.
 #   --stage  replace the tree and stage it with .devkit-rev, but make no commit: the caller's
 #            own commit carries the vendoring (devkit-new.sh, whose first commit must hold the
 #            whole scaffold and go through the hooks). devkit-check reads the index, so that
