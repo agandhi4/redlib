@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fleet scorecard v2: three readouts per repo, never averaged together (scorecard-design.md §5).
+"""Fleet scorecard v2: four readouts per repo, never averaged together (scorecard-design.md §5).
 
   WIRED  is devkit enforcing here: of the mechanisms applicable to the repo's stack, how many
          are wired. `n/m` counts measured checks only; an UNMEASURED check (devkit has no way to
@@ -19,6 +19,28 @@
          pass/fail.
   BITE   does enforcement act: hook runs and fails by step, from bite.measure (the numbers
          `bite.py --json` prints).
+  OUTPUT what the work went to (owner 2026-11-04: app-repo product commits fell from 68% to
+         29% in a month while the scorecard, measuring only wiring, read every repo better).
+         Over the last 30 days of HEAD's first-parent commits, `product n/m (p%)`: a commit is
+         declared by its `Kind: product|tooling` trailer (make merge writes one into every squash
+         body, merge_rules.sh) or, with none, inferred as the merge would: tooling in a kit repo
+         (the plan's GATE_KIT=1), a devkit sync (`Update devkit to …`) or a Renovate or
+         Dependabot commit (its author), else product when
+         any path it changes is backend, frontend, native or other in _paths_lib.sh's table (one
+         bash per repo). Declared and inferred counts print apart, so the heuristic's share shows.
+         Only a commit whose squash body also carries `Kind-By: label|kit|sync|bot` (make merge
+         since 2026-11-05) is judged: its kind was declared or deterministic, never guessed from
+         paths, which read a ratchet sweep of app code as product (85% inferred against an
+         audit's 29%, 2026-11-05).
+         Agent output tokens split the same way: docs/agent-cost.tsv rows joined on (repo, PR)
+         to the squash subject's `(#n)`; UNMEASURED, never 0, when no row joins. Per-repo shares
+         are never judged (a finished fork may be all tooling); --fleet sums every repo, kit repos
+         included, prints `OUTPUT fleet: judged product p% of declared commits (n/m); floor f%
+         PASS|FAIL` against scorecard.conf's output_product_share_min (UNMEASURED below
+         output_declared_min judged commits, or with any github/repos.json repo unmeasured),
+         then the inferred share on an `(not judged)` line,
+         and writes <state>/devkit/scorecard/output.json (AGENTS.md, output contracts), which
+         merge_rules.sh's floor gate reads.
 
 Why v2 (owner, 2026-10-18): after a day in which four repos halved complexity and clones, no
 letter moved. Binary checks against absolute thresholds were insensitive to work, and tracks
@@ -103,6 +125,8 @@ identity = _load_sibling("_repo_identity.py", "devkit_repo_identity")
 bite_mod = _load_sibling("bite.py", "devkit_bite")
 compose_mod = _load_sibling("_compose.py", "devkit_compose")  # its compose file names
 renovate_mod = _load_sibling("_renovate.py", "devkit_renovate")  # devkit-check's Renovate audit
+cost_mod = _load_sibling("agent_cost.py", "devkit_agent_cost")  # the agent-cost ledger's reader
+dependency_mod = _load_sibling("_dependency_pr.py", "devkit_dependency_pr")  # bot(): OUTPUT's kind
 BOUNDS_FILE = "docs/metrics/ratchet.json"
 REPORT_ONLY_FILE = "docs/metrics/report-only.json"
 TREND_FILES = (BOUNDS_FILE, REPORT_ONLY_FILE)
@@ -1510,10 +1534,293 @@ def largest_debts(metrics: dict[str, float], conf: dict[str, float]) -> list[dic
     )
 
 
+# ---- OUTPUT ---------------------------------------------------------------------------------
+# What the fleet's work went to (owner 2026-11-04): product share of main's commits, and of the
+# agent output tokens behind them. merge_rules.sh writes the Kind trailer; a commit without one
+# is classified here as the merge would have, so the heuristic share is shown apart.
+
+OUTPUT_DAYS = 30
+KIND_TRAILER = re.compile(r"^Kind: (product|tooling)[ \t]*$", re.M)
+# What decided the Kind (merge_rules.sh pr_kind): only such a commit is judged.
+KIND_BY_TRAILER = re.compile(r"^Kind-By: (label|kit|sync|bot)[ \t]*$", re.M)
+DEVKIT_SYNC_SUBJECT = "Update devkit to "  # dependency_merge.sh's sync PR title
+PRODUCT_AREAS = frozenset({"backend", "frontend", "native", "other"})
+SQUASH_PR = re.compile(r"\(#(\d+)\)$")  # GitHub's squash subject: `<title> (#<n>)`
+AGENT_COST_LEDGER = DEVKIT / "docs" / "agent-cost.tsv"
+# One bash per repo: blank-line-terminated path lists in, one DEVKIT_AREAS line per list out.
+AREAS_SCRIPT = r""". "$1" && devkit_load_code_paths "$2" || exit 2
+paths=
+while IFS= read -r line; do
+  if [ -n "$line" ]; then paths+="$line"$'\n'; continue; fi
+  devkit_areas "$paths"; printf '%s\n' "$DEVKIT_AREAS"; paths=
+done
+"""
+
+
+@dataclass
+class MainCommit:
+    sha: str
+    subject: str
+    kind: str  # product | tooling
+    declared: bool  # a Kind trailer said so; else inferred here
+    judged: bool  # a Kind-By trailer too: declared or deterministic, so the floor counts it
+    pr: str  # the squash subject's PR number, "" for none
+
+
+def path_areas(root: Path, path_lists: list[list[str]]) -> list[set[str]] | None:
+    """The gate's areas (_paths_lib.sh, with the plan's GATE_CODE_PATHS) of each path list, in
+    one bash; None when bash cannot say."""
+    if not path_lists:
+        return []
+    lib, plan = str(HERE / "_paths_lib.sh"), str(root / identity.PLAN)
+    stdin = "".join("".join(f"{p}\n" for p in paths) + "\n" for paths in path_lists)
+    try:
+        proc = subprocess.run(
+            ["bash", "-c", AREAS_SCRIPT, "_", lib, plan],
+            input=stdin, capture_output=True, text=True, check=False,
+        )
+    except FileNotFoundError:
+        return None
+    lines = proc.stdout.split("\n")[: len(path_lists)]
+    if proc.returncode != 0 or len(lines) != len(path_lists):
+        return None
+    return [set(line.split()) for line in lines]
+
+
+def main_commits(root: Path, days: int, now: datetime) -> tuple[list[MainCommit] | None, str]:
+    """HEAD's first-parent commits of the last `days`, each with its kind (module docstring,
+    OUTPUT), or (None, why)."""
+    since = (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S%z")
+    # core.quotePath=false: a non-ASCII path is printed as it is, never quoted.
+    window = ("-c", "core.quotePath=false", "log", "--first-parent", f"--since={since}", "HEAD")
+    code, messages = run(["git", "-C", str(root), *window, "--format=%H%x1f%an%x1f%s%x1f%B%x1e"])
+    if code != 0:
+        return None, f"git log failed: {messages.splitlines()[-1] if messages else code}"
+    # --no-renames: both sides of a rename, as merge_rules.sh reads them.
+    code, names = run(
+        ["git", "-C", str(root), *window, "--diff-merges=first-parent", "--no-renames",
+         "--name-only", "--format=%x1e%H"]
+    )
+    if code != 0:
+        return None, f"git log --name-only failed: {names.splitlines()[-1] if names else code}"
+    paths: dict[str, list[str]] = {}
+    for chunk in names.split("\x1e"):
+        lines = [line for line in chunk.split("\n") if line]
+        if lines:
+            paths[lines[0]] = lines[1:]
+    kit = identity.plan_literal(root, "GATE_KIT") == "1"
+    commits: list[MainCommit] = []
+    undecided: list[MainCommit] = []
+    for record in messages.split("\x1e"):
+        if not record.strip():
+            continue
+        sha, author, subject, body = record.strip("\n").split("\x1f", 3)
+        pr = SQUASH_PR.search(subject)
+        trailers = KIND_TRAILER.findall(body)
+        c = MainCommit(sha, subject, trailers[-1] if trailers else "tooling", bool(trailers),
+                       bool(trailers and KIND_BY_TRAILER.search(body)), pr.group(1) if pr else "")
+        if not (c.declared or kit or subject.startswith(DEVKIT_SYNC_SUBJECT)
+                or dependency_mod.bot(author)):
+            undecided.append(c)
+        commits.append(c)
+    areas = path_areas(root, [paths.get(c.sha, []) for c in undecided])
+    if areas is None:
+        return None, "bash cannot classify the commits' paths (_paths_lib.sh)"
+    for c, found in zip(undecided, areas, strict=True):
+        c.kind = "product" if found & PRODUCT_AREAS else "tooling"
+    return commits, ""
+
+
+def agent_tokens(ledger: Path) -> dict[tuple[str, str], int]:
+    """(repo, pr) -> the output tokens every agent spent on it, from the agent-cost ledger."""
+    totals: dict[tuple[str, str], int] = {}
+    for row in cost_mod.load_ledger(ledger):
+        if row["output_tokens"].isdigit():
+            key = (row["repo"], row["pr"])
+            totals[key] = totals.get(key, 0) + int(row["output_tokens"])
+    return totals
+
+
+def share(part: int, whole: int) -> int | None:
+    return round(100 * part / whole) if whole else None
+
+
+def output(root: Path, name: str, now: datetime, ledger: Path = AGENT_COST_LEDGER) -> dict:
+    """The repo's OUTPUT document (module docstring); `{"unmeasured": why}` when git or bash
+    cannot say. Tokens are UNMEASURED, never 0, when no ledger row joins a commit's PR."""
+    commits, why = main_commits(root, OUTPUT_DAYS, now)
+    if commits is None:
+        return {"unmeasured": why}
+    counts = {
+        source: {k: sum(1 for c in commits if c.declared == declared and c.kind == k)
+                 for k in ("product", "tooling")}
+        for source, declared in (("declared", True), ("inferred", False))
+    }
+    product = sum(1 for c in commits if c.kind == "product")
+    doc: dict = {
+        "days": OUTPUT_DAYS,
+        "commits": len(commits),
+        "product": product,
+        "share": share(product, len(commits)),
+        "kit": identity.plan_literal(root, "GATE_KIT") == "1",
+        **counts,
+        "judged": {k: sum(1 for c in commits if c.judged and c.kind == k)
+                   for k in ("product", "tooling")},
+    }
+    spent = agent_tokens(ledger) if ledger.is_file() else None
+    joined = [(c, spent[(name, c.pr)]) for c in commits if spent and (name, c.pr) in spent]
+    if spent is None:
+        doc["tokens"] = {"unmeasured": f"no ledger at {ledger} (a devkit checkout's)"}
+    elif not joined:
+        doc["tokens"] = {"unmeasured": f"no {ledger.name} row joins a PR merged in {OUTPUT_DAYS} d"}
+    else:
+        doc["tokens"] = {
+            k: sum(n for c, n in joined if c.kind == k) for k in ("product", "tooling")
+        }
+    return doc
+
+
+def fleet_output(
+    docs: list[dict], floor: float, declared_min: float, expected: list[str] | None
+) -> dict:
+    """The fleet's OUTPUT, every repo summed, kit repos included (that is the point): the judged
+    commits' share (Kind-By) against scorecard.conf's output_product_share_min, UNMEASURED under
+    output_declared_min of them, or while any repo of `expected` (github/repos.json; None: the
+    list is unreadable) is unmeasured: a run over some repos, or a failed clone, must not pass
+    the floor merge_rules.sh gates kit merges on. The inferred commit share and the token share
+    are printed. `verdict` is `status`, its name from before the judged share."""
+    measured = [d["output"] for d in docs if "commits" in d["output"]]
+    seen = {d["repo"].lower() for d in docs if "commits" in d["output"]}
+    missing = (
+        ["github/repos.json (unreadable)"]
+        if expected is None
+        else sorted(n for n in expected if n.lower() not in seen)
+    )
+    commits = sum(o["commits"] for o in measured)
+    product = sum(o["product"] for o in measured)
+    # A doc saved before Kind-By (--table) has no judged commits.
+    judged = [o.get("judged", {"product": 0, "tooling": 0}) for o in measured]
+    judged_product = sum(j["product"] for j in judged)
+    declared = judged_product + sum(j["tooling"] for j in judged)
+    tokens = [o["tokens"] for o in measured if "product" in o["tokens"]]
+    product_tokens = sum(t["product"] for t in tokens)
+    all_tokens = product_tokens + sum(t["tooling"] for t in tokens)
+    status = "PASS" if judged_product * 100 >= floor * declared else "FAIL"
+    if declared < declared_min or missing:
+        status = "UNMEASURED"
+    return {
+        "repos": len(measured),
+        "commits": commits,
+        "product": product,
+        "share": share(product, commits),
+        "tokens": (
+            {
+                "product": product_tokens,
+                "tooling": all_tokens - product_tokens,
+                "share": share(product_tokens, all_tokens),
+            }
+            if all_tokens
+            else {"unmeasured": "no repo's agent tokens are measured"}
+        ),
+        "floor": floor,
+        "declared": declared,
+        "declared_min": declared_min,
+        "judged_product": judged_product,
+        "judged_share": share(judged_product, declared),
+        "missing": missing,
+        "status": status,
+        "verdict": status,
+    }
+
+
+def output_part(out: dict) -> str:
+    """`output product n/m (p%)`, the summary line's OUTPUT part."""
+    if "unmeasured" in out:
+        return "output unmeasured"
+    pct = "-" if out["share"] is None else f"{out['share']}%"
+    return f"output product {out['product']}/{out['commits']} ({pct})"
+
+
+def output_summary(out: dict) -> str:
+    """One repo's OUTPUT on one line, for the fleet report."""
+    if "unmeasured" in out:
+        return f"output UNMEASURED ({out['unmeasured']})"
+    declared = out["declared"]["product"] + out["declared"]["tooling"]
+    judged = sum(out.get("judged", {}).values())
+    return (
+        f"{output_part(out)}, declared {declared} ({judged} judged), "
+        f"inferred {out['commits'] - declared}; "
+        f"{tokens_part(out['tokens'])}"
+    )
+
+
+def tokens_part(tokens: dict) -> str:
+    if "unmeasured" in tokens:
+        return f"agent output tokens UNMEASURED ({tokens['unmeasured']})"
+    total = tokens["product"] + tokens["tooling"]
+    pct = share(tokens["product"], total)
+    return f"agent output tokens product {tokens['product']}/{total} ({pct}%)"
+
+
+def fleet_output_lines(f: dict) -> list[str]:
+    """`OUTPUT fleet: judged product 29% of declared commits (70/240); floor 50% FAIL`, then
+    `OUTPUT fleet inferred (not judged): product 85% of commits (…), 24% of agent output tokens`."""
+    floor = f"floor {f['floor']:g}%"
+    if f["missing"]:
+        judged = (
+            f"OUTPUT fleet: not measured: {', '.join(f['missing'])}; {floor} UNMEASURED "
+            "(the floor reads the whole fleet)"
+        )
+    elif f["status"] == "UNMEASURED":
+        judged = (
+            f"OUTPUT fleet: {f['declared']} declared commits in {OUTPUT_DAYS} d, "
+            f"{f['declared_min']:g} needed; {floor} UNMEASURED"
+        )
+    else:
+        judged = (
+            f"OUTPUT fleet: judged product {f['judged_share']}% of declared commits "
+            f"({f['judged_product']}/{f['declared']}); {floor} {f['status']}"
+        )
+    if not f["commits"]:
+        return [judged, f"OUTPUT fleet inferred (not judged): no commits in {OUTPUT_DAYS} d"]
+    tokens = (
+        f"{f['tokens']['share']}% of agent output tokens"
+        if "share" in f["tokens"]
+        else "agent output tokens UNMEASURED"
+    )
+    return [
+        judged,
+        f"OUTPUT fleet inferred (not judged): product {f['share']}% of commits "
+        f"({f['product']}/{f['commits']}), {tokens}",
+    ]
+
+
+def write_output_cache(state_home: Path, docs: list[dict], fleet: dict, now: datetime) -> Path:
+    """<state>/devkit/scorecard/output.json, the OUTPUT contract a merge rule reads (AGENTS.md)."""
+    path = identity.output_cache(state_home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")  # renamed into place: a reader never sees half a file
+    doc = {
+        "date": now.isoformat(timespec="seconds"),
+        "window_days": OUTPUT_DAYS,
+        "fleet": fleet,
+        "repos": {d["repo"]: d["output"] for d in docs},
+    }
+    tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    tmp.replace(path)
+    return path
+
+
 # ---- the repo document ----------------------------------------------------------------------
 
 
-def repo_doc(repo: Repo, conf: dict[str, float], state_home: Path, now: datetime) -> dict:
+def repo_doc(
+    repo: Repo,
+    conf: dict[str, float],
+    state_home: Path,
+    now: datetime,
+    ledger: Path = AGENT_COST_LEDGER,
+) -> dict:
     """Everything one repo reports; print_repo, --json, --table and --md all render this."""
     wired, measured = wired_share(repo.checks)
     trends = {str(d): trend(repo.root, d, now) for d in TREND_WINDOWS}
@@ -1546,6 +1853,7 @@ def repo_doc(repo: Repo, conf: dict[str, float], state_home: Path, now: datetime
         "trend_moved": sorted(moved),
         "debts": largest_debts(repo.metrics, conf),
         "bite": bite_mod.as_json(bite.repo, bite.days, bite.since, bite.hooks),
+        "output": output(repo.root, repo.name, now, ledger),
     }
 
 
@@ -1562,12 +1870,14 @@ def bite_part(bite: dict) -> str:
 
 
 def summary_line(doc: dict) -> str:
-    """`wired n/m · 7d: a↓ b= c↑(l labelled) · 30d: … · hooks h, fails f`"""
+    """`wired n/m · 7d: a↓ b= c↑(l labelled) · 30d: … · hooks h, fails f
+    · output product n/m (p%)`"""
     w = doc["wired"]
     parts = [
         f"wired {w['wired']}/{w['measured']}",
         *(trend_part(doc, d) for d in TREND_WINDOWS),
         bite_part(doc["bite"]),
+        output_part(doc["output"]),
     ]
     return " · ".join(parts)
 
@@ -1629,10 +1939,32 @@ def repo_lines(doc: dict) -> list[str]:
     if "unmeasured" in hooks:
         bite_rows.append(("unmeasured", "hooks", hooks["unmeasured"]))
     lines += _table(("section", "key", "count"), bite_rows) if bite_rows else ["- no failures"]
-    return lines
+    return lines + ["", *output_lines(doc["output"])]
 
 
-def fleet_markdown(docs: list[dict]) -> str:
+def output_lines(out: dict) -> list[str]:
+    """The repo's OUTPUT readout: printed, never judged (a finished fork may be all tooling)."""
+    head = f"OUTPUT ({OUTPUT_DAYS} d of main, first parent; printed, never judged)"
+    if "unmeasured" in out:
+        return [head, f"- UNMEASURED: {out['unmeasured']}"]
+    d, i = out["declared"], out["inferred"]
+    j = out.get("judged", {"product": 0, "tooling": 0})  # a doc saved before Kind-By has none
+    return [
+        head,
+        f"- commits: {output_part(out).removeprefix('output ')}"
+        + (" (a kit, GATE_KIT=1: every commit is tooling)" if out["kit"] else ""),
+        f"- declared (Kind trailer): product {d['product']}, tooling {d['tooling']}; "
+        f"judged (Kind-By, what the fleet floor counts): product {j['product']}, "
+        f"tooling {j['tooling']}",
+        f"- inferred (no trailer: kit, sync, bot, else paths): product {i['product']}, "
+        f"tooling {i['tooling']}",
+        f"- {tokens_part(out['tokens'])}",
+    ]
+
+
+def fleet_markdown(
+    docs: list[dict], floor: float, declared_min: float, expected: list[str] | None
+) -> str:
     lines = [
         "# Fleet scorecard",
         "",
@@ -1642,6 +1974,7 @@ def fleet_markdown(docs: list[dict]) -> str:
     ]
     width = max((len(d["repo"]) for d in docs), default=0)
     lines += [f"{d['repo']:<{width}}  {summary_line(d)}" for d in docs]
+    lines += ["", *fleet_output_lines(fleet_output(docs, floor, declared_min, expected))]
     lines += ["```", "", "## WIRED: not wired, by mechanism", ""]
     missing: dict[str, list[str]] = {}
     for d in docs:
@@ -1664,6 +1997,8 @@ def fleet_markdown(docs: list[dict]) -> str:
         + (f"labelled ({k['labelled']})" if k["labelled"] else "UNLABELLED")
         for r, k in worse
     ] or ["- none"]
+    lines += ["", f"## OUTPUT: product share by repo ({OUTPUT_DAYS} d; printed, never judged)", ""]
+    lines += [f"- {d['repo']}: {output_summary(d['output'])}" for d in docs] or ["- none"]
     lines += ["", "## Largest debts (a signal, no verdict)", ""]
     lines += [
         f"- {d['repo']}: "
@@ -2010,6 +2345,7 @@ def main() -> int:
     )
     args = ap.parse_args()
     conf = load_conf(Path(args.conf))
+    state_home = Path(args.state_home) if args.state_home else identity.state_home()
     if args.table:
         if not args.roots:
             ap.error("--table needs the per-repo JSON files")
@@ -2020,8 +2356,12 @@ def main() -> int:
             except (OSError, ValueError) as e:
                 ap.error(f"{f}: {e}")
             docs.extend(doc if isinstance(doc, list) else [doc])  # a --fleet --json file is a list
-        return emit_fleet(docs, args.md)
-    state_home = Path(args.state_home) if args.state_home else identity.state_home()
+        for doc in docs:
+            doc.setdefault("output", {"unmeasured": "saved before the OUTPUT readout"})
+        return emit_fleet(
+            docs, args.md, conf["output_product_share_min"], conf["output_declared_min"],
+            fleet_names(state_home),
+        )
     if args.mode:
         if args.fleet or len(args.roots) != 1:
             ap.error("--mode takes one repo root")
@@ -2045,13 +2385,31 @@ def main() -> int:
             json.dumps(docs if args.fleet else docs[0], indent=2, ensure_ascii=False) + "\n"
         )
     if args.fleet:
-        return emit_fleet(docs, args.md)
+        floor, declared_min = conf["output_product_share_min"], conf["output_declared_min"]
+        expected = fleet_names(state_home)
+        fleet = fleet_output(docs, floor, declared_min, expected)
+        cache = write_output_cache(state_home, docs, fleet, now)
+        print(f"scorecard: OUTPUT written to {cache}", file=sys.stderr)
+        return emit_fleet(docs, args.md, floor, declared_min, expected)
     print("\n".join(repo_lines(docs[0])))
     return 0
 
 
-def emit_fleet(docs: list[dict], md: str | None) -> int:
-    text = fleet_markdown(docs)
+def fleet_names(state_home: Path) -> list[str] | None:
+    """github/repos.json's repo names, which the OUTPUT floor must all measure; None, with one
+    stderr line, when it cannot be read."""
+    fleet, why = fleet_repos(DEVKIT, state_home)
+    if fleet is None:
+        print(f"scorecard: OUTPUT cannot tell the fleet's repos: {why}", file=sys.stderr)
+        return None
+    return fleet[1]
+
+
+def emit_fleet(
+    docs: list[dict], md: str | None, floor: float, declared_min: float,
+    expected: list[str] | None,
+) -> int:
+    text = fleet_markdown(docs, floor, declared_min, expected)
     print(text, end="")
     if md:
         Path(md).write_text(text)

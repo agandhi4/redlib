@@ -173,10 +173,14 @@ run_make() { devkit_with_timeout "$JOB_SECS" _make_once "$@"; }
 # reads as the box too; the check then stays exit 2 run after run, which the publisher's
 # dead-man (publisher_deadman.sh) reports within hours, so keep each ERE an OS or daemon message,
 # or a build script's own report that the box lacks a host program or library (cmake-rs, cc-rs,
-# clang-sys, pkg-config-rs): never a shell's `command not found`, which a recipe's typo also prints.
+# clang-sys, pkg-config-rs; uv's hint when an sdist's C build lacks a header): never a shell's
+# `command not found`, which a recipe's typo also prints.
+# uv wraps its hint at 80 columns, so its ERE is the hint's first words only. Gotcha: uv hints the
+# same for a repo's own C extension (`<name>@<version>` either way), so a header missing from the
+# repo's source reads as the box too; no fleet repo builds one (2026-11-05, devkit #403).
 # shellcheck disable=SC2016  # the backticks are cmake-rs's literal text, not a substitution
 readonly ENV_CAUSES='disk full: No space left on device|Disk quota exceeded
-a host build tool missing: [Ii]s `[^`]+` (not )?installed\?|[Ff]ailed to find tool|Unable to find libclang|The pkg-config command could not be found
+a host build tool missing: [Ii]s `[^`]+` (not )?installed\?|[Ff]ailed to find tool|Unable to find libclang|The pkg-config command could not be found|This error likely indicates that you need to install
 docker unreachable: Cannot connect to the Docker daemon|error during connect:|docker daemon is not reachable|docker daemon did not answer
 no network: Could not resolve host|Temporary failure in name resolution|Network is unreachable|getaddrinfo (ENOTFOUND|EAI_AGAIN)'
 env_cause() { # <log>: prints the cause and exits 0 when the log shows one

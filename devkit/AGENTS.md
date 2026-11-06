@@ -42,6 +42,20 @@ is README.md "Architecture". Invariants of the design:
   the tree filtered to `VENDOR_PATHS`. A new file consumers run must sit under a listed path.
   The lint bases' exports are APIs too (`lint/exports.txt`): one leaves only after 30 days marked
   deprecated there, since repo-owned configs import them and devkit-sync cannot edit those.
+  Every squash body's `Kind: product|tooling` and `Kind-By: label|kit|sync|bot` trailers
+  (merge_rules.sh) are one too, and so is `<state>/devkit/scorecard/output.json`, which every
+  `scorecard.py --fleet` writes for the floor gate to read: `{"date", "window_days": 30,
+  "fleet": {"repos", "commits", "product", "share", "tokens": {"product", "tooling", "share"} |
+  {"unmeasured"}, "floor", "declared", "declared_min", "judged_product", "judged_share",
+  "missing", "status": PASS|FAIL|UNMEASURED, "verdict" (= status)}, "repos": {<name>: {"days", "commits",
+  "product", "share", "kit", "declared"/"inferred"/"judged": {"product", "tooling"}, "tokens"} |
+  {"unmeasured"}}}`. Add fields, never rename one.
+- A kind is declared or deterministic, never guessed (2026-11-05): `make merge` refuses a non-kit
+  PR that is no devkit sync or bot PR and has no `kind/*` label, and `make pr` wants `KIND=`.
+  Only `Kind-By:` commits are judged. Below the fleet's product floor a kit (`GATE_KIT=1`)
+  merges only a sync, a bot's PR, `Unblocks: <owner/repo>#<n>` (an open product issue) or
+  `Fixes: #<n>` (an open `bug` here); a stale (> 7 d) or missing cache is UNMEASURED, which
+  waits too. An agent never uses `OWNER=` to pass it.
 - The skeleton owns mechanics; the repo's `scripts/ci/gate_plan.sh` declares its jobs. Which
   paths run which group is devkit's (`bin/_paths_lib.sh`: one table for hooks and gate,
   `devkit_default_gate_plan`); a repo adds only its own rules in `gate_plan_extra`. A new
@@ -87,10 +101,11 @@ is README.md "Architecture". Invariants of the design:
   checks main on a schedule uses the same lib.
 - A problem with the box never reads as a bad commit: docker down, or a job failing its run and
   retry with a cause in check_tree's one `ENV_CAUSES` list (an OS or daemon message, or a build
-  script naming a host tool the box lacks: cmake, libclang), is exit 2 and records nothing. A red
-  record expires after 24 h (`publish.sh --recheck <sha>` sooner), a green commit closes
-  `main-red`, a job is a FAIL after `CHECK_JOB_SECONDS` (1800), and the Mac's hourly
-  `publisher_deadman.sh` (GitHub only) files `publisher stalled` when linux-box stops publishing.
+  script naming a host tool or library the box lacks: cmake, libclang, an sdist's C headers), is
+  exit 2 and records nothing. A red record expires after 24 h (`publish.sh --recheck <sha>` sooner),
+  a green commit closes `main-red`, a job is a FAIL after `CHECK_JOB_SECONDS` (1800), and the Mac's
+  hourly `publisher_deadman.sh` (GitHub only) files `publisher stalled` when linux-box stops
+  publishing.
 - Every main the publisher does not prove is proven on the Mac: `bin/main_check.sh` (one
   LaunchAgent, each repo once per cadence window, in its own clone of the repo, never the
   checkout lanes share) runs check_tree at a new main of every plan but
@@ -99,6 +114,12 @@ is README.md "Architecture". Invariants of the design:
   and closes only its own `main-red` issues (`main is red on the Mac at …`, `_issue_lib.sh`).
   A plan's `DEPLOY_BRANCH=<branch>` is fast-forwarded to each green main, never forced: the one
   way a host that deploys a branch (rollcall's Vercel production) ships only checked commits.
+- The nightly devkit sync (`bin/dependency_merge.sh`) is weekly: a repo syncs only once its
+  `.devkit-rev` commit is `SYNC_MIN_AGE_DAYS` (7) older than the green target by commit date, or
+  the oldest pending devkit commit is that old by the run's clock.
+  An urgent devkit fix puts a line `Devkit-Sync: now` in its PR body (the squash commit message)
+  to sync the fleet that night; never a line of its own otherwise. `make devkit-sync` by hand
+  syncs any time.
 - A launchd job runs devkit main's copy of itself: its plist starts the job dir's `launcher.sh`
   (`bin/job_launcher.sh`, installed by `bin/_launchd_job_lib.sh`), never a path in a checkout, so
   a devkit merge reaches the next run with no fast-forward. A new job goes through the same lib.
