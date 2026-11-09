@@ -285,3 +285,8 @@ Consequence: `make gate` remains as devkit's stub. The plan file keeps its name,
 Why: the OSV collector listed 16 (1 high): pulldown-cmark 0.13.5 RUSTSEC-2026-0433 (quadratic nested wikilinks; unreachable, `model.rs` builds `Parser::new` without `ENABLE_WIKILINKS`), zstd 0.13.3 (0391) and zstd-safe 7.2.4 (0395–0406, 12), plus bincode and unsafe-libyaml.
 Decision: lockfile only: pulldown-cmark 0.13.6, zstd 0.13.4, zstd-safe 7.4.0. The fixed zstd stays inside wreq's `^0.13.3`, so the 2026-10-29 "waits on wreq" no longer holds. Cargo.toml is untouched, as upstream's is.
 Consequence: 16 → 2. Left, each a replacement: bincode (RUSTSEC-2025-0141, #82) and serde_yaml's unsafe-libyaml (RUSTSEC-2024-0449, #83). Recheck at the monthly upstream sync whether upstream replaced either.
+
+## 2026-11-09 — .claude/settings.json denies the five tools no lane can use
+Why: claude-kit measured (2026-11-09) that a session's first API call is re-read on every later call, and that the Artifact, ArtifactComments and ArtifactData schemas cost 11.4k tokens, SendFeedback 2.0k and AskUserQuestion 1.7k of it; a whole-tool `permissions.deny` drops the schema from every session and lane in the repo.
+Decision: the deny list follows claude-kit's `templates/project-settings.json` (claude-kit #67). No plugin skill or agent uses these tools, and an unattended lane cannot answer a question or publish a page.
+Consequence: interactive sessions here lose the artifact publish flow and the question prompt; removing a line from this file brings one back (deny beats allow, so `settings.local.json` cannot).

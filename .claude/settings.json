@@ -25,6 +25,6 @@
       "Bash(make scorecard)",
       "Bash(make help)"
     ],
-    "deny": ["Read(.env*)"]
+    "deny": ["Read(.env*)", "Artifact", "ArtifactComments", "ArtifactData", "AskUserQuestion", "SendFeedback"]
   }
 }
