@@ -5,6 +5,7 @@ Personal **hard fork** of [redlib](https://github.com/redlib-org/redlib) (forked
 ## Stack
 
 Conventions: architecture.md, delivery.md, observability.md, backend.md
+Capabilities: pwa, scheduled-jobs
 
 Rust + hyper + Askama (server-rendered HTML), vanilla CSS/JS. No frontend framework, no build step for assets.
 
