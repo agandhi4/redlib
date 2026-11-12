@@ -17,6 +17,8 @@
 # "Startup order"). ci-smoke runs the image's binary offline and asserts it and the OCI label
 # report gate-$PR (scripts/ci/smoke_image.sh); devkit/bin/publish.sh runs the same two targets before a push.
 GATE_SLUG=kashhq/redlib
+# A public fork: devkit-check refuses homelab topology anywhere in the tree (check_public_topology).
+GATE_PUBLIC=1
 
 IMAGE="redlib:gate-$PR"
 

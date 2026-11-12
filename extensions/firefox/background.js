@@ -1,11 +1,13 @@
 let enabled = true;
-let targetHost = "reddit.box";
+// Empty until the owner sets it in the popup: no default instance ships in a public add-on.
+let targetHost = "";
 let redirectCount = 0;
 
 // Load saved settings
 browser.storage.local.get(["enabled", "targetHost"]).then((settings) => {
   if (settings.enabled !== undefined) enabled = settings.enabled;
   if (settings.targetHost) targetHost = settings.targetHost;
+  if (!targetHost) console.info("redlib-redirect: no target host set; nothing redirects until one is saved in the popup");
   updateBadge();
 });
 
@@ -37,7 +39,8 @@ browser.runtime.onMessage.addListener((msg) => {
 
 browser.webRequest.onBeforeRequest.addListener(
   (details) => {
-    if (!enabled) return;
+    // Short-circuits before the count: with no host the redirect URL would be `http:///path`.
+    if (!enabled || !targetHost) return;
 
     const url = new URL(details.url);
 

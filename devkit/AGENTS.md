@@ -10,6 +10,8 @@ must read; guards in ci-quick (seconds) over gate jobs (minutes). A mechanism th
 agent more than it catches is overhead, not standardization.
 
 ## Stack
+Capabilities: none
+
 - Portable shell: macOS bash 3.2 + GNU bash; BSD + GNU coreutils. Empty arrays under `set -u`
   use `${a[@]+"${a[@]}"}`. No `readarray`, no `declare -A`, no GNU-only `sed -i` without `''`.
 - `shellcheck -s bash` (0.11) clean; `bats tests/` green before any push. CI runs both. On a
@@ -21,11 +23,12 @@ agent more than it catches is overhead, not standardization.
   lexer; `--fix` appends the handler).
 - A bats file's git fixture (bare origin, clones, commits, fakes), and a `devkit new` scaffold,
   is built once in `setup_file` and copied per test (`tests/fixture_template.bash`): built per
-  test it was a fifth of the unit tier's CPU. Every `tests/*.bats` is in `tests/shard_costs.tsv`,
-  at its share: `tests/shards.sh` fails the run otherwise (`make shard-costs`, on a quiet box).
-  A share is judged only on an uncontended run (no pool units held by others, the load less the
-  run's own running shards within capacity, at every file boundary; one `shards: drift …` line
-  says which it was); beside other work drift is a `shards: note:`, never a failure. A test steps
+  test it was a fifth of the unit tier's CPU. Every `tests/*.bats` is in `tests/shard_costs.tsv`
+  and every row names a file that exists: `tests/shards.sh` fails the run otherwise (`make
+  shard-costs`, on a quiet box). A file that outgrew its share is a `shards: note: drift: …`,
+  never a failure (owner, 2026-11-08): refresh the table when it shows on an uncontended run (no
+  pool units held by others, the load less the run's own running shards within capacity, at
+  every file boundary; one `shards: drift …` line says which it was). A test steps
   a polling loop by hand (a tick command, a faked `sleep`), never by sleeping and counting lines.
   A test never reads the box's live load or sizes a wait by it: seconds a budget, watchdog or
   queue judges come from `devkit_now`'s clock (`DEVKIT_CLOCK_CMD`, `tests/clock_helpers.bash`),
@@ -104,7 +107,7 @@ is README.md "Architecture". Invariants of the design:
   script naming a host tool or library the box lacks: cmake, libclang, an sdist's C headers), is
   exit 2 and records nothing. A red record expires after 24 h (`publish.sh --recheck <sha>` sooner),
   a green commit closes `main-red`, a job is a FAIL after `CHECK_JOB_SECONDS` (1800), and the Mac's
-  hourly `publisher_deadman.sh` (GitHub only) files `publisher stalled` when linux-box stops
+  hourly `publisher_deadman.sh` (GitHub only) files `publisher stalled` when the publisher host stops
   publishing.
 - Every main the publisher does not prove is proven on the Mac: `bin/main_check.sh` (one
   LaunchAgent, each repo once per cadence window, in its own clone of the repo, never the
@@ -118,13 +121,19 @@ is README.md "Architecture". Invariants of the design:
   `.devkit-rev` commit is `SYNC_MIN_AGE_DAYS` (7) older than the green target by commit date, or
   the oldest pending devkit commit is that old by the run's clock.
   An urgent devkit fix puts a line `Devkit-Sync: now` in its PR body (the squash commit message)
-  to sync the fleet that night; never a line of its own otherwise. `make devkit-sync` by hand
-  syncs any time.
+  to sync the fleet that night; never a line of its own otherwise. A consumer's `devkit-sync`
+  target, run by hand, syncs any time.
 - A launchd job runs devkit main's copy of itself: its plist starts the job dir's `launcher.sh`
   (`bin/job_launcher.sh`, installed by `bin/_launchd_job_lib.sh`), never a path in a checkout, so
   a devkit merge reaches the next run with no fast-forward. A new job goes through the same lib.
 - `bin/gate.sh` is the retired gate's stub (2026-11-02): one line naming `make review` and
   `make merge`, exit 0, so a consumer's old `gate` target never fails. Never grow it back.
+- The kit names roles, never hosts (owner 2026-11-12): its tree is vendored into public repos, so
+  "the publisher host", "the NAS", "the error tracker"; the real names and addresses live in the
+  homelab repo. devkit-check's topology check fails a hit here (self-check, docs-check) and in any
+  plan with `GATE_PUBLIC=1`; a line that must show one ends with a `topology example` comment.
+  Its pattern list is generic shapes only (devkit #478): never add a fleet name, address or
+  domain to it, since the script ships in the public repos it guards and scans itself.
 - Fail loudly on a missing tool (`flock`, `gh`) with the install hint; never degrade silently.
 - Time budgets (a job's, a tier's) report and never fail (owner 2026-10-29); correctness (tests, floors,
   ratchets) still fails. Never make a budget fail a PR again.
@@ -149,7 +158,7 @@ make merge PR=<n>              # squash-merge once the review rounds allow it (D
 bin/docs_check.sh --report .   # the docs numbers behind the diet rules; --fix does the mechanical moves
 python3 -I bin/bite.py --days 30 <repo>   # BITE: hook runs and fails by step
 make scorecard REPOS='~/projects/solo/finplat …'   # the fleet scorecard (bin/scorecard.py)
-make agent-cost                # append this project's merged-PR costs to docs/agent-cost.tsv (bin/agent_cost.py)
+make agent-cost                # append merged-PR costs to docs/agent-cost.tsv and session openings to docs/fixed-context.tsv (bin/agent_cost.py)
 ```
 
 ## Workflow

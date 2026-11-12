@@ -3,7 +3,7 @@ name: Quick check
 # Copy to <repo>/.github/workflows/quick-check.yml. The job body lives in devkit's reusable
 # workflow; this file owns only WHEN it runs. Requires devkit's Actions access set to
 # "Accessible from repositories owned by the user" (see the header of
-# agandhi4/devkit/.github/workflows/quick-check.yml).
+# kashhq/devkit/.github/workflows/quick-check.yml).
 #
 # No pre-merge gate (make merge decides on review rounds); this is the ~1 billed minute of
 # lint/format/types on PRs.
@@ -29,7 +29,7 @@ permissions:
 jobs:
   quick-check:
     if: github.event.pull_request.draft == false
-    uses: agandhi4/devkit/.github/workflows/quick-check.yml@main
+    uses: kashhq/devkit/.github/workflows/quick-check.yml@main
     # Only the inputs that differ from the defaults (.nvmrc, ci-quick, repo root), e.g.:
     # with:
     #   pnpm-package-json: frontend/package.json

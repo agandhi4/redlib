@@ -7,7 +7,9 @@
 #
 #   DEVKIT_CHECKOUT_PARENTS
 #       Where this Mac keeps the fleet's checkouts: the directories devkit_checkouts scans when
-#       a job is given none.
+#       a job is given none. ~/.dotfiles is a checkout itself, not a parent: its stowed symlinks
+#       pin it to that path, so it cannot move under ~/projects (2026-11-09: it sat 132 devkit
+#       commits stale because no scan reached it).
 #   devkit_checkouts <dir>...
 #       Print each git checkout, one per line: <dir> itself when it is one (homelab), else every
 #       direct child that is one, in name order. A missing <dir> prints nothing.
@@ -27,7 +29,7 @@
 #       or a local path (the last two components). dependency_merge.sh reads DEVKIT_URL's with it.
 
 # shellcheck disable=SC2034  # read by the sourcing job
-DEVKIT_CHECKOUT_PARENTS=("$HOME/projects/solo" "$HOME/projects/homelab")
+DEVKIT_CHECKOUT_PARENTS=("$HOME/projects/solo" "$HOME/projects/homelab" "$HOME/.dotfiles")
 
 devkit_checkouts() {
   local dir child

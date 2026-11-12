@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Schedule (or remove) the nightly dependency merge on this Mac: fills devkit main's
-# templates/launchd/com.agandhi4.devkit.dependency-merge.plist and bootstraps it as a LaunchAgent.
+# templates/launchd/com.kashhq.devkit.dependency-merge.plist and bootstraps it as a LaunchAgent.
 #
 # Usage: bin/install_dependency_merge.sh               install, or replace the installed job
 #        bin/install_dependency_merge.sh --uninstall   boot it out and delete its plist
@@ -16,7 +16,7 @@
 # Exit 0 done, 1 launchctl or plutil failed, 2 usage, a bad path or devkit's main unreadable.
 set -uo pipefail
 
-readonly LABEL=com.agandhi4.devkit.dependency-merge
+readonly LABEL=com.kashhq.devkit.dependency-merge
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P) || exit 2
 # shellcheck source=bin/_toolchain_lib.sh
 . "$HERE/_toolchain_lib.sh"
@@ -40,11 +40,7 @@ resolve_toolchain() {
 }
 
 install() {
-  local plist
-  launchd_job_stage "$LABEL" dependency-merge
-  plist=$JOB_DIR/filled.plist
-  launchd_job_fill "$JOB_TEMPLATE" "$plist" -e "s|__TOOLCHAIN_BIN__|$TOOLCHAIN_BIN|g"
-  launchd_job_load "$LABEL" "$plist"
+  launchd_job_install "$LABEL" dependency-merge -e "s|__TOOLCHAIN_BIN__|$TOOLCHAIN_BIN|g"
   echo "install_dependency_merge: $LABEL runs devkit main's bin/dependency_merge.sh nightly at 02:30 over every checkout that vendors devkit under ${DEVKIT_CHECKOUT_PARENTS[*]}, found at each run (python $DEVKIT_PYTHON_VERSION, $DEVKIT_PYTHON)"
   [ -z "$DEVKIT_TOOLCHAIN_MISSING" ] \
     || echo "install_dependency_merge: WARNING: $DEVKIT_TOOLCHAIN_ERROR; a repo declaring it (a uv.lock) refuses to gate" >&2

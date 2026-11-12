@@ -1,10 +1,10 @@
 # shellcheck shell=bash
 # How often main is checked, per repo, and in which minute. Sourced; defines functions and runs
 # nothing. Callers source _load_lib.sh (devkit_epoch) and _gate_env.sh (gate_plan_literal) first.
-# Used by: publish.sh (linux-box's check_tree runs) and main_check.sh (the Mac's, its own stamp
+# Used by: publish.sh (the publisher host's check_tree runs) and main_check.sh (the Mac's, its own stamp
 # per repo); every scheduled check of main goes through it.
 #
-# Why (owner 2026-11-02): linux-box's publisher ticks every 5 min for every repo at once, and each
+# Why (owner 2026-11-02): the publisher host ticks every 5 min for every repo at once, and each
 # tick after a merge started a whole check_tree run, so fast merges meant a full check per merge
 # with every repo's starting together. Now a repo's checks start at most once per window of
 # MAIN_CHECK_MINUTES (a literal plan line, default 180: owner, 3 h), and its windows open at its

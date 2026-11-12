@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# The Mac's proof of main for every repo linux-box's publisher does not prove: a plan whose
+# The Mac's proof of main for every repo the publisher host does not prove: a plan whose
 # DEPLOY_KINDS (README "Deploy kinds") names anything but image alone, so ios and mac (the Xcode
-# jobs linux-box skips), hosted (rollcall on Vercel, homelab's deploy.sh: their hosts apply main
+# jobs the publisher host skips), hosted (rollcall on Vercel, homelab's deploy.sh: their hosts apply main
 # unchecked) and library and tooling (devkit, claude-kit: nothing deploys them, yet every repo
-# syncs devkit's main), and a plan that declares no kind. An image-only plan is linux-box's:
+# syncs devkit's main), and a plan that declares no kind. An image-only plan is the publisher host's:
 # publish.sh already runs every job of it (owner 2026-11-02: every repo's main is proven). Run by
-# the LaunchAgent com.agandhi4.devkit.main-check every 10 min (bin/install_main_check.sh), from
+# the LaunchAgent com.kashhq.devkit.main-check every 10 min (bin/install_main_check.sh), from
 # devkit main's copy. It deploys nothing itself; a plan's DEPLOY_BRANCH is how a host that deploys
 # a branch (rollcall's Vercel production) gets only checked commits (below).
 #
 # Usage: bin/main_check.sh [--root <dir>]... [--repos a,b]
 #   --root   where the checkouts live, repeatable (default _checkouts_lib.sh's
-#            DEVKIT_CHECKOUT_PARENTS: ~/projects/solo and ~/projects/homelab): every checkout
+#            DEVKIT_CHECKOUT_PARENTS: ~/projects/solo, ~/projects/homelab and ~/.dotfiles): every checkout
 #            devkit_checkouts finds there, the nightly dependency merge's scan too
 #   --repos  only the checkouts with these names
 # One checkout per origin slug, the first by name (_checkouts_lib.sh devkit_claim_checkout); a
@@ -81,7 +81,7 @@ for root in ${ROOTS[@]+"${ROOTS[@]}"}; do
   [ -d "$root" ] || { echo "main_check: no directory $root" >&2; exit 2; }
 done
 [ ${#ROOTS[@]} -gt 0 ] || ROOTS=("${DEVKIT_CHECKOUT_PARENTS[@]}")
-[ "$(uname -s)" = Darwin ] || { echo "main_check: this host is $(uname -s); the Mac's main check runs only on the Mac (linux-box's is publish.sh)" >&2; exit 2; }
+[ "$(uname -s)" = Darwin ] || { echo "main_check: this host is $(uname -s); the Mac's main check runs only on the Mac (the publisher host's is publish.sh)" >&2; exit 2; }
 command -v flock >/dev/null || { echo "main_check: flock not found (brew install flock)" >&2; exit 2; }
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}/devkit-main-check
 mkdir -p "$STATE" || exit 2
@@ -96,7 +96,7 @@ fi
 devkit_stay_awake
 CHECKED=0 RED=0 ERRORS=0 SAID='' MAIN_SHA=''
 
-# mac_proves <plan>: false when the plan's DEPLOY_KINDS is image alone, which linux-box's
+# mac_proves <plan>: false when the plan's DEPLOY_KINDS is image alone, which the publisher host's
 # publisher proves (every job of the plan, before latest moves); true for any other kind, a mix
 # with image (kitchen's image,ios: the Xcode jobs need the Mac, and check_tree runs a whole plan),
 # or none declared (nothing else would check it; the scorecard's deploy_kinds fails it).

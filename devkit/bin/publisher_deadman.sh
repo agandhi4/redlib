@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The publisher's dead-man switch: run hourly on the Mac (com.agandhi4.devkit.publisher-deadman,
-# bin/install_publisher_deadman.sh). linux-box down, its timers stopped or a publish wedged is the
-# failure it exists to catch, so it reads GitHub alone and never reaches for linux-box.
+# The publisher's dead-man switch: run hourly on the Mac (com.kashhq.devkit.publisher-deadman,
+# bin/install_publisher_deadman.sh). The publisher host down, its timers stopped or a publish wedged is the
+# failure it exists to catch, so it reads GitHub alone and never reaches for the publisher host.
 #
 # Usage: bin/publisher_deadman.sh [--repos a,b] [--hours <n>]
 #   --repos  repos.json keys (default: all); a repo whose main plan has no PUBLISH_IMAGE is skipped.
@@ -126,7 +126,7 @@ for repo in $REPOS; do judge "$repo" || ERRORS=$((ERRORS + 1)); done
 if [ -n "$REPOS_ARG" ]; then
   said="left as is: --repos reads part of the fleet"
 elif [ -n "$STALLED" ]; then
-  said=$(devkit_issue_upsert "$OWNER/devkit" publisher-stalled "$TITLE" "publisher_deadman.sh on $(hostname), $(date -u +%Y-%m-%dT%H:%MZ): nothing was published for over ${HOURS}h past their check windows while these repos had image inputs to publish. The publisher (devkit-publish@<repo>.timer on linux-box, bin/publish.sh) is down, stopped or stuck: check \`systemctl list-timers 'devkit-publish@*'\` and \`journalctl -u 'devkit-publish@*'\` there.
+  said=$(devkit_issue_upsert "$OWNER/devkit" publisher-stalled "$TITLE" "publisher_deadman.sh on $(hostname), $(date -u +%Y-%m-%dT%H:%MZ): nothing was published for over ${HOURS}h past their check windows while these repos had image inputs to publish. The publisher (devkit-publish@<repo>.timer on the publisher host, bin/publish.sh) is down, stopped or stuck: check \`systemctl list-timers 'devkit-publish@*'\` and \`journalctl -u 'devkit-publish@*'\` there.
 
 $STALLED
 This issue closes itself once every repo is published or owed nothing.") || said="gh failed (above); not filed"

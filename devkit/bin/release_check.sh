@@ -21,7 +21,7 @@
 # >= 1024, and every http(s) URL in its HEALTHCHECK must name one (no port means 80/443).
 # Why: on 2026-10-13 Orbit's image ran nginx as uid 10001 on :80 and was down 16 h. Docker
 # 20.10+ sets net.ipv4.ip_unprivileged_port_start=0 inside containers, so the Mac gate's smoke
-# bound :80 fine; the Synology NAS's 4.4 kernel has no such namespaced sysctl and refused it.
+# bound :80 fine; a NAS with a 4.4 kernel has no such namespaced sysctl and refused it.
 # The fix is to listen on an unprivileged port, never `setcap cap_net_bind_service`: the deploy
 # runs with no-new-privileges, which disables file capabilities. Ports given as variables, and
 # HEALTHCHECKs that run a script instead of naming a URL, cannot be judged and pass.

@@ -37,8 +37,8 @@ assert _spec is not None and _spec.loader is not None
 identity = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(identity)
 
-PRESET = "github>agandhi4/devkit//renovate/default"
-DIGEST_PRESET = "github>agandhi4/devkit//renovate/automerge-digest"
+PRESET = "github>kashhq/devkit//renovate/default"
+DIGEST_PRESET = "github>kashhq/devkit//renovate/automerge-digest"
 PLAN_VAR = "GATE_RENOVATE_AUTOMERGE"
 # Renovate's own search order for a repo config. renovate.json5 has no stdlib parser, so it is
 # named as a problem rather than read.
