@@ -69,6 +69,12 @@
 #      docs-check runs offline and in Actions, so it reads no vocabulary; the names are validated
 #      against dotfiles' conventions/decisions/capabilities.md by the decision-cascade filer (not
 #      yet built), and the vocabulary has one home. A missing `## Stack` is rule 14's.
+#   18. In a public repo (scripts/ci/gate_plan.sh's literal `GATE_PUBLIC=1` line) no tracked file
+#      outside devkit/, docs/reports/ and docs/audits/ names homelab topology (_topology_lib.sh,
+#      the rules devkit-check holds the tree to), one failure per line. devkit-check runs the same
+#      check, but a docs-only commit runs docs-check alone and a docs-only PR owes no review, so
+#      without this a doc's hostname reached main unchecked (closet #482). It fails from the start,
+#      as devkit-check's does. A devkit checkout's own docs-check runs devkit-check beside it.
 #   Rules 5-10 and 12-17 report through docs_rule: a warning before their FAILS_FROM date below, a
 #   failure on and after it, so no consumer's ci-quick breaks on the sync that introduces a rule and
 #   the flip needs no second PR. DOCS_CHECK_TODAY=YYYY-MM-DD overrides today (tests).
@@ -106,6 +112,10 @@ set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_makefile_lib.sh"
 # shellcheck source=bin/_gitattributes_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_gitattributes_lib.sh"
+# shellcheck source=bin/_gate_env.sh  # gate_plan_literal: GATE_PUBLIC
+. "$(dirname "${BASH_SOURCE[0]}")/_gate_env.sh"
+# shellcheck source=bin/_topology_lib.sh  # topology_hits (rule 18)
+. "$(dirname "${BASH_SOURCE[0]}")/_topology_lib.sh"
 
 usage() { echo "usage: docs_check.sh [--report|--fix] [repo-root]" >&2; exit 2; }
 REPORT=0
@@ -666,6 +676,17 @@ rule_capabilities() {
   fi
 }
 
+# ---- 18. a public repo names no homelab topology ---------------------------------------------
+rule_public_topology() {
+  local hits hit
+  [ -f scripts/ci/gate_plan.sh ] && [ "$(gate_plan_literal scripts/ci/gate_plan.sh GATE_PUBLIC)" = 1 ] || return 0
+  hits=$(topology_hits docs-check 0) || { docs_fail "the topology check could not run (above)"; return 0; }
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    docs_fail "homelab topology in a public tree: $hit (it lives in the homelab repo; name the role, or end a fixture's line with a topology example comment)"
+  done <<<"$hits"
+}
+
 # Rules run in the header's order (11, the repo extras, last): their messages print in it.
 rule_pair_shape
 rule_size_caps
@@ -684,6 +705,7 @@ rule_agents_sections
 rule_docs_set
 rule_contributing
 rule_capabilities
+rule_public_topology
 
 # ---- 11. repo extras -------------------------------------------------------------------------
 if [ -f "$EXTRAS" ]; then
