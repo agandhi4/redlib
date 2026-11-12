@@ -192,10 +192,10 @@ One Rust binary (hyper server, `src/main.rs` router) that proxies Reddit's JSON 
 
 ## Deployment
 
-This fork runs one instance (`reddit.box`), so it carries one deployment path; upstream's recipes (Docker Compose and CLI, Podman Quadlets, systemd, launchd, Replit/Heroku, NetBSD) were removed with the files they used. See [upstream's README](https://github.com/redlib-org/redlib#deployment) for those.
+This fork runs one instance, so it carries one deployment path; upstream's recipes (Docker Compose and CLI, Podman Quadlets, systemd, launchd, Replit/Heroku, NetBSD) were removed with the files they used. See [upstream's README](https://github.com/redlib-org/redlib#deployment) for those.
 
-- **Image:** linux-box's `devkit-publish@redlib.timer` (homelab `hosts/linux-box/publish.list`) runs `make publish` (`devkit/bin/publish.sh`): at most once per 3 h window it runs every plan job at the new `main` (`devkit/bin/check_tree.sh`); a red `main` files a `main-red` issue and ships nothing. When `main` is green and changed an image input, it builds `ghcr.io/kashhq/redlib` at `main`, runs `make ci-smoke` on it, pushes `sha-<7>` and `latest`, and creates the git tag `ship-<YYYY-MM-DD>-<sha7>`. Nothing is published from a Mac or by hand. The bare `<sha7>` is the image's `APP_VERSION`, its OCI version label and the version in the page footer.
-- **Stack:** the compose file lives in the homelab repo (`stacks/redlib/docker-compose.yml`); its hourly `deploy.sh update` timer pulls `latest`. Instance settings are env vars there.
+- **Image:** the publisher host's `devkit-publish@redlib.timer` runs `make publish` (`devkit/bin/publish.sh`): at most once per 3 h window it runs every plan job at the new `main` (`devkit/bin/check_tree.sh`); a red `main` files a `main-red` issue and ships nothing. When `main` is green and changed an image input, it builds `ghcr.io/kashhq/redlib` at `main`, runs `make ci-smoke` on it, pushes `sha-<7>` and `latest`, and creates the git tag `ship-<YYYY-MM-DD>-<sha7>`. Nothing is published from a Mac or by hand. The bare `<sha7>` is the image's `APP_VERSION`, its OCI version label and the version in the page footer.
+- **Stack:** the compose file lives with the deployment, not here; the NAS's `deploy.sh update` timer pulls `latest`. Instance settings are env vars there. The owner's deployment is documented in the homelab repo (`stacks/redlib/README.md`).
 
 ## Tracking upstream
 
@@ -236,7 +236,7 @@ REDLIB_DEFAULT_USE_HLS = "on"
 ```
 
 > [!NOTE]
-> The binary loads a `.env` file from its working directory at startup, so for a local run copy `.env.example` (every setting this fork reads, with its default) to `.env` and edit it. The instance's settings are env vars in the homelab compose file.
+> The binary loads a `.env` file from its working directory at startup, so for a local run copy `.env.example` (every setting this fork reads, with its default) to `.env` and edit it. The deployed instance's settings are env vars in its compose file.
 - Contributors and agents: see [AGENTS.md](AGENTS.md).
 
 ## Command Line Flags
