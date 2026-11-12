@@ -16,10 +16,11 @@ done < <(git grep -nIoE "$redlib_topology" \
   -- . ':!devkit' ':!extensions/firefox' ':!docs/decisions.md' ':!scripts/ci/docs_rules.sh' | cut -d: -f1,2)
 
 # decisions.md history is never rewritten, so entries dated before the move may keep their hits;
-# an entry dated 2026-11-12 or later may not add one. ISO dates compare as strings.
+# an entry dated 2026-11-12 or later may not add one. ISO dates compare as strings. The pattern
+# goes through the environment: awk unescapes `-v` values, so gawk would read `\.` as `.` (#91).
 while IFS= read -r redlib_leak; do
   docs_fail "public tree names homelab topology: $redlib_leak (a decisions entry from 2026-11-12 on)"
-done < <(awk -v re="$redlib_topology" '
+done < <(redlib_re="$redlib_topology" awk '
   /^## [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/ { date = $2 }
-  date >= "2026-11-12" && $0 ~ re { print FILENAME ":" FNR }
+  date >= "2026-11-12" && $0 ~ ENVIRON["redlib_re"] { print FILENAME ":" FNR }
 ' docs/decisions.md)
