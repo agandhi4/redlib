@@ -1,4 +1,4 @@
-# redlib (agandhi4 fork)
+# redlib (kashhq fork)
 
 Personal **hard fork** of [redlib](https://github.com/redlib-org/redlib) (forked at upstream `a4d36e9`; upstream fixes are ported as reviewed picks, never merged wholesale; review mark in `.upstream-rev`, policy in `docs/fork.md`), heavily customized. Runs one instance at `reddit.box` (NAS, single user). `docs/fork.md` is the fork's record: what diverged from upstream and why, plus operational notes. Read it before changing anything upstream also owns, and add to it when the fork diverges further. Dated decisions go in `docs/decisions.md`.
 
@@ -48,7 +48,7 @@ Rust + hyper + Askama (server-rendered HTML), vanilla CSS/JS. No frontend framew
 - The smoke job boots no listener: that opens only after OAuth bootstrap against Reddit (see Startup order), so no health path answers without live Reddit. `ci-smoke` runs the binary offline instead (`--version` prints `instance_info::app_version()`), which catches a wrong-arch or broken binary and a lost `APP_VERSION`.
 - **Release identity: one version string, the bare 7-char sha.** `publish.sh` passes it as `CI_BUILD_VERSION`, the `APP_VERSION` build arg (Dockerfile final stage: ARG, ENV, OCI version label), tags the image `sha-<7>` + `latest` (the prefix is the tag's only), then creates the git tag `ship-<YYYY-MM-DD>-<sha7>` (`devkit/bin/ship_tag.sh`). The publisher alone moves `latest` and is therefore the deployer. The footer, /info, the startup log and `--version` read `instance_info::app_version()` (`v<semver>` outside an image). No compose file may set `APP_VERSION` (`make release-check`). The Cargo semver remains only the asset cache-buster.
 - Upstream: monthly `make upstream-review` lists the upstream commits after `.upstream-rev` and the open upstream PRs updated after `.upstream-pr-rev` (fixes sit in open PRs for months); port security/API fixes and still-present bugs, then move both marks in the same PR (`docs/fork.md` "Upstream sync").
-- `devkit/` is a vendored subtree. Never edit it here (`devkit-check` fails); change agandhi4/devkit, then `make devkit-sync`.
+- `devkit/` is a vendored subtree. Never edit it here (`devkit-check` fails); change kashhq/devkit, then `make devkit-sync`.
 
 ## Convention deltas
 
@@ -71,7 +71,7 @@ Rust + hyper + Askama (server-rendered HTML), vanilla CSS/JS. No frontend framew
 ## Workflow
 
 <!-- ORCHESTRATION-OVERRIDE: claudebot agents skip this section. -->
-- Ship loop: version bump → PR → a review round (`@codex review`, or `make review PR=<n>`), its P0/P1 findings answered → `make merge PR=<n>` → at linux-box's next check window (at most 3 h) the publisher checks main, builds `ghcr.io/agandhi4/redlib:latest` and ship-tags the commit (journald `PUBLISH redlib <sha7> published`) → NAS pull → verify the footer at `reddit.box/settings` shows the 7-char sha of the merge commit. The pull is either the NAS's `deploy.sh update` timer, every 5 min (homelab 2026-11-01; the redlib stack is marked `# autoupdate` in the homelab repo) or, to ship now: `ssh nas.box 'cd /volume1/docker/homelab && PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/syno/sbin:/usr/syno/bin ./deploy.sh update synology'` (plain ssh shell, that PATH puts the docker sudo shim first).
+- Ship loop: version bump → PR → a review round (`@codex review`, or `make review PR=<n>`), its P0/P1 findings answered → `make merge PR=<n>` → at linux-box's next check window (at most 3 h) the publisher checks main, builds `ghcr.io/kashhq/redlib:latest` and ship-tags the commit (journald `PUBLISH redlib <sha7> published`) → NAS pull → verify the footer at `reddit.box/settings` shows the 7-char sha of the merge commit. The pull is either the NAS's `deploy.sh update` timer, every 5 min (homelab 2026-11-01; the redlib stack is marked `# autoupdate` in the homelab repo) or, to ship now: `ssh nas.box 'cd /volume1/docker/homelab && PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/syno/sbin:/usr/syno/bin ./deploy.sh update synology'` (plain ssh shell, that PATH puts the docker sudo shim first).
 - The container's compose file lives in the homelab repo (`stacks/redlib/docker-compose.yml`), not here. It carries the `autoheal: "true"` label: homeinfra's autoheal restarts the container if its healthcheck goes red while the process is still alive, which Docker's own restart policy never does.
 - Measure, don't guess: cold vs warm TTFB via `curl -w "%{time_starttransfer}"` against `reddit.box`, 40s apart for cache-miss samples; prefetch is judged from the upstream log (`cause=prefetch` against `cause=page`) and Caddy's access log (`Purpose: prefetch` requests followed by a real view of the same URI).
 - Visual changes get screenshot verification before shipping (headless Chromium at 1280px and 390px, dark and light).

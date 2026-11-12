@@ -30,7 +30,7 @@ pub fn app_version() -> &'static str {
 	&APP_VERSION
 }
 
-const SOURCE_REPO: &str = "https://github.com/agandhi4/redlib";
+const SOURCE_REPO: &str = "https://github.com/kashhq/redlib";
 
 /// The footer's "Code" link: this fork at the running commit, since the AGPL offer is for the
 /// source of what runs, not upstream's (whose link the footer carried; upstream #568 makes it a
@@ -284,14 +284,14 @@ mod tests {
 	fn app_version_is_the_image_build_arg() {
 		assert_eq!(app_version(), "abc1234");
 		assert_eq!(InstanceInfo::new().app_version, "abc1234");
-		assert_eq!(source_url(), "https://github.com/agandhi4/redlib/tree/abc1234");
+		assert_eq!(source_url(), "https://github.com/kashhq/redlib/tree/abc1234");
 	}
 
 	#[test]
 	#[sealed_test(env = [("APP_VERSION", "")])]
 	fn app_version_falls_back_to_crate_semver() {
 		assert_eq!(app_version(), concat!("v", env!("CARGO_PKG_VERSION")));
-		assert_eq!(source_url(), "https://github.com/agandhi4/redlib");
+		assert_eq!(source_url(), "https://github.com/kashhq/redlib");
 	}
 
 	#[test]
