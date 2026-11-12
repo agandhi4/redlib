@@ -16,7 +16,7 @@
 # The smoke boots no listener: that opens only after OAuth bootstrap against Reddit (AGENTS.md
 # "Startup order"). ci-smoke runs the image's binary offline and asserts it and the OCI label
 # report gate-$PR (scripts/ci/smoke_image.sh); devkit/bin/publish.sh runs the same two targets before a push.
-GATE_SLUG=agandhi4/redlib
+GATE_SLUG=kashhq/redlib
 
 IMAGE="redlib:gate-$PR"
 
@@ -28,7 +28,7 @@ GATE_JOBS_BACKEND="unit ci-unit"
 GATE_JOBS_METRICS="metrics ci-metrics"
 GATE_JOBS_IMAGE="image ci-image CI_IMAGE=$IMAGE CI_BUILD_VERSION=gate-$PR|smoke ci-smoke CI_IMAGE=$IMAGE CI_BUILD_VERSION=gate-$PR"
 # What devkit/bin/publish.sh pushes to (read as this literal line, never sourced).
-PUBLISH_IMAGE=ghcr.io/agandhi4/redlib
+PUBLISH_IMAGE=ghcr.io/kashhq/redlib
 # How main ships, and so what proves it (devkit README "Deploy kinds").
 DEPLOY_KINDS=image
 # Every app path builds the image (devkit 2026-10-17: a plan excludes paths, never areas). These

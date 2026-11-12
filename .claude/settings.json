@@ -1,7 +1,7 @@
 {
   "extraKnownMarketplaces": {
     "claude-kit": {
-      "source": { "source": "github", "repo": "agandhi4/claude-kit" }
+      "source": { "source": "github", "repo": "kashhq/claude-kit" }
     }
   },
   "enabledPlugins": {

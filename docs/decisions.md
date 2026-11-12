@@ -290,3 +290,9 @@ Consequence: 16 → 2. Left, each a replacement: bincode (RUSTSEC-2025-0141, #82
 Why: claude-kit measured (2026-11-09) that a session's first API call is re-read on every later call, and that the Artifact, ArtifactComments and ArtifactData schemas cost 11.4k tokens, SendFeedback 2.0k and AskUserQuestion 1.7k of it; a whole-tool `permissions.deny` drops the schema from every session and lane in the repo.
 Decision: the deny list follows claude-kit's `templates/project-settings.json` (claude-kit #67). No plugin skill or agent uses these tools, and an unattended lane cannot answer a question or publish a page.
 Consequence: interactive sessions here lose the artifact publish flow and the question prompt; removing a line from this file brings one back (deny beats allow, so `settings.local.json` cannot).
+
+## 2026-11-12 — Repo links, slug and image name moved to the renamed account kashhq
+Why: the account was renamed 2026-11-12; the container namespace does not redirect, and git redirects only until the old name is reused (devkit #469).
+Decision: every live name is kashhq (plan slug and PUBLISH_IMAGE, renovate preset, marketplace source, workflow references, links); decisions.md keeps the old name where it records the past; the vendored devkit/ follows through devkit-sync.
+Consequence: the next publish pushes to ghcr.io/kashhq/redlib.
+Consequence: homelab's stacks pull it from there (homelab PR of the same day).
