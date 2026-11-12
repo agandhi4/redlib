@@ -18,10 +18,15 @@ browser.storage.onChanged.addListener((changes) => {
   updateBadge();
 });
 
+// The title is set on every call, so the no-host tooltip clears once a host is saved.
 function updateBadge() {
+  browser.browserAction.setTitle({ title: targetHost ? "Redlib Redirect" : "Redlib Redirect: set the host in the popup" });
   if (!enabled) {
     browser.browserAction.setBadgeText({ text: "off" });
     browser.browserAction.setBadgeBackgroundColor({ color: "#888" });
+  } else if (!targetHost) {
+    browser.browserAction.setBadgeText({ text: "!" });
+    browser.browserAction.setBadgeBackgroundColor({ color: "#e0a000" });
   } else if (redirectCount > 0) {
     browser.browserAction.setBadgeText({ text: String(redirectCount) });
     browser.browserAction.setBadgeBackgroundColor({ color: "#d54455" });

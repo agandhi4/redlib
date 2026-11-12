@@ -46,12 +46,13 @@
 #
 # Also, in a public repo (the plan's one literal `GATE_PUBLIC=1` line) and in a devkit checkout
 # (is_devkit_checkout: its tree is vendored into the public ones): no tracked file outside devkit/,
-# docs/reports/ and docs/audits/ names homelab topology (DEVKIT_TOPOLOGY_PATTERNS, generic shapes:
-# .box and -box hosts, NAS volume paths, home directories, private and tailnet addresses, dynamic-DNS
-# suffixes; this file too). A public repo may be forked; the topology lives in the homelab repo
-# (owner, 2026-11-12). It fails, never warns. A line that must show one (a doc's example, a test's private address) ends with a
-# `topology example` comment (`# topology example`, `// topology example`, ...). In a
-# devkit checkout it is the only check that runs: the others judge a consumer's vendored tree.
+# docs/reports/ and docs/audits/ names homelab topology (_topology_lib.sh's generic shapes: .box
+# and -box hosts, NAS volume paths, home directories, private and tailnet addresses, dynamic-DNS
+# suffixes; the lib and this file too). A public repo may be forked; the topology lives in the
+# homelab repo (owner, 2026-11-12). It fails, never warns. A line that must show one (a doc's
+# example, a test's private address) ends with a `topology example` comment. docs_check.sh runs
+# the same rules in a public repo (a docs-only commit runs it alone). In a devkit checkout it is
+# the only check that runs: the others judge a consumer's vendored tree.
 #
 # Also (a WARNING, exit 0): an alternative of the plan's GATE_IMAGE_EXCLUDE_PATHS whose every
 # tracked path the root .dockerignore already excludes. The gate reads .dockerignore itself
@@ -149,6 +150,8 @@ esac
 . "$(dirname "${BASH_SOURCE[0]}")/_gh_repo_lib.sh"
 # shellcheck source=bin/_gitattributes_lib.sh  # merge_drivers_heal
 . "$(dirname "${BASH_SOURCE[0]}")/_gitattributes_lib.sh"
+# shellcheck source=bin/_topology_lib.sh  # topology_hits: check_public_topology's rules
+. "$(dirname "${BASH_SOURCE[0]}")/_topology_lib.sh"
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 HERE=$(dirname "${BASH_SOURCE[0]}")
@@ -455,72 +458,15 @@ check_retired_owner() {
   echo "  decisions.md, docs/reports/ and docs/audits/ may keep it; a line that must spell it ends with: # retired name" >&2
   [[ "$today" < "$RETIRED_OWNER_FAILS_FROM" ]] || exit 1
 }
-# Homelab topology a public repo must never name (check_public_topology): one rule per line,
-# `<where> <ERE>`, where <where> is `all` or comma-separated git pathspecs (`*.md` matches at any
-# depth). Generic shapes only, never a fleet name: this file is vendored into the public repos it
-# guards, so a list of the real names would publish them (devkit #478). POSIX ERE with no `\b`
-# (macOS git grep has none), so a name's or an address's ends are spelled as classes, and matched
-# with case: case-blind, `/Users/` is every `/api/users/` route.
-#   - a `<name>.box` or `<name>-box` host: bare after a boundary in prose, scripts and config
-#     (Markdown, shell and bats, YAML and compose, TOML/INI/.env, systemd units, Makefiles,
-#     Dockerfiles), where code's lookalikes do not live; in any other file (code) only in a URL or
-#     an ssh target (after `://` or `@`), and a `.box` one also in a code span (after a backtick:
-#     a JS template literal opens with one, and its CSS classes end in `-box`). Code holds
-#     property accesses on a `box` field and classes ending in `-box` (daisyUI's, the box-sizing
-#     value). A prose compound on -box is the known false positive: its line carries the marker.
-#   - NAS volume paths; a macOS home anywhere; a Linux home only as a path into it (`/home/<u>/…`)
-#     in Markdown and shell (not bats: a test's fixture is data): a Dockerfile's or a doc's bare
-#     `/home/node` is the image user's HOME.
-#   - dynamic-DNS and tailnet suffixes.
-#   - a private host address after a left boundary (inside a longer dotted number, a version, is
-#     none), never a CIDR range (`/<bits>` after it names a class, as a trusted-proxy list does):
-#     192.168/16 and the tailnet's CGNAT 100.64/10 anywhere; 10/8 and 172.16/12 only in Markdown
-#     and shell, since code, its tests and compose networks use them as data.
-# The env override (same format) is for the tests, as DEVKIT_RETIRED_OWNERS is.
-DEVKIT_TOPOLOGY_PATTERNS=${DEVKIT_TOPOLOGY_PATTERNS:-'all (://|@)[A-Za-z0-9][A-Za-z0-9.-]*[.-]box([^A-Za-z0-9_-]|$)
-all `[A-Za-z0-9][A-Za-z0-9.-]*\.box([^A-Za-z0-9_-]|$)
-*.md,*.sh,*.bash,*.zsh,*.bats,*.yml,*.yaml,*.toml,*.conf,*.ini,*.cfg,*.env,*.env.*,*.service,*.timer,*Makefile,*.mk,*Dockerfile* (^|[^A-Za-z0-9_.-])[A-Za-z0-9][A-Za-z0-9-]*[.-]box([^A-Za-z0-9_-]|$)
-all /volume[0-9]+/
-all (^|[^A-Za-z0-9_.-])/Users/[a-z][a-z0-9_-]*
-*.md,*.sh,*.bash,*.zsh (^|[^A-Za-z0-9_.-])/home/[a-z][a-z0-9_-]*/
-all \.(dedyn\.io|duckdns\.org|ts\.net)([^A-Za-z0-9_-]|$)
-all (^|[^0-9.])192\.168\.[0-9]{1,3}\.[0-9]{1,3}([^0-9/]|/[^0-9]|$)
-all (^|[^0-9.])100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}([^0-9/]|/[^0-9]|$)
-*.md,*.sh,*.bash,*.zsh (^|[^0-9.])(10\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9]{1,3}\.[0-9]{1,3}([^0-9/]|/[^0-9]|$)'}
 # A devkit checkout, as scorecard.py's is_devkit_checkout sees it: VENDOR_PATHS at the top. A
 # consumer has devkit/VENDOR_PATHS, never its own.
 is_devkit_checkout() { [ -f VENDOR_PATHS ]; }
-# The exemption: a line ending `topology example` in its language's comment (`#`, `//`, `--`,
-# `<!-- … -->`, `/* … */`), so a test's private-address fixture in TS or SQL can carry it too.
-readonly TOPOLOGY_EXAMPLE='(#|//|--|<!--|/\*) *topology example *(-->|\*/)? *$'
 check_public_topology() {
-  local hits='' found where pattern extra rc
-  local -a specs
+  local hits
   if ! is_devkit_checkout; then
     [ "$(gate_plan_literal <(printf '%s\n' "$plan_src") GATE_PUBLIC)" = 1 ] || return 0
   fi
-  local grep_args=(-I -n -E)
-  [ "$STAGED" = 0 ] || grep_args=(--cached "${grep_args[@]}")
-  while read -r where pattern extra; do
-    [ -n "$where" ] || continue
-    if [ -z "$pattern" ] || [ -n "$extra" ]; then
-      echo "devkit-check: DEVKIT_TOPOLOGY_PATTERNS line '$where${pattern:+ $pattern}${extra:+ $extra}' is not '<where> <ERE>'" >&2
-      exit 1
-    fi
-    if [ "$where" = all ]; then specs=(.); else IFS=, read -ra specs <<<"$where"; fi
-    # git grep is 1 on no match and more on its own failure (a pattern this platform's regex
-    # rejects, a bad override): that must fail the guard, never read as a clean tree.
-    rc=0
-    found=$(git grep "${grep_args[@]}" -e "$pattern" -- "${specs[@]}" ':!devkit/' ':!docs/reports/' \
-      ':!docs/audits/') || rc=$?
-    if [ "$rc" -gt 1 ]; then
-      echo "devkit-check: the topology check could not run (git grep exit $rc above; DEVKIT_TOPOLOGY_PATTERNS must be POSIX ERE)" >&2
-      exit 1
-    fi
-    hits+=${found:+$found$'\n'}
-  done <<<"$DEVKIT_TOPOLOGY_PATTERNS"
-  # One line per file:line, however many rules it hit, in file then line order.
-  hits=$(sort -t: -k1,1 -k2,2n -u <<<"$hits" | grep -vE "^$|$TOPOLOGY_EXAMPLE" || true)
+  hits=$(topology_hits devkit-check "$STAGED") || exit 1
   [ -n "$hits" ] || return 0
   echo "devkit-check: homelab topology in a public tree (it lives in the homelab repo; name the role: the publisher host, the NAS):" >&2
   printf '  %s\n' "${hits//$'\n'/$'\n'  }" >&2

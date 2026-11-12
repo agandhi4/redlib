@@ -54,7 +54,7 @@ declare -F metrics_conf_parse >/dev/null || . "$(dirname "${BASH_SOURCE[0]}")/_m
 # ios_device.sh, which only a person's `make ios-install` runs against a phone.
 DEVKIT_TOOLING_BIN="gate.sh _paths_lib.sh
   hook_steps.sh quiet_run.sh push_ranges.sh hooks_check.sh
-  devkit-check.sh _vendor_paths.sh docs_check.sh toolchain_check.sh ci_targets_check.sh
+  devkit-check.sh _vendor_paths.sh _topology_lib.sh docs_check.sh toolchain_check.sh ci_targets_check.sh
   _makefile_lib.sh workflows_check.sh _workflows_lib.sh release_check.sh _dockerfile_lib.sh
   _gitattributes_lib.sh _trailer_lib.sh own_commit_check.py _dockerignore.py py_cognitive_lint.py changed_lint.py _changed_files.py
   devkit-sync.sh devkit-new.sh monthly_audit.sh dead_alert_audit.py ship_tag.sh publish.sh check_tree.sh _cadence_lib.sh _issue_lib.sh docker_credential_gh.sh registry_prune.sh scorecard.py agent_cost.py secrets_check.sh migration_check.py

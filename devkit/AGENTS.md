@@ -131,9 +131,10 @@ is README.md "Architecture". Invariants of the design:
 - The kit names roles, never hosts (owner 2026-11-12): its tree is vendored into public repos, so
   "the publisher host", "the NAS", "the error tracker"; the real names and addresses live in the
   homelab repo. devkit-check's topology check fails a hit here (self-check, docs-check) and in any
-  plan with `GATE_PUBLIC=1`; a line that must show one ends with a `topology example` comment.
-  Its pattern list is generic shapes only (devkit #478): never add a fleet name, address or
-  domain to it, since the script ships in the public repos it guards and scans itself.
+  plan with `GATE_PUBLIC=1`, where docs_check.sh runs it too (a docs-only commit runs only
+  docs-check); a line that must show one ends with a `topology example` comment. Its rules live
+  once, in `bin/_topology_lib.sh`, as generic shapes only (devkit #478): never add a fleet name,
+  address or domain, since the lib ships in the public repos it guards and is scanned itself.
 - Fail loudly on a missing tool (`flock`, `gh`) with the install hint; never degrade silently.
 - Time budgets (a job's, a tier's) report and never fail (owner 2026-10-29); correctness (tests, floors,
   ratchets) still fails. Never make a budget fail a PR again.
