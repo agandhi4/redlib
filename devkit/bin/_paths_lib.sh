@@ -59,7 +59,7 @@ DEVKIT_TOOLING_BIN="gate.sh _paths_lib.sh
   _gitattributes_lib.sh _trailer_lib.sh own_commit_check.py _dockerignore.py py_cognitive_lint.py changed_lint.py _changed_files.py
   devkit-sync.sh devkit-new.sh monthly_audit.sh dead_alert_audit.py ship_tag.sh publish.sh check_tree.sh _cadence_lib.sh _issue_lib.sh docker_credential_gh.sh registry_prune.sh scorecard.py agent_cost.py secrets_check.sh migration_check.py
   pr_merge.sh merge_rules.sh pr_create.sh _gh_repo_lib.sh codex_review.py review_rules.sh pr_review.sh _merge_carry.sh decisions_merge.py bite.py _repo_identity.py _renovate.py install_gh_shim.sh
-  dependency_merge.sh _dependency_pr.py _output_floor.py vuln_watch.py install_dependency_merge.sh install_monthly_audit.sh _launchd_job_lib.sh job_launcher.sh
+  dependency_merge.sh _dependency_pr.py vuln_watch.py install_dependency_merge.sh install_monthly_audit.sh _launchd_job_lib.sh job_launcher.sh
   publisher_deadman.sh install_publisher_deadman.sh main_check.sh install_main_check.sh _commit_status_lib.sh _checkouts_lib.sh
   ios_check.py ios_device.sh bats_assert_check.py"
 # What the image group exercises (ci-smoke/ci-image boot through them): tooling, but a change

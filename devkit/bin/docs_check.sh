@@ -74,7 +74,8 @@
 #      the rules devkit-check holds the tree to), one failure per line. devkit-check runs the same
 #      check, but a docs-only commit runs docs-check alone and a docs-only PR owes no review, so
 #      without this a doc's hostname reached main unchecked (closet #482). It fails from the start,
-#      as devkit-check's does. A devkit checkout's own docs-check runs devkit-check beside it.
+#      as devkit-check's does. Under a pre-commit hook (DEVKIT_HOOK=pre-commit, hook_steps.sh) it
+#      reads the index, the commit being made. A devkit checkout's docs-check runs devkit-check too.
 #   Rules 5-10 and 12-17 report through docs_rule: a warning before their FAILS_FROM date below, a
 #   failure on and after it, so no consumer's ci-quick breaks on the sync that introduces a rule and
 #   the flip needs no second PR. DOCS_CHECK_TODAY=YYYY-MM-DD overrides today (tests).
@@ -678,9 +679,17 @@ rule_capabilities() {
 
 # ---- 18. a public repo names no homelab topology ---------------------------------------------
 rule_public_topology() {
-  local hits hit
-  [ -f scripts/ci/gate_plan.sh ] && [ "$(gate_plan_literal scripts/ci/gate_plan.sh GATE_PUBLIC)" = 1 ] || return 0
-  hits=$(topology_hits docs-check 0) || { docs_fail "the topology check could not run (above)"; return 0; }
+  local hits hit staged=0 plan
+  # At pre-commit the commit is the index, not the working copy: a staged leak the copy no longer
+  # shows must fail, and an unstaged one is no part of the commit (devkit #487). devkit-check has
+  # its own --staged target; docs-check is run plain, by the hook's docs-only step and inside
+  # ci-guards-staged alike, so it reads the hook from hook_steps.sh's DEVKIT_HOOK. The plan's
+  # GATE_PUBLIC line is read from the same side.
+  [ "${DEVKIT_HOOK:-}" != pre-commit ] || staged=1
+  if [ "$staged" = 1 ]; then plan=$(git show :scripts/ci/gate_plan.sh 2>/dev/null) || return 0
+  else plan=$(cat scripts/ci/gate_plan.sh 2>/dev/null) || return 0; fi
+  [ "$(gate_plan_literal <(printf '%s\n' "$plan") GATE_PUBLIC)" = 1 ] || return 0
+  hits=$(topology_hits docs-check "$staged") || { docs_fail "the topology check could not run (above)"; return 0; }
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     docs_fail "homelab topology in a public tree: $hit (it lives in the homelab repo; name the role, or end a fixture's line with a topology example comment)"

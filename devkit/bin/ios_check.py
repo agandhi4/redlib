@@ -21,7 +21,7 @@ are not. A reference takes only the values a build of its own conditions can sel
 patterns compared as globs (`iphoneos*` overlaps `iphoneos26*`, not `iphonesimulator*`), and
 the references of one value agree on one build. A Swift string literal whose ENTIRE value equals a
 brand value fails, naming the key. Whole-literal
-only: "io.silversky.locus" fires, "locus.sqlite" and "\\(id).locus" do not. A value naming a key
+only: "com.example.locus" fires, "locus.sqlite" and "\\(id).locus" do not. A value naming a key
 the file does not define is left out. Every tracked or untracked-unignored *.swift outside
 devkit/ is scanned; comments, interpolations and multi-line (\"\"\") literals never match.
 

@@ -47,18 +47,16 @@ is README.md "Architecture". Invariants of the design:
   deprecated there, since repo-owned configs import them and devkit-sync cannot edit those.
   Every squash body's `Kind: product|tooling` and `Kind-By: label|kit|sync|bot` trailers
   (merge_rules.sh) are one too, and so is `<state>/devkit/scorecard/output.json`, which every
-  `scorecard.py --fleet` writes for the floor gate to read: `{"date", "window_days": 30,
-  "fleet": {"repos", "commits", "product", "share", "tokens": {"product", "tooling", "share"} |
-  {"unmeasured"}, "floor", "declared", "declared_min", "judged_product", "judged_share",
-  "missing", "status": PASS|FAIL|UNMEASURED, "verdict" (= status)}, "repos": {<name>: {"days", "commits",
-  "product", "share", "kit", "declared"/"inferred"/"judged": {"product", "tooling"}, "tokens"} |
-  {"unmeasured"}}}`. Add fields, never rename one.
+  `scorecard.py --fleet` writes, a readout: `{"date", "window_days": 30, "fleet": {"repos",
+  "commits", "product", "share", "tokens": {"product", "tooling", "share"} | {"unmeasured"},
+  "declared", "judged_product", "judged_share", "missing"}, "repos": {<name>: {"days",
+  "commits", "product", "share", "kit", "declared"/"inferred"/"judged": {"product", "tooling"},
+  "tokens"} | {"unmeasured"}}}`. Add fields, never rename one (`floor`, `declared_min`, `status`
+  and `verdict` left with the floor gate, 2026-11-12).
 - A kind is declared or deterministic, never guessed (2026-11-05): `make merge` refuses a non-kit
   PR that is no devkit sync or bot PR and has no `kind/*` label, and `make pr` wants `KIND=`.
-  Only `Kind-By:` commits are judged. Below the fleet's product floor a kit (`GATE_KIT=1`)
-  merges only a sync, a bot's PR, `Unblocks: <owner/repo>#<n>` (an open product issue) or
-  `Fixes: #<n>` (an open `bug` here); a stale (> 7 d) or missing cache is UNMEASURED, which
-  waits too. An agent never uses `OWNER=` to pass it.
+  Only `Kind-By:` commits are judged. OUTPUT is a readout; nothing merges on it; product first
+  is a lane-priority rule (2026-11-12).
 - The skeleton owns mechanics; the repo's `scripts/ci/gate_plan.sh` declares its jobs. Which
   paths run which group is devkit's (`bin/_paths_lib.sh`: one table for hooks and gate,
   `devkit_default_gate_plan`); a repo adds only its own rules in `gate_plan_extra`. A new
