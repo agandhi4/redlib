@@ -296,3 +296,8 @@ Why: the account was renamed 2026-11-12; the container namespace does not redire
 Decision: every live name is kashhq (plan slug and PUBLISH_IMAGE, renovate preset, marketplace source, workflow references, links); decisions.md keeps the old name where it records the past; the vendored devkit/ follows through devkit-sync.
 Consequence: the next publish pushes to ghcr.io/kashhq/redlib.
 Consequence: homelab's stacks pull it from there (homelab PR of the same day).
+
+## 2026-11-12 — Homelab topology lives in the homelab repo
+Why: this fork is public and may be forked; AGENTS.md, README.md, `docs/fork.md`, the Makefile, the Dockerfile and `.env.example` named the owner's publisher and NAS hosts, the NAS deploy path and command, the instance hostname and homelab file paths.
+Decision: those move to homelab's `stacks/redlib/README.md` (homelab #223); docs here use role words ("the publisher host", "the NAS") and each file points there at most once. `scripts/ci/docs_rules.sh` makes docs-check refuse the private hostnames, NAS volume paths, home paths, private DNS suffixes and the LAN prefix outside devkit/ and this log's history.
+Consequence: git history still holds the old lines (no credentials, so no rewrite). The Firefox extension still defaults its target to the private hostname and its id names the owner's domain; both are behaviour, left for the owner.

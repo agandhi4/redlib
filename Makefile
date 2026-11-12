@@ -1,5 +1,5 @@
-# The repo's check API: check_tree's plan (scripts/ci/gate_plan.sh), the git hooks and linux-box's
-# publisher (`make publish`) call these targets and nothing else, so a check changes here, once.
+# The repo's check API: check_tree's plan (scripts/ci/gate_plan.sh), the git hooks and the publisher
+# host (`make publish`) call these targets and nothing else, so a check changes here, once.
 #
 # Rust comes from rust-toolchain.toml. make's SHELL puts the same pinned toolchain first on PATH
 # for every recipe line and $(shell …) that check_tree and the hooks use, so a hand-run
@@ -67,9 +67,9 @@ test-live: ## the #[ignore]d tests that call live Reddit (needs outbound network
 	$(CARGO) test --locked -- --ignored --test-threads=1
 
 # Build only (devkit-check's publish contract): the plan runs ci-image then ci-smoke as two jobs,
-# and devkit/bin/publish.sh runs both on linux-box before it pushes. Builds for the host's
+# and devkit/bin/publish.sh runs both on the publisher host before it pushes. Builds for the host's
 # platform (the Dockerfile picks its builder by TARGETARCH), so a build on the arm64 Mac compiles
-# natively instead of under QEMU (issue #7), and linux-box builds the amd64 image it ships.
+# natively instead of under QEMU (issue #7), and the publisher host builds the amd64 image it ships.
 ci-image: ## build Dockerfile as $(CI_IMAGE) with APP_VERSION=$(CI_BUILD_VERSION)
 	DOCKER_CALL_TIMEOUT=900 devkit/bin/docker_bounded.sh build --build-arg APP_VERSION="$(CI_BUILD_VERSION)" -t $(CI_IMAGE) .
 
@@ -79,9 +79,9 @@ SMOKE_BUDGET_SECONDS ?= 30
 ci-smoke: ## run $(CI_IMAGE)'s binary offline; it and the OCI version label must report $(CI_BUILD_VERSION)
 	devkit/bin/tier_guard.sh smoke --budget $(SMOKE_BUDGET_SECONDS) -- scripts/ci/smoke_image.sh "$(CI_IMAGE)" "$(CI_BUILD_VERSION)"
 
-# Run by homelab's devkit-publish@redlib.timer on linux-box (main checked at most once per 3 h), never by hand on a Mac
+# Run by the publisher host's devkit-publish@redlib.timer (main checked at most once per 3 h), never by hand on a Mac
 # (it refuses anything but native amd64). devkit README "Publish".
-publish: ## move ghcr.io/kashhq/redlib:latest to a main check_tree proved green (linux-box only)
+publish: ## move ghcr.io/kashhq/redlib:latest to a main check_tree proved green (publisher host only)
 	devkit/bin/publish.sh .
 
 # devkit/bin/metrics_collect.sh runs the collectors in scripts/ci/metrics.conf and compares the
