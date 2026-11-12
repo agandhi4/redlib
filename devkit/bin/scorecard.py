@@ -50,14 +50,17 @@
          paths, which read a ratchet sweep of app code as product (85% inferred against an
          audit's 29%, 2026-11-05).
          Agent output tokens split the same way: docs/agent-cost.tsv rows joined on (repo, PR)
-         to the squash subject's `(#n)`; UNMEASURED, never 0, when no row joins. Per-repo shares
-         are never judged (a finished fork may be all tooling); --fleet sums every repo, kit repos
-         included, prints `OUTPUT fleet: judged product p% of declared commits (n/m); floor f%
-         PASS|FAIL` against scorecard.conf's output_product_share_min (UNMEASURED below
-         output_declared_min judged commits, or with any github/repos.json repo unmeasured),
-         then the inferred share on an `(not judged)` line,
-         and writes <state>/devkit/scorecard/output.json (AGENTS.md, output contracts), which
-         merge_rules.sh's floor gate reads.
+         to the squash subject's `(#n)`; UNMEASURED, never 0, when no row joins. --fleet sums
+         every repo, kit repos included, and prints `OUTPUT fleet: product p% of commits (n/m),
+         t% of agent output tokens; declared d (judged product j%); signal s%`. Every commit
+         headlines: app repos merge most product work without a Kind-By trailer, so the judged
+         population is mostly the kits' own merges (2026-11-12: 16% judged against 48% of all
+         commits); the declared count beside it shows that bias. scorecard.conf's
+         output_product_share_min is the printed signal. A github/repos.json repo the run did
+         not measure adds one `OUTPUT fleet UNMEASURED: not measured: …` line. It writes
+         <state>/devkit/scorecard/output.json (AGENTS.md, output contracts). OUTPUT is a
+         readout, per repo and fleet-wide: no verdict, no exit code and no merge rule reads it
+         (the product floor gated kit merges 2026-11-05..2026-11-12; docs/decisions.md).
 
 Why v2 (owner, 2026-10-18): after a day in which four repos halved complexity and clones, no
 letter moved. Binary checks against absolute thresholds were insensitive to work, and tracks
@@ -1731,7 +1734,7 @@ class MainCommit:
     subject: str
     kind: str  # product | tooling
     declared: bool  # a Kind trailer said so; else inferred here
-    judged: bool  # a Kind-By trailer too: declared or deterministic, so the floor counts it
+    judged: bool  # a Kind-By trailer too: declared or deterministic, so the judged share counts it
     pr: str  # the squash subject's PR number, "" for none
 
 
@@ -1852,15 +1855,11 @@ def output(root: Path, name: str, now: datetime, ledger: Path = AGENT_COST_LEDGE
     return doc
 
 
-def fleet_output(
-    docs: list[dict], floor: float, declared_min: float, expected: list[str] | None
-) -> dict:
-    """The fleet's OUTPUT, every repo summed, kit repos included (that is the point): the judged
-    commits' share (Kind-By) against scorecard.conf's output_product_share_min, UNMEASURED under
-    output_declared_min of them, or while any repo of `expected` (github/repos.json; None: the
-    list is unreadable) is unmeasured: a run over some repos, or a failed clone, must not pass
-    the floor merge_rules.sh gates kit merges on. The inferred commit share and the token share
-    are printed. `verdict` is `status`, its name from before the judged share."""
+def fleet_output(docs: list[dict], expected: list[str] | None) -> dict:
+    """The fleet's OUTPUT, every repo summed, kit repos included (that is the point): the share of
+    all commits and of agent output tokens, and beside them the judged (Kind-By) commits' share.
+    `missing` names each repo of `expected` (github/repos.json; None: the list is unreadable)
+    the run did not measure: a run over some repos, or a failed clone, is no fleet readout."""
     measured = [d["output"] for d in docs if "commits" in d["output"]]
     seen = {d["repo"].lower() for d in docs if "commits" in d["output"]}
     missing = (
@@ -1877,9 +1876,6 @@ def fleet_output(
     tokens = [o["tokens"] for o in measured if "product" in o["tokens"]]
     product_tokens = sum(t["product"] for t in tokens)
     all_tokens = product_tokens + sum(t["tooling"] for t in tokens)
-    status = "PASS" if judged_product * 100 >= floor * declared else "FAIL"
-    if declared < declared_min or missing:
-        status = "UNMEASURED"
     return {
         "repos": len(measured),
         "commits": commits,
@@ -1894,15 +1890,31 @@ def fleet_output(
             if all_tokens
             else {"unmeasured": "no repo's agent tokens are measured"}
         ),
-        "floor": floor,
         "declared": declared,
-        "declared_min": declared_min,
         "judged_product": judged_product,
         "judged_share": share(judged_product, declared),
         "missing": missing,
-        "status": status,
-        "verdict": status,
     }
+
+
+def pct(value: int | None) -> str:
+    return "-" if value is None else f"{value}%"
+
+
+def output_readout(
+    product: int, commits: int, tokens: dict, judged_product: int, declared: int
+) -> str:
+    """`product 48% of commits (595/1245), 53% of agent output tokens; declared 67 (judged
+    product 16%)`: the fleet line's and each repo's, all commits first, the judged share beside."""
+    if "unmeasured" in tokens:
+        spent = f"agent output tokens UNMEASURED ({tokens['unmeasured']})"
+    else:
+        total = tokens["product"] + tokens["tooling"]
+        spent = f"{pct(share(tokens['product'], total))} of agent output tokens"
+    return (
+        f"product {pct(share(product, commits))} of commits ({product}/{commits}), {spent}; "
+        f"declared {declared} (judged product {pct(share(judged_product, declared))})"
+    )
 
 
 def output_part(out: dict) -> str:
@@ -1914,15 +1926,12 @@ def output_part(out: dict) -> str:
 
 
 def output_summary(out: dict) -> str:
-    """One repo's OUTPUT on one line, for the fleet report."""
+    """One repo's OUTPUT on one line, for the fleet report: the fleet line's shape."""
     if "unmeasured" in out:
         return f"output UNMEASURED ({out['unmeasured']})"
-    declared = out["declared"]["product"] + out["declared"]["tooling"]
-    judged = sum(out.get("judged", {}).values())
-    return (
-        f"{output_part(out)}, declared {declared} ({judged} judged), "
-        f"inferred {out['commits'] - declared}; "
-        f"{tokens_part(out['tokens'])}"
+    j = out.get("judged", {"product": 0, "tooling": 0})  # a doc saved before Kind-By has none
+    return "output " + output_readout(
+        out["product"], out["commits"], out["tokens"], j["product"], j["product"] + j["tooling"]
     )
 
 
@@ -1934,41 +1943,26 @@ def tokens_part(tokens: dict) -> str:
     return f"agent output tokens product {tokens['product']}/{total} ({pct}%)"
 
 
-def fleet_output_lines(f: dict) -> list[str]:
-    """`OUTPUT fleet: judged product 29% of declared commits (70/240); floor 50% FAIL`, then
-    `OUTPUT fleet inferred (not judged): product 85% of commits (…), 24% of agent output tokens`."""
-    floor = f"floor {f['floor']:g}%"
-    if f["missing"]:
-        judged = (
-            f"OUTPUT fleet: not measured: {', '.join(f['missing'])}; {floor} UNMEASURED "
-            "(the floor reads the whole fleet)"
-        )
-    elif f["status"] == "UNMEASURED":
-        judged = (
-            f"OUTPUT fleet: {f['declared']} declared commits in {OUTPUT_DAYS} d, "
-            f"{f['declared_min']:g} needed; {floor} UNMEASURED"
-        )
-    else:
-        judged = (
-            f"OUTPUT fleet: judged product {f['judged_share']}% of declared commits "
-            f"({f['judged_product']}/{f['declared']}); {floor} {f['status']}"
-        )
-    if not f["commits"]:
-        return [judged, f"OUTPUT fleet inferred (not judged): no commits in {OUTPUT_DAYS} d"]
-    tokens = (
-        f"{f['tokens']['share']}% of agent output tokens"
-        if "share" in f["tokens"]
-        else "agent output tokens UNMEASURED"
+def fleet_output_lines(f: dict, signal: float) -> list[str]:
+    """`OUTPUT fleet: product 48% of commits (595/1245), 53% of agent output tokens; declared 67
+    (judged product 16%); signal 50%`, then `OUTPUT fleet UNMEASURED: not measured: …` when a
+    fleet repo is missing (module docstring)."""
+    readout = (
+        output_readout(f["product"], f["commits"], f["tokens"], f["judged_product"], f["declared"])
+        if f["commits"]
+        else f"no commits in {OUTPUT_DAYS} d"
     )
-    return [
-        judged,
-        f"OUTPUT fleet inferred (not judged): product {f['share']}% of commits "
-        f"({f['product']}/{f['commits']}), {tokens}",
-    ]
+    lines = [f"OUTPUT fleet: {readout}; signal {signal:g}%"]
+    if f["missing"]:
+        lines.append(
+            f"OUTPUT fleet UNMEASURED: not measured: {', '.join(f['missing'])} "
+            "(the line above sums only the repos read)"
+        )
+    return lines
 
 
 def write_output_cache(state_home: Path, docs: list[dict], fleet: dict, now: datetime) -> Path:
-    """<state>/devkit/scorecard/output.json, the OUTPUT contract a merge rule reads (AGENTS.md)."""
+    """<state>/devkit/scorecard/output.json, the OUTPUT readout's contract (AGENTS.md)."""
     path = identity.output_cache(state_home)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")  # renamed into place: a reader never sees half a file
@@ -2222,7 +2216,7 @@ def output_lines(out: dict) -> list[str]:
         f"- commits: {output_part(out).removeprefix('output ')}"
         + (" (a kit, GATE_KIT=1: every commit is tooling)" if out["kit"] else ""),
         f"- declared (Kind trailer): product {d['product']}, tooling {d['tooling']}; "
-        f"judged (Kind-By, what the fleet floor counts): product {j['product']}, "
+        f"judged (Kind-By, the fleet's judged share): product {j['product']}, "
         f"tooling {j['tooling']}",
         f"- inferred (no trailer: kit, sync, bot, else paths): product {i['product']}, "
         f"tooling {i['tooling']}",
@@ -2230,9 +2224,7 @@ def output_lines(out: dict) -> list[str]:
     ]
 
 
-def fleet_markdown(
-    docs: list[dict], floor: float, declared_min: float, expected: list[str] | None
-) -> str:
+def fleet_markdown(docs: list[dict], signal: float, expected: list[str] | None) -> str:
     lines = [
         "# Fleet scorecard",
         "",
@@ -2242,7 +2234,7 @@ def fleet_markdown(
     ]
     width = max((len(d["repo"]) for d in docs), default=0)
     lines += [f"{d['repo']:<{width}}  {summary_line(d)}" for d in docs]
-    lines += ["", *fleet_output_lines(fleet_output(docs, floor, declared_min, expected))]
+    lines += ["", *fleet_output_lines(fleet_output(docs, expected), signal)]
     lines += ["```", "", "## WIRED: not wired, by mechanism", ""]
     missing: dict[str, list[str]] = {}
     for d in docs:
@@ -2630,10 +2622,7 @@ def main() -> int:
             docs.extend(doc if isinstance(doc, list) else [doc])  # a --fleet --json file is a list
         for doc in docs:
             doc.setdefault("output", {"unmeasured": "saved before the OUTPUT readout"})
-        return emit_fleet(
-            docs, args.md, conf["output_product_share_min"], conf["output_declared_min"],
-            fleet_names(state_home),
-        )
+        return emit_fleet(docs, args.md, conf["output_product_share_min"], fleet_names(state_home))
     if args.mode:
         if args.fleet or len(args.roots) != 1:
             ap.error("--mode takes one repo root")
@@ -2657,18 +2646,16 @@ def main() -> int:
             json.dumps(docs if args.fleet else docs[0], indent=2, ensure_ascii=False) + "\n"
         )
     if args.fleet:
-        floor, declared_min = conf["output_product_share_min"], conf["output_declared_min"]
         expected = fleet_names(state_home)
-        fleet = fleet_output(docs, floor, declared_min, expected)
-        cache = write_output_cache(state_home, docs, fleet, now)
+        cache = write_output_cache(state_home, docs, fleet_output(docs, expected), now)
         print(f"scorecard: OUTPUT written to {cache}", file=sys.stderr)
-        return emit_fleet(docs, args.md, floor, declared_min, expected)
+        return emit_fleet(docs, args.md, conf["output_product_share_min"], expected)
     print("\n".join(repo_lines(docs[0])))
     return 0
 
 
 def fleet_names(state_home: Path) -> list[str] | None:
-    """github/repos.json's repo names, which the OUTPUT floor must all measure; None, with one
+    """github/repos.json's repo names, which the fleet's OUTPUT must all measure; None, with one
     stderr line, when it cannot be read."""
     fleet, why = fleet_repos(DEVKIT, state_home)
     if fleet is None:
@@ -2677,11 +2664,8 @@ def fleet_names(state_home: Path) -> list[str] | None:
     return fleet[1]
 
 
-def emit_fleet(
-    docs: list[dict], md: str | None, floor: float, declared_min: float,
-    expected: list[str] | None,
-) -> int:
-    text = fleet_markdown(docs, floor, declared_min, expected)
+def emit_fleet(docs: list[dict], md: str | None, signal: float, expected: list[str] | None) -> int:
+    text = fleet_markdown(docs, signal, expected)
     print(text, end="")
     if md:
         Path(md).write_text(text)

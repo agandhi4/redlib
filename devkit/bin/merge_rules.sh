@@ -79,16 +79,8 @@
 # trailers: the Co-authored-by lines of its commits' messages and of every commit author but the
 # PR's (GitHub writes those only into its own default message, which --body replaces: #412,
 # #414), then Owner-Override last.
-# The product floor (owner 2026-11-04: below it, kit work pauses but for bug fixes and work that
-# unblocks a product issue): in a kit repo (GATE_KIT=1) the merge reads the fleet's judged share
-# from scorecard.py's cache, <state>/devkit/scorecard/output.json (_output_floor.py status; missing
-# or older than FLOOR_MAX_DAYS is UNMEASURED, `run make scorecard`). Anything but PASS refuses
-# unless the PR is a dependency bot's, or a devkit sync by its diff too (sync_exempt: a title
-# alone would pass any kit PR), its body has a line `Unblocks: <owner/repo>#<n>` naming an OPEN
-# issue or PR of a fleet repo (devkit main's github/repos.json) whose main's plan is no kit, or a
-# line `Fixes: #<n>` naming an OPEN issue (not a PR) of this repo labelled `bug`, or OWNER=
-# overrides. One `merge: floor: <status> <share>% (<declared> declared); <exempt:
-# why|refused|above the floor>` line, before the rounds are read.
+# The product floor was a merge gate in a kit repo 2026-11-05..2026-11-12; it is now scorecard's
+# OUTPUT readout only, and nothing here reads it (why: docs/decisions.md 2026-11-12).
 # Then `gh pr merge <n> --squash --match-head-commit <head> --delete-branch`, so a push between
 # the check and the merge makes GitHub refuse it: one `merge: refused: … make merge again` line.
 # That one gh call, and only it, carries DEVKIT_MERGE_VERIFIED=<the full head sha>: the gh shim
@@ -109,7 +101,6 @@ set -uo pipefail
 
 readonly CODEX_CONTEXT=codex-review
 readonly DEFAULT_ROUNDS=3
-readonly FLOOR_MAX_DAYS=7
 
 usage() { echo "usage: [OWNER='<reason>'] $0 <repo-root> <pr-number>"; }
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
@@ -140,8 +131,6 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 2
 . "$HERE/_trailer_lib.sh"
 # shellcheck source=bin/_gh_repo_lib.sh  # origin_slug, slug_same: the PR is origin's
 . "$HERE/_gh_repo_lib.sh"
-# shellcheck source=bin/_load_lib.sh  # devkit_epoch: the floor cache's age
-. "$HERE/_load_lib.sh"
 ROOT=$(git -C "$1" rev-parse --show-toplevel) || exit 2
 PLAN=${GATE_PLAN:-$ROOT/scripts/ci/gate_plan.sh}
 
@@ -356,8 +345,8 @@ pr_title() {
 }
 
 # pr_automated: 0 when PR <n> is a devkit sync (its title) or a Renovate or Dependabot PR (its
-# author), with `sync` or `bot` in $automated and the reason in $automated_why; else 1. Both the
-# Kind and the floor read it (header).
+# author), with `sync` or `bot` in $automated and the reason in $automated_why; else 1. The Kind
+# reads it (header).
 pr_automated() {
   local rc
   pr_title
@@ -393,109 +382,10 @@ pr_kind() {
   refuse "PR #$PR declares no kind: add KIND: gh pr edit $PR --repo $SLUG --add-label kind/product|kind/tooling (a metrics/complexity/clone/size refactor is tooling), then make merge PR=$PR again"
 }
 
-# fleet_repos: devkit main's github/repos.json, read once into $fleet_json (github/ is never
-# vendored, so a consumer's checkout has none).
-fleet_repos() {
-  [ -z "${fleet_json+x}" ] || return 0
-  local devkit_slug=${DEVKIT_URL#https://github.com/}
-  fleet_json=$(gh api "repos/${devkit_slug%.git}/contents/github/repos.json" -H 'Accept: application/vnd.github.raw') \
-    || { echo "merge: cannot read the fleet list, devkit's github/repos.json (gh above)" >&2; exit 2; }
-}
-
-# unblocks <owner/repo> <n>: 0 when <owner/repo>#<n> is an open issue or PR of a fleet repo that
-# is no kit (header); else 1, naming why in $floor_why.
-unblocks() {
-  local rc plan
-  fleet_repos
-  floor_why=$("$DEVKIT_PYTHON" -I "$HERE/_output_floor.py" fleet "$1" <<<"$fleet_json")
-  rc=$?
-  case $rc in
-    0) ;;
-    1) return 1 ;;
-    *) echo "merge: cannot read devkit's github/repos.json (python above)" >&2; exit 2 ;;
-  esac
-  plan=$(gh api "repos/$1/contents/scripts/ci/gate_plan.sh" -H 'Accept: application/vnd.github.raw') \
-    || { floor_why="cannot read $1's plan, so cannot tell it is no kit (gh above)"; return 1; }
-  [ "$(gate_plan_literal /dev/stdin GATE_KIT <<<"$plan")" != 1 ] \
-    || { floor_why="$1 is a kit (GATE_KIT=1): kit work unblocks no product"; return 1; }
-  issue_ref "$1" "$2" || return 1
-  [ "$ref_state" = open ] || { floor_why="it is $ref_state"; return 1; }
-}
-
-# issue_ref <owner/repo> <n>: the issue's (or PR's) state into $ref_state, `issue` or `pr` into
-# $ref_type and its labels into $ref_labels; 1, naming why in $floor_why, when GitHub has none.
-issue_ref() {
-  local ref
-  ref=$(gh api "repos/$1/issues/$2" --jq '[.state, (if .pull_request then "pr" else "issue" end), ([.labels[].name] | join(","))] | @tsv') \
-    || { floor_why="GitHub has no issue or PR $1#$2 (gh above)"; return 1; }
-  # Labels last: tab is IFS whitespace, so an empty field anywhere else would shift the rest.
-  IFS=$'\t' read -r ref_state ref_type ref_labels <<<"$ref"
-}
-
-# floor_exemption: 0, naming it in $exempt, when the body's Unblocks: or Fixes: line exempts the
-# PR from the floor (header); else 1, each line's reason in $floor_not.
-floor_exemption() {
-  local ref n lines
-  lines=$(tr -d '\r' <<<"$body")
-  while IFS= read -r ref; do
-    if unblocks "${ref%#*}" "${ref##*#}"; then exempt="Unblocks: $ref, an open product issue"; return 0; fi
-    floor_not="$floor_not; Unblocks: $ref: $floor_why"
-  done < <(sed -n 's/^Unblocks:[[:space:]]*\([A-Za-z0-9_.-]*\/[A-Za-z0-9_.-]*#[0-9][0-9]*\)[[:space:]]*$/\1/p' <<<"$lines")
-  while IFS= read -r n; do
-    if issue_ref "$SLUG" "$n"; then
-      case "$ref_type,$ref_labels," in
-        pr,*) floor_why="it is a PR, not an issue" ;;
-        *,bug,*) [ "$ref_state" = open ] && { exempt="Fixes: #$n, an open bug"; return 0; }
-          floor_why="it is $ref_state" ;;
-        *) floor_why="it is not labelled bug" ;;
-      esac
-    fi
-    floor_not="$floor_not; Fixes: #$n: $floor_why"
-  done < <(sed -n 's/^Fixes:[[:space:]]*#\([0-9][0-9]*\)[[:space:]]*$/\1/p' <<<"$lines")
-  return 1
-}
-
-# floor_automated: 0 when PR <n> is a bot's, or a devkit sync whose diff only vendors devkit
-# (sync_exempt): a title is enough for the Kind, but would let any kit PR past the floor.
-floor_automated() {
-  pr_automated || return 1
-  [ "$automated" = bot ] && return 0
-  [ -n "${files+x}" ] || pr_changes
-  sync_exempt || { automated_why="titled a devkit sync, but ${not_sync:-it changes no .devkit-rev}"; return 1; }
-}
-
-# floor_gate: in a kit repo, refuse a merge the fleet's product floor pauses (header).
-floor_gate() {
-  local line fstatus fshare declared why say exempt="" floor_not=""
-  line=$("$DEVKIT_PYTHON" -I "$HERE/_output_floor.py" status "$(devkit_epoch)" "$FLOOR_MAX_DAYS") \
-    || { echo "merge: cannot read the OUTPUT floor (python above)" >&2; exit 2; }
-  IFS=$'\t' read -r fstatus fshare declared why <<<"$line"
-  say="merge: floor: $fstatus $fshare% ($declared declared${why:+; $why})"
-  if [ "$fstatus" = PASS ]; then
-    echo "$say; above the floor"; return
-  fi
-  if [ -n "${OWNER:-}" ]; then
-    exempt="Owner-Override"
-  elif floor_automated; then
-    exempt=$automated_why
-  else
-    floor_exemption || :
-  fi
-  if [ -n "$exempt" ]; then
-    echo "$say; exempt: $exempt"; return
-  fi
-  echo "$say; refused"
-  case "${automated_why:-}" in titled*) floor_not="; $automated_why$floor_not" ;; esac
-  echo "merge: refused: the fleet is under the product floor, so kit work waits: work on a product issue, or name what PR #$PR unblocks in its body, a line 'Unblocks: <owner/repo>#<n>' (an open issue or PR of a product repo) or 'Fixes: #<n>' (an open issue here labelled bug), then make merge PR=$PR again" >&2
-  [ -z "$floor_not" ] || echo "merge:   not exempt: ${floor_not#; }" >&2
-  exit 1
-}
-
 body=$(gh pr view "$PR" --repo "$SLUG" --json body --jq .body) \
   || { echo "merge: cannot read PR #$PR's body (gh above)" >&2; exit 2; }
 pr_kind
 echo "merge: kind: $kind ($kind_why)"
-[ "$KIT" != 1 ] || floor_gate
 
 # The head the rounds are judged at, and the filing too: only a round of it says which older
 # findings are fixed (codex_review.py). $head moves later only to a merge of main into it.

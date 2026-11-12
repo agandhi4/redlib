@@ -100,7 +100,8 @@
 # repository instead, writing core.bare=true into the config every checkout of it shares; the main
 # checkout then refuses `git status`. So the steps run without GIT_DIR/GIT_WORK_TREE whenever git
 # finds the same git dir from <root> without them (always, unless git was invoked with an explicit
-# --git-dir). GIT_INDEX_FILE stays: a pre-commit step reads the index being committed. And each
+# --git-dir). GIT_INDEX_FILE stays: a pre-commit step reads the index being committed, and every
+# step sees DEVKIT_HOOK=<pre-commit|pre-push> (docs_check.sh judges the index by it). And each
 # step is watched: core.bare (and `rev-parse --is-bare-repository`) is read before the first step
 # and after every step; a change prints `hook_steps: core.bare flipped to <v> after step <label>`
 # to stderr, adds `core.bare=<v> is-bare=<v>` as a sixth column on that step's ledger row, and
@@ -198,6 +199,10 @@ run_hook_steps() {
   esac
 
   export VITEST_MAX_WORKERS=${VITEST_MAX_WORKERS:-4}
+  # Which hook a step runs under: a guard with no `-staged` target of its own reads the index at
+  # pre-commit from it (docs_check.sh's rule 18, devkit #487). The whole step's tree inherits it:
+  # a test suite run as a step unsets it (tests/setup_suite.bash), or its fixtures read their index.
+  export DEVKIT_HOOK=$hook
 
   case " $ENV_REQUIRED_HOOKS " in
     *" $hook "*)
