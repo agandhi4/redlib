@@ -30,6 +30,9 @@
 //   above it at ../devkit/: vitest 4 refuses it in a happy-dom/jsdom project ("Cannot find
 //   module '/@fs/…'"), vitest 3 in every project ("Failed to load url"). The realpath, since
 //   vite resolves the setup file through symlinks before checking it.
+// - coverage.reportsDirectory: tier_guard's scratch dir (DEVKIT_CLOCK_SHIFT_COVERAGE), so a
+//   shifted run never cleans or rewrites the real-clock run's coverage/ (instalite-relay #18).
+//   Root config only: vitest reads coverage there, never per project.
 
 import { realpathSync } from "node:fs";
 
@@ -43,6 +46,7 @@ export function loadScaled(ms) {
 export const timeouts = { testTimeout: loadScaled(5_000), hookTimeout: loadScaled(10_000) };
 
 const clockShiftSetup = process.env.DEVKIT_CLOCK_SHIFT_VITEST;
+const clockShiftCoverage = process.env.DEVKIT_CLOCK_SHIFT_COVERAGE;
 
 // Deprecated 2026-10-24 (lint/exports.txt; devkit-check warns on its use): the setup file alone,
 // as before clockShift(). A config listing it must allow the file past fs.strict itself (orbit's
@@ -67,6 +71,7 @@ export function clockShift() {
           const test = (config.test ??= {});
           const own = [test.setupFiles ?? []].flat().filter((file) => file !== clockShiftSetup);
           test.setupFiles = [clockShiftSetup, ...own];
+          if (clockShiftCoverage) test.coverage = { ...test.coverage, reportsDirectory: clockShiftCoverage };
         },
       },
       configResolved(config) {

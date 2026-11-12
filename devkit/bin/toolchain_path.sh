@@ -35,56 +35,66 @@ _toolchain_fail() {
   [ "${3:-1}" != 3 ] || _TOOLCHAIN_TREE_FAULT=1
 }
 
-# shellcheck disable=SC2034  # TOOLCHAIN_* are this function's output, read by the caller
-toolchain_path() {
-  local tree=$1 bin decl='' f here rc
-  here=$(dirname "${BASH_SOURCE[0]}")
-  TOOLCHAIN_NOTES='' TOOLCHAIN_FAILED='' TOOLCHAIN_ERROR='' _TOOLCHAIN_TREE_FAULT=0
+_toolchain_note() { TOOLCHAIN_NOTES="${TOOLCHAIN_NOTES:+$TOOLCHAIN_NOTES; }$1"; }
 
-  # First, so Node and Rust land in front of it: its directory holds python3 and/or uv alone.
-  # Only what PATH lacks: a box whose PATH has them all gets PATH untouched.
+# _toolchain_run <what> <reason> <script> <tree>: one provisioning script. On success the
+# directory it printed (none: PATH already had the pin) goes first on PATH, in _TOOLCHAIN_BIN
+# too; on failure the step is recorded (_toolchain_fail) and it returns 1.
+_toolchain_run() {
+  local rc=0
+  _TOOLCHAIN_BIN=$("$_TOOLCHAIN_HERE/$3" "$4") || rc=$?
+  [ "$rc" = 0 ] || { _toolchain_fail "$1" "$2" "$rc"; return 1; }
+  [ -z "$_TOOLCHAIN_BIN" ] || export PATH="$_TOOLCHAIN_BIN:$PATH"
+}
+
+# Its directory holds python3 and/or uv alone, and only what PATH lacks: a box whose PATH has
+# them all gets PATH untouched.
+_toolchain_python() {
   if ! devkit_toolchain || { [ -n "$DEVKIT_TOOLCHAIN_OFF_LINKS" ] && ! devkit_toolchain_link "$DEVKIT_TOOLCHAIN_OFF_LINKS"; }; then
     _toolchain_fail Python "$DEVKIT_PYTHON_ERROR"
   elif [ -n "$DEVKIT_TOOLCHAIN_OFF_PATH" ]; then
     export PATH="$DEVKIT_TOOLCHAIN_BIN:$PATH"
-    TOOLCHAIN_NOTES=$DEVKIT_TOOLCHAIN_OFF_PATH
+    _toolchain_note "$DEVKIT_TOOLCHAIN_OFF_PATH"
   fi
+}
 
-  if [ -f "$tree/.nvmrc" ]; then
-    rc=0; bin=$("$here/node_toolchain.sh" "$tree") || rc=$?
-    if [ "$rc" != 0 ]; then
-      _toolchain_fail Node "cannot provide node $(tr -d '[:space:]' <"$tree/.nvmrc") declared in .nvmrc" "$rc"
-    else
-      [ -z "$bin" ] || export PATH="$bin:$PATH"
-      TOOLCHAIN_NOTES="${TOOLCHAIN_NOTES:+$TOOLCHAIN_NOTES; }node $(node --version) from .nvmrc"
-    fi
-  fi
+_toolchain_node() {
+  [ -f "$1/.nvmrc" ] || return 0
+  _toolchain_run Node "cannot provide node $(tr -d '[:space:]' <"$1/.nvmrc") declared in .nvmrc" node_toolchain.sh "$1" || return 0
+  _toolchain_note "node $(node --version) from .nvmrc"
+}
 
-  # After Node: the pinned Node's npm installs it. Never a PATH corepack (Node 25+ ships none).
-  if [[ "$TOOLCHAIN_FAILED" != *Node* ]]; then
-    rc=0; bin=$("$here/package_manager_toolchain.sh" "$tree") || rc=$?
-    if [ "$rc" != 0 ]; then
-      _toolchain_fail pnpm "cannot provide the pnpm a package.json packageManager declares" "$rc"
-    elif [ -n "$bin" ]; then
-      export PATH="$bin:$PATH"
-      TOOLCHAIN_NOTES="${TOOLCHAIN_NOTES:+$TOOLCHAIN_NOTES; }pnpm $(basename "$(dirname "$bin")") from packageManager"
-    fi
-  fi
+# The pinned Node's npm installs it, so never after a failed Node, and never a PATH corepack
+# (Node 25+ ships none).
+_toolchain_pnpm() {
+  [[ "$TOOLCHAIN_FAILED" != *Node* ]] || return 0
+  _toolchain_run pnpm "cannot provide the pnpm a package.json packageManager declares" package_manager_toolchain.sh "$1" || return 0
+  [ -z "$_TOOLCHAIN_BIN" ] || _toolchain_note "pnpm $(basename "$(dirname "$_TOOLCHAIN_BIN")") from packageManager"
+}
 
-  for f in rust-toolchain.toml rust-toolchain; do [ -f "$tree/$f" ] && { decl=$f; break; }; done
-  if [ -n "$decl" ]; then
-    rc=0; bin=$("$here/rust_toolchain.sh" "$tree") || rc=$?
-    if [ "$rc" != 0 ]; then
-      _toolchain_fail 'Rust toolchain' "cannot provide the rust toolchain declared in $decl" "$rc"
-    else
-      [ -z "$bin" ] || export PATH="$bin:$PATH"
-      # From the tree: a PATH cargo that matched is usually a rustup proxy, which resolves by cwd.
-      TOOLCHAIN_NOTES="${TOOLCHAIN_NOTES:+$TOOLCHAIN_NOTES; }rust $( (cd "$tree" && cargo --version) | awk '{print $2}') from $decl"
-    fi
-  fi
+_toolchain_rust() {
+  local decl='' f
+  for f in rust-toolchain.toml rust-toolchain; do [ -f "$1/$f" ] && { decl=$f; break; }; done
+  [ -n "$decl" ] || return 0
+  _toolchain_run 'Rust toolchain' "cannot provide the rust toolchain declared in $decl" rust_toolchain.sh "$1" || return 0
+  # From the tree: a PATH cargo that matched is usually a rustup proxy, which resolves by cwd.
+  _toolchain_note "rust $( (cd "$1" && cargo --version) | awk '{print $2}') from $decl"
+}
+
+# shellcheck disable=SC2034  # TOOLCHAIN_* are this function's output, read by the caller
+toolchain_path() {
+  _TOOLCHAIN_HERE=$(dirname "${BASH_SOURCE[0]}")
+  TOOLCHAIN_NOTES='' TOOLCHAIN_FAILED='' TOOLCHAIN_ERROR='' _TOOLCHAIN_TREE_FAULT=0
+  # In this order: each later directory lands in front of the earlier ones (Python first, so
+  # Node and Rust lead), and pnpm needs the pinned Node. Every step runs, so one error names
+  # every failure.
+  _toolchain_python
+  _toolchain_node "$1"
+  _toolchain_pnpm "$1"
+  _toolchain_rust "$1"
   [ "$_TOOLCHAIN_TREE_FAULT" = 0 ] || return 3
   [ -z "$TOOLCHAIN_FAILED" ] || return 1
-  DEVKIT_TOOLCHAIN_TREE=$(cd "$tree" && pwd -P)
+  DEVKIT_TOOLCHAIN_TREE=$(cd "$1" && pwd -P)
   export DEVKIT_TOOLCHAIN_TREE
   return 0
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fleet scorecard v2: four readouts per repo, never averaged together (scorecard-design.md §5).
+"""Fleet scorecard v2: five readouts per repo, never averaged together (scorecard-design.md §5).
 
   WIRED  is devkit enforcing here: of the mechanisms applicable to the repo's stack, how many
          are wired. `n/m` counts measured checks only; an UNMEASURED check (devkit has no way to
@@ -11,12 +11,29 @@
          carries a `Metrics-Rebaseline: <key>=…` trailer naming it: `make merge` writes one per
          loosened bound into a metrics-rebaseline PR's squash body (pr_merge.sh), the label's
          only record in git. A commit with no such trailer (history before devkit #168, a repo
-         not yet synced, a merge outside make merge) falls back to the two older signals: a
+         not yet synced, a merge outside make merge) falls back to the older signals: a
          docs/decisions.md line it adds names the key or its unambiguous short form
-         (short_names), or its message names `metrics-rebaseline`. The TREND table says which
-         matched. An unlabelled worsen of a bound is an enforcement failure. "Largest debts"
-         lists the keys past the scorecard.conf thresholds (the former T2 bands), with no
-         pass/fail.
+         (short_names), its message names `metrics-rebaseline`, or, asked of GitHub last, the
+         PR its squash subject names held that label at its merge (merged_labels). The TREND
+         table says which matched. Bounds and signals print apart, in the text and the JSON
+         (`moved`, `signals`): an unlabelled worsen of a bound (ratchet.json) is an enforcement
+         failure and says so; a report-only key (report-only.json, or report-only by name,
+         metrics_ratchet.is_report_only: vuln.*, meta.*, fan_in_max, max_lines, jscpd_percent;
+         fan_out_max and cycles stay bounds) is a signal by owner decision 2026-10-18,
+         its move printed with no label and no verdict (kitchen's excluded_files 9 -> 107 under
+         a glob read as "the ratchet is leaking", 2026-11-05), and the one-line counts are the
+         bounds'. A window that reaches a `devkit new` root commit starts at its values,
+         measured over the template: the next commit's change to a key is its adoption,
+         `adopted` (the window measured from the adopted value), never a worsen (instalite-relay,
+         3 -> 11 on its first real commit). "Largest debts" lists the keys past the
+         scorecard.conf thresholds (the former T2 bands), with no pass/fail.
+  VULN   what is exposed today: the critical and high advisories in the locked production
+         dependencies, from a fresh run of devkit's own metrics/vuln.py over the lock flags of
+         the repo's metrics.conf vuln.py lines (vuln_watch.measure, the nightly's), never the
+         committed vuln.* counts, which age until a tighten (redlib, 2026-11-05: high 0 on file
+         with RUSTSEC-2026-0433 open). An OSV it cannot reach, or a repo with no vuln.py line,
+         is `vuln unmeasured (<why>)`, never 0. It reads OSV and runs `uv export --frozen`, not
+         the repo's code; `--mode` never runs it.
   BITE   does enforcement act: hook runs and fails by step, from bite.measure (the numbers
          `bite.py --json` prints).
   OUTPUT what the work went to (owner 2026-11-04: app-repo product commits fell from 68% to
@@ -65,15 +82,16 @@ The ratchet holds, per repo-scoped check, whether it is wired: `{"checks": {<id>
 The share stays a reported number; it is not the bound, because a check devkit adds would lower
 it in every repo on the sync that vendors it. A check the file does not record is new devkit
 backlog (printed, never a failure); a recorded wired check now unwired, or NA, fails. Machine-scoped
-checks (hooks ledger live, gh shim) and fleet-scoped ones (devkit-rev age, the repos.json
-listing) are printed in n/m but never ratcheted: they change without a code change, and a gate
-on another host would fail on them, so `--mode` does not run the fleet ones. Run from a
-consumer's vendored devkit/, those two read GitHub through `gh api` (repos.json cached 7 days in
-<state>/devkit/scorecard/), so they measure there too. `check` holds the checks to the PR's file
-and that file to main's copy (the metrics ratchet's semantics: the metrics-rebaseline label
-admits a check main records wired going unrecorded or unwired in the PR's file, never a measured
-loss against the PR's own file), and, as the metrics ratchet does since gains lock in, fails a
-recorded unwired check now wired until `make metrics-tighten` commits it. An older file (the v1
+checks (hooks ledger live, gh shim, the sessions' fixed context) and fleet-scoped ones
+(devkit-rev age, the repos.json listing) are printed in n/m but never ratcheted: they change
+without a code change, and a gate on another host would fail on them, so `--mode` does not run
+the fleet ones. Run from a consumer's vendored devkit/, those two read GitHub through `gh api`
+(repos.json cached 7 days in <state>/devkit/scorecard/), so they measure there too. `check`
+holds the checks to the PR's file and that file to main's copy (the metrics ratchet's semantics:
+the metrics-rebaseline label admits a check main records wired going unrecorded or unwired in
+the PR's file, never a measured loss against the PR's own file), and, as the metrics ratchet
+does since gains lock in, fails a recorded unwired check now wired until `make metrics-tighten`
+commits it. An older file (the v1
 per-track schema, or the share-only one before 2026-10-22) records no check by name: it reads
 as first adoption on either side and its scorecard_file check fails until tightened. Exit 0 when
 it ran (1 for a ratchet failure in --mode), 2 on usage.
@@ -86,6 +104,7 @@ Every WIRED check prints `wired <id> <scope> PASS|FAIL|D|UNMEASURED|NA <evidence
 from __future__ import annotations
 
 import argparse
+import functools
 import importlib.util
 import json
 import os
@@ -97,7 +116,9 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from statistics import median
 from types import ModuleType
+from typing import NamedTuple
 
 HERE = Path(__file__).resolve().parent
 DEVKIT = HERE.parent
@@ -127,9 +148,11 @@ compose_mod = _load_sibling("_compose.py", "devkit_compose")  # its compose file
 renovate_mod = _load_sibling("_renovate.py", "devkit_renovate")  # devkit-check's Renovate audit
 cost_mod = _load_sibling("agent_cost.py", "devkit_agent_cost")  # the agent-cost ledger's reader
 dependency_mod = _load_sibling("_dependency_pr.py", "devkit_dependency_pr")  # bot(): OUTPUT's kind
+vuln_watch_mod = _load_sibling("vuln_watch.py", "devkit_vuln_watch")  # VULN: the nightly's rerun
 BOUNDS_FILE = "docs/metrics/ratchet.json"
 REPORT_ONLY_FILE = "docs/metrics/report-only.json"
 TREND_FILES = (BOUNDS_FILE, REPORT_ONLY_FILE)
+METRICS_CONF = "scripts/ci/metrics.conf"
 TREND_WINDOWS = (7, 30)
 BITE_DAYS = 30
 SCOPES = ("repo", "machine", "fleet")
@@ -557,12 +580,12 @@ RATCHET_DOMAINS = (
 
 
 def wired_ratchet(repo: Repo, stack: set[str]) -> None:
-    file = (repo.root / BOUNDS_FILE).is_file() and (repo.root / "scripts/ci/metrics.conf").is_file()
+    file = (repo.root / BOUNDS_FILE).is_file() and (repo.root / METRICS_CONF).is_file()
     if stack & CODE_STACKS:
         repo.add(
             "ratchet.file",
             file,
-            f"{BOUNDS_FILE} + scripts/ci/metrics.conf"
+            f"{BOUNDS_FILE} + {METRICS_CONF}"
             if file
             else "no metrics ratchet (metrics_collect.sh rebaseline)",
         )
@@ -906,7 +929,7 @@ DEPLOY_KINDS_LINE = re.compile(r"^DEPLOY_KINDS=([A-Za-z0-9._,/-]*)[ \t]*(?:#.*)?
 PUBLISH_IMAGE_LINE = re.compile(r"^PUBLISH_IMAGE=[A-Za-z0-9._,/-]+[ \t]*(?:#.*)?$", re.M)
 MAC_PROOF = "main_check.sh on the Mac (check_tree.sh at a new main, once per window)"
 DEPLOY_KINDS = {
-    "image": "publish.sh on linux-box (check_tree.sh before latest moves)",
+    "image": "publish.sh on the publisher host (check_tree.sh before latest moves)",
     "ios": MAC_PROOF,
     "mac": MAC_PROOF,
     "hosted": "its host applies main itself (homelab's hosts, Vercel); " + MAC_PROOF,
@@ -1072,6 +1095,73 @@ def _ledger_day(line: str) -> date:
         return date.min
 
 
+FIXED_CONTEXT_LEDGER = DEVKIT / "docs" / "fixed-context.tsv"
+FIXED_CONTEXT_CHECK = "agent.fixed_context"
+
+
+def wired_agent_context(
+    repo: Repo, conf: dict[str, float], ledger: Path = FIXED_CONTEXT_LEDGER, devkit: Path = DEVKIT
+) -> None:
+    """Machine scope: what an interactive session of this repo on this Mac opens with (its first
+    API call's input, re-read by every later call), the median of the session ledger's rows in
+    fixed_context_days against fixed_context_median_max. `agent_cost.py --fixed-context` (make
+    agent-cost) writes the ledger in the devkit checkout; it is never vendored, so a consumer's
+    own run reads NA, as the agent-cost ledger did (decision 2026-10-16)."""
+    days, limit = conf["fixed_context_days"], conf["fixed_context_median_max"]
+    if not ledger.is_file():
+        if is_devkit_checkout(devkit):
+            repo.add(
+                FIXED_CONTEXT_CHECK,
+                None,
+                f"no session ledger at {ledger}",
+                scope="machine",
+                mechanism="make agent-cost",
+            )
+        else:
+            repo.na(
+                FIXED_CONTEXT_CHECK,
+                "the session ledger is the devkit checkout's, never vendored",
+                scope="machine",
+            )
+        return
+    try:
+        rows = cost_mod.load_sessions(ledger)
+    except cost_mod.LedgerError as why:
+        repo.add(
+            FIXED_CONTEXT_CHECK,
+            None,
+            str(why),
+            scope="machine",
+            mechanism="the header agent_cost.py writes (make agent-cost)",
+        )
+        return
+    since = date.today() - timedelta(days=days)
+    tokens = [
+        int(r["fixed_context"])
+        for r in rows
+        if r["repo"] == repo.name
+        and r["fixed_context"].isdigit()
+        and _ledger_day(r["date"]) >= since
+    ]
+    if not tokens:
+        repo.add(
+            FIXED_CONTEXT_CHECK,
+            None,
+            f"no cli session of {repo.name} in {days:g} d in {ledger.name}",
+            scope="machine",
+            mechanism="make agent-cost after a session here",
+        )
+        return
+    mid = median(tokens)
+    repo.add(
+        FIXED_CONTEXT_CHECK,
+        mid <= limit,
+        f"median {mid:,.0f} tokens over {len(tokens)} session(s) in {days:g} d "
+        f"(max {limit:,.0f}); min {min(tokens):,}, max {max(tokens):,}",
+        scope="machine",
+    )
+
+
 def is_devkit_checkout(devkit: Path) -> bool:
     # Inside a consumer, DEVKIT is its vendored devkit/ and `git -C` would answer for the
     # consumer's own history (962 commits behind, finplat lane): only a devkit CHECKOUT counts.
@@ -1083,7 +1173,7 @@ def is_devkit_checkout(devkit: Path) -> bool:
 
 # The upstream every .devkit-rev names (devkit-sync.sh's DEVKIT_URL). It is private, so its
 # files come through `gh api` (authenticated), never raw.githubusercontent.com.
-DEVKIT_SLUG = "agandhi4/devkit"
+DEVKIT_SLUG = "kashhq/devkit"
 GH_API_TIMEOUT = 30  # seconds; a hung gh is UNMEASURED, never a hung scorecard
 REPOS_JSON_CACHE_DAYS = 7
 
@@ -1353,6 +1443,7 @@ def score_wired(
     wired_tiers(repo)
     wired_clock_shift(repo)
     wired_process(repo, state_home, conf)
+    wired_agent_context(repo, conf)
     wired_gh_shim(repo)
     if fleet:
         wired_currency(repo, conf)
@@ -1369,11 +1460,18 @@ def _number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def revision_values(root: Path, rev: str) -> dict[str, tuple[float, str]]:
-    """key -> (value, direction) in both trend files at `rev`. A bound carries its direction;
-    a report-only value takes its domain's (metrics_ratchet.DOMAIN_DIRECTIONS). Entries an old
-    revision wrote in another shape are skipped, not an error: history is read as it is."""
-    out: dict[str, tuple[float, str]] = {}
+class Measured(NamedTuple):
+    value: float
+    direction: str
+    signal: bool  # a report-only key: its moves are printed, never judged (module docstring)
+
+
+def revision_values(root: Path, rev: str) -> dict[str, Measured]:
+    """Every key of both trend files at `rev`. A bound carries its direction; a report-only
+    value takes its domain's (metrics_ratchet.DOMAIN_DIRECTIONS) and is a signal, as is a key
+    the name rule makes report-only wherever it sits. Entries an old revision wrote in another
+    shape are skipped, not an error: history is read as it is."""
+    out: dict[str, Measured] = {}
     for path in TREND_FILES:
         text = git(root, "show", f"{rev}:{path}")
         try:
@@ -1389,12 +1487,14 @@ def revision_values(root: Path, rev: str) -> dict[str, tuple[float, str]]:
                     and _number(entry.get("bound"))
                     and entry.get("direction") in ratchet_mod.DIRECTIONS
                 ):
-                    out[key] = (float(entry["bound"]), entry["direction"])
+                    out[key] = Measured(
+                        float(entry["bound"]), entry["direction"], ratchet_mod.is_report_only(key)
+                    )
         else:
             for key, value in (doc.get("metrics") or {}).items():
                 direction = ratchet_mod.DOMAIN_DIRECTIONS.get(key.partition(".")[0])
                 if _number(value) and direction:
-                    out[key] = (float(value), direction)
+                    out[key] = Measured(float(value), direction, True)
     return out
 
 
@@ -1403,8 +1503,14 @@ class KeyTrend:
     key: str
     first: float
     last: float
-    status: str  # BETTER SAME WORSE (metrics_ratchet.classify)
-    labelled: str = ""  # for a WORSE key: "trailer", "decisions", "message", or "" when unlabelled
+    status: str  # BETTER SAME WORSE (metrics_ratchet.classify), from `first`
+    labelled: str = ""  # a WORSE bound's: "trailer", "decisions", "message", "pr-label", ""
+    signal: bool = False  # a report-only key: no label, no verdict
+    adopted_from: float | None = None  # the root commit's value; `first` is the key's adoption
+
+    @property
+    def moved(self) -> bool:
+        return self.status != "SAME" or self.adopted_from is not None
 
 
 @dataclass
@@ -1414,18 +1520,30 @@ class Trend:
     commits: int = 0
     note: str = ""
 
+    @property
+    def bounds(self) -> list[KeyTrend]:
+        return [k for k in self.keys if not k.signal]
+
+    @property
+    def signals(self) -> list[KeyTrend]:
+        return [k for k in self.keys if k.signal]
+
     def count(self, status: str) -> int:
-        return sum(1 for k in self.keys if k.status == status)
+        """Bounds only: a signal's move is no improvement or regression of enforcement."""
+        return sum(1 for k in self.bounds if k.status == status)
 
     def labelled(self) -> int:
-        return sum(1 for k in self.keys if k.status == "WORSE" and k.labelled)
+        return sum(1 for k in self.bounds if k.status == "WORSE" and k.labelled)
 
     def summary(self) -> str:
         better, same, worse = self.count("BETTER"), self.count("SAME"), self.count("WORSE")
         return f"{better}↓ {same}= {worse}↑({self.labelled()} labelled)"
 
 
+SCAFFOLD_SUBJECT = re.compile(r"Create \S+ with devkit new \(")  # devkit-new.sh's root commit
 TRAILER = "Metrics-Rebaseline:"  # pr_merge.sh writes `Metrics-Rebaseline: <key>=<old>→<new>`
+REBASELINE_LABEL = "metrics-rebaseline"
+SQUASH_PR = re.compile(r"\(#(\d+)\)$")  # GitHub's squash subject: `<title> (#<n>)`
 
 
 def trailer_keys(message: str) -> set[str]:
@@ -1450,12 +1568,38 @@ def short_names(keys: set[str]) -> dict[str, str]:
     return {key: name for key, name in short.items() if owners[name] == 1 and name != key}
 
 
-def commit_label(root: Path, sha: str, key: str, short: str = "") -> str:
+LABEL_EVENTS = (  # one `<event>\t<label>` line per label change and the merge, oldest first
+    '.[] | select(.event == "labeled" or .event == "unlabeled" or .event == "merged")'
+    ' | "\\(.event)\\t\\(.label.name // "")"'
+)
+
+
+@functools.cache
+def merged_labels(slug: str, number: str) -> frozenset[str]:
+    """The labels PR <number> of <slug> held when it merged, replayed from its issue events: a
+    label added after the merge (triage rights suffice) sanctions nothing, and one removed later
+    unsanctions nothing. Empty when gh cannot say (no gh, no network) or the PR never merged, so
+    the commit reads as unlabelled, the verdict it had before GitHub was asked."""
+    out, _why = gh_api(f"repos/{slug}/issues/{number}/events", "--paginate", "--jq", LABEL_EVENTS)
+    held: set[str] = set()
+    for line in (out or "").splitlines():
+        event, _, name = line.partition("\t")
+        if event == "merged":
+            return frozenset(held)
+        if event == "labeled":
+            held.add(name)
+        else:
+            held.discard(name)
+    return frozenset()
+
+
+def commit_label(root: Path, sha: str, key: str, short: str = "", slug: str = "") -> str:
     """Why a commit that worsened `key` counts as labelled (module docstring): its trailer
     names the key; or, for a commit with no trailer at all, a decisions line it adds names the
     key or its unambiguous `short` form (short_names) as a whole word, or its message names
-    metrics-rebaseline. A trailer that names other keys only is a labelled PR that did not
-    loosen this one, so no fallback rescues it."""
+    metrics-rebaseline, or the PR its squash subject names held the label when it merged (asked
+    only when `slug`, origin's, is known and git holds no sign). A trailer that names other
+    keys only is a labelled PR that did not loosen this one, so no fallback rescues it."""
     message = git(root, "log", "-1", "--format=%B", sha)
     trailed = trailer_keys(message)
     if trailed:
@@ -1464,8 +1608,14 @@ def commit_label(root: Path, sha: str, key: str, short: str = "") -> str:
     names = re.compile("|".join(rf"(?<![\w.:/]){re.escape(n)}(?![\w])" for n in (key, short) if n))
     if any(line.startswith("+") and names.search(line) for line in added):
         return "decisions"
-    if "metrics-rebaseline" in message:
+    if REBASELINE_LABEL in message:
         return "message"
+    # instalite #29 (2026-10-18): labelled and merged by make merge a day before #168's
+    # trailer, its decisions entry explaining the change without naming fan_out_max. The label
+    # was the sanction; GitHub is its only record.
+    pr = SQUASH_PR.search(message.partition("\n")[0])
+    if slug and pr and REBASELINE_LABEL in merged_labels(slug, pr.group(1)):
+        return "pr-label"
     return ""
 
 
@@ -1478,7 +1628,9 @@ def trend(root: Path, days: int, now: datetime) -> Trend:
         return t
     last = revision_values(root, "HEAD")
     if not shas:
-        t.keys = [KeyTrend(k, v, v, "SAME") for k, (v, _) in sorted(last.items())]
+        t.keys = [
+            KeyTrend(k, m.value, m.value, "SAME", signal=m.signal) for k, m in sorted(last.items())
+        ]
         return t
     oldest = shas[-1]
     start = git(root, "rev-parse", "--verify", "--quiet", f"{oldest}^")
@@ -1486,24 +1638,41 @@ def trend(root: Path, days: int, now: datetime) -> Trend:
         t.note = f"history shallow before {oldest[:7]}: the window starts after it"
         start = oldest
     first = revision_values(root, start) if start else {}
+    # No start: the window reaches the repo's root commit. When `devkit new` made it, its values
+    # were measured over the template (instalite-relay: cognitive_max 3, then 11 on the first
+    # real commit), so the next commit's change to one is the key's adoption, never a worsen; a
+    # later one is not. Any other root commit holds the repo's own first bounds.
+    adopting = not start and bool(
+        SCAFFOLD_SUBJECT.match(git(root, "log", "-1", "--format=%s", oldest))
+    )
+    adopted: dict[str, float] = {}
     # Walk oldest -> newest so each worsening commit is found once, against its predecessor. A
     # key adopted inside the window starts at its first committed value.
     worsened_by: dict[str, list[str]] = {}
     prev = first
     for sha in reversed(shas):
         cur = revision_values(root, sha)
-        for key, (value, direction) in cur.items():
-            first.setdefault(key, (value, direction))
-            if key in prev and ratchet_mod.classify(value, prev[key][0], direction) == "WORSE":
+        for key, m in cur.items():
+            first.setdefault(key, m)
+            was = prev.get(key)
+            if adopting and was and m.value != was.value:
+                adopted[key] = was.value
+                first[key] = m
+            elif was and ratchet_mod.classify(m.value, was.value, m.direction) == "WORSE":
                 worsened_by.setdefault(key, []).append(sha)
+        adopting = adopting and sha == oldest
         prev = cur
     shorts = short_names(set(first) | set(last))
+    slug = identity.origin_slug(root)
     for key in sorted(set(first) & set(last)):
-        (a, _), (b, direction) = first[key], last[key]
-        kt = KeyTrend(key, a, b, ratchet_mod.classify(b, a, direction))
-        if kt.status == "WORSE":
+        a, b = first[key].value, last[key]
+        kt = KeyTrend(
+            key, a, b.value, ratchet_mod.classify(b.value, a, b.direction),
+            signal=b.signal, adopted_from=adopted.get(key),
+        )  # fmt: skip
+        if kt.status == "WORSE" and not kt.signal:
             labels = [
-                commit_label(root, sha, key, shorts.get(key, ""))
+                commit_label(root, sha, key, shorts.get(key, ""), slug)
                 for sha in worsened_by.get(key, [])
             ]
             kt.labelled = labels[0] if labels and all(labels) else ""
@@ -1545,7 +1714,6 @@ KIND_TRAILER = re.compile(r"^Kind: (product|tooling)[ \t]*$", re.M)
 KIND_BY_TRAILER = re.compile(r"^Kind-By: (label|kit|sync|bot)[ \t]*$", re.M)
 DEVKIT_SYNC_SUBJECT = "Update devkit to "  # dependency_merge.sh's sync PR title
 PRODUCT_AREAS = frozenset({"backend", "frontend", "native", "other"})
-SQUASH_PR = re.compile(r"\(#(\d+)\)$")  # GitHub's squash subject: `<title> (#<n>)`
 AGENT_COST_LEDGER = DEVKIT / "docs" / "agent-cost.tsv"
 # One bash per repo: blank-line-terminated path lists in, one DEVKIT_AREAS line per list out.
 AREAS_SCRIPT = r""". "$1" && devkit_load_code_paths "$2" || exit 2
@@ -1667,7 +1835,11 @@ def output(root: Path, name: str, now: datetime, ledger: Path = AGENT_COST_LEDGE
         "judged": {k: sum(1 for c in commits if c.judged and c.kind == k)
                    for k in ("product", "tooling")},
     }
-    spent = agent_tokens(ledger) if ledger.is_file() else None
+    try:
+        spent = agent_tokens(ledger) if ledger.is_file() else None
+    except cost_mod.LedgerError as why:
+        doc["tokens"] = {"unmeasured": str(why)}
+        return doc
     joined = [(c, spent[(name, c.pr)]) for c in commits if spent and (name, c.pr) in spent]
     if spent is None:
         doc["tokens"] = {"unmeasured": f"no ledger at {ledger} (a devkit checkout's)"}
@@ -1811,6 +1983,75 @@ def write_output_cache(state_home: Path, docs: list[dict], fleet: dict, now: dat
     return path
 
 
+# ---- VULN -----------------------------------------------------------------------------------
+# The critical and high advisories in the locked production dependencies today, never the
+# committed vuln.* counts (redlib, 2026-11-05: report-only.json said high 0 while RUSTSEC-2026-0433
+# was open). devkit's own metrics/vuln.py, rerun as the nightly's vuln watch reruns it.
+
+# The conf's collector commands, one per line, by the lib every other reader of it uses.
+CONF_COMMANDS_SCRIPT = r""". "$1" || exit 2
+die() { echo "$*" >&2; exit 2; }
+metrics_conf_parse "$2"
+printf '%s\n' ${COMMANDS[@]+"${COMMANDS[@]}"}
+"""
+
+
+def vulns(root: Path, now: datetime) -> dict:
+    """`{"date", "packages", "critical", "high", "ids"}` from a fresh run over the lock flags of
+    the repo's metrics.conf vuln.py lines (vuln_watch.measure: devkit's collector, not the
+    repo's copy, and none of the repo's code), or `{"unmeasured": <why>}`: an OSV that cannot
+    be reached is never a clean count."""
+    conf = root / METRICS_CONF
+    if not conf.is_file():
+        return {"unmeasured": f"no {METRICS_CONF}"}
+    lib = str(HERE / "_metrics_conf_lib.sh")
+    proc = subprocess.run(
+        ["bash", "-c", CONF_COMMANDS_SCRIPT, "_", lib, str(conf)],
+        capture_output=True, text=True, check=False,
+    )  # fmt: skip
+    if proc.returncode != 0:
+        return {"unmeasured": (proc.stderr.strip().splitlines() or ["cannot parse"])[-1]}
+    try:
+        packages, found = vuln_watch_mod.measure(root, proc.stdout.splitlines())
+    except vuln_watch_mod.Unmeasured as exc:
+        return {"unmeasured": str(exc)}
+    severities = [a.severity for a in found.values()]
+    return {
+        "date": now.isoformat(timespec="seconds"),
+        "packages": packages,
+        "critical": severities.count("CRITICAL"),
+        "high": severities.count("HIGH"),
+        "ids": [vuln_watch_mod.describe(found[i]) for i in sorted(found)],
+    }
+
+
+def vuln_part(vuln: dict | None) -> str:
+    if vuln is None:  # a document saved before the readout
+        return "vuln unmeasured (not in this document)"
+    if "unmeasured" in vuln:
+        return f"vuln unmeasured ({vuln['unmeasured']})"
+    return f"vuln {vuln['critical']} critical, {vuln['high']} high"
+
+
+def vuln_summary(vuln: dict | None) -> str:
+    """The fleet report's line: the counts and ids, or why there are none."""
+    if vuln is None or "unmeasured" in vuln:
+        return vuln_part(vuln).removeprefix("vuln ")
+    ids = f": {'; '.join(vuln['ids'])}" if vuln["ids"] else ""
+    return f"{vuln_part(vuln).removeprefix('vuln ')} in {vuln['packages']} packages{ids}"
+
+
+def vuln_lines(vuln: dict | None) -> list[str]:
+    head = "VULN (now: devkit's metrics/vuln.py over the locks metrics.conf names, OSV)"
+    if vuln is None or "unmeasured" in vuln:
+        return [head, f"- {vuln_part(vuln).removeprefix('vuln ')}"]
+    return [
+        f"{head} at {vuln['date']}",
+        f"- {vuln_part(vuln).removeprefix('vuln ')} in {vuln['packages']} production packages",
+        *(f"- {i}" for i in vuln["ids"]),
+    ]
+
+
 # ---- the repo document ----------------------------------------------------------------------
 
 
@@ -1826,7 +2067,7 @@ def repo_doc(
     trends = {str(d): trend(repo.root, d, now) for d in TREND_WINDOWS}
     bite = bite_mod.measure(repo.root, BITE_DAYS, state_home)
     longest = trends[str(max(TREND_WINDOWS))]
-    moved = {k.key for t in trends.values() for k in t.keys if k.status != "SAME"}
+    moved = {k.key for t in trends.values() for k in t.keys if k.moved}
     return {
         "repo": repo.name,
         "metrics_from": repo.metrics_from,
@@ -1845,7 +2086,10 @@ def repo_doc(
                 "worse": t.count("WORSE"),
                 "labelled": t.labelled(),
                 "note": t.note,
-                "moved": [k.__dict__ for k in t.keys if k.status != "SAME"],
+                # Bounds only: an unlabelled WORSE here is an enforcement failure.
+                "moved": [k.__dict__ for k in t.bounds if k.moved],
+                # Report-only keys: printed, no verdict (owner 2026-10-18, metrics are signals).
+                "signals": [k.__dict__ for k in t.signals if k.moved],
             }
             for d, t in trends.items()
         },
@@ -1854,12 +2098,19 @@ def repo_doc(
         "debts": largest_debts(repo.metrics, conf),
         "bite": bite_mod.as_json(bite.repo, bite.days, bite.since, bite.hooks),
         "output": output(repo.root, repo.name, now, ledger),
+        "vuln": vulns(repo.root, now),
     }
 
 
 def trend_part(doc: dict, days: int) -> str:
+    """The bounds' counts, then how many signals moved (a document saved before 2026-11-05
+    holds none apart)."""
     t = doc["trend"][str(days)]
-    return f"{days}d: {t['better']}↓ {t['same']}= {t['worse']}↑({t['labelled']} labelled)"
+    signals = len(t.get("signals", []))
+    return (
+        f"{days}d: {t['better']}↓ {t['same']}= {t['worse']}↑({t['labelled']} labelled), "
+        f"{signals} signal{'' if signals == 1 else 's'} moved"
+    )
 
 
 def bite_part(bite: dict) -> str:
@@ -1870,12 +2121,13 @@ def bite_part(bite: dict) -> str:
 
 
 def summary_line(doc: dict) -> str:
-    """`wired n/m · 7d: a↓ b= c↑(l labelled) · 30d: … · hooks h, fails f
-    · output product n/m (p%)`"""
+    """`wired n/m · 7d: a↓ b= c↑(l labelled), s signals moved · 30d: … · vuln c critical, h high
+    (or `vuln unmeasured (<why>)`) · hooks h, fails f · output product n/m (p%)`"""
     w = doc["wired"]
     parts = [
         f"wired {w['wired']}/{w['measured']}",
         *(trend_part(doc, d) for d in TREND_WINDOWS),
+        vuln_part(doc.get("vuln")),
         bite_part(doc["bite"]),
         output_part(doc["output"]),
     ]
@@ -1886,6 +2138,41 @@ def _table(header: tuple[str, ...], rows: list[tuple[str, ...]]) -> list[str]:
     widths = [max(len(r[i]) for r in [header, *rows]) for i in range(len(header) - 1)]
     fmt = "  ".join(f"{{:<{w}}}" for w in widths) + "  {}"
     return [fmt.format(*header), *(fmt.format(*r) for r in rows)]
+
+
+def trend_cell(k: dict) -> str:
+    """One key's move in one window: `a->b ↓`, `a->b ↑ labelled(how)`, `a->b ↑ UNLABELLED —
+    enforcement failure`, `a->b ↑ signal`; `s->a adopted` for a key the window saw leave its
+    scaffold value s (trend()), and `(adopted from s)` after a move since."""
+    if k["status"] == "SAME":  # moved, so adopted: a flat key is listed only then
+        return f"{k['adopted_from']:g}->{k['first']:g} adopted"
+    arrow = "↓" if k["status"] == "BETTER" else "↑"
+    if k["status"] == "WORSE":
+        if k.get("signal"):
+            arrow += " signal"
+        elif k["labelled"]:
+            arrow += f" labelled({k['labelled']})"
+        else:
+            arrow += " UNLABELLED — enforcement failure"
+    cell = f"{k['first']:g}->{k['last']:g} {arrow}"
+    if k.get("adopted_from") is not None:
+        cell += f" (adopted from {k['adopted_from']:g})"
+    return cell
+
+
+def trend_table(doc: dict, part: str) -> list[str]:
+    """The moved keys of one TREND part ("moved": bounds, "signals"), a column per window."""
+    moved: dict[str, dict[str, dict]] = {}
+    for d in TREND_WINDOWS:
+        for k in doc["trend"][str(d)].get(part, []):
+            moved.setdefault(k["key"], {})[str(d)] = k
+    rows = [
+        (key, *(trend_cell(k) if (k := moved[key].get(str(d))) else "=" for d in TREND_WINDOWS))
+        for key in sorted(moved)
+    ]
+    if not rows:
+        return [f"- no key moved in {max(TREND_WINDOWS)} days"]
+    return _table(("key", *(f"{d}d" for d in TREND_WINDOWS)), rows)
 
 
 def repo_lines(doc: dict) -> list[str]:
@@ -1902,30 +2189,10 @@ def repo_lines(doc: dict) -> list[str]:
     ]
     lines += ["", "owner (not in n/m)", *([f"- {o}" for o in [*doc["owner"], *FLEET_OWNER_ITEMS]])]
     lines += ["", f"TREND ({doc['trend_keys']} keys in {BOUNDS_FILE} + {REPORT_ONLY_FILE})"]
-    moved: dict[str, dict[str, dict]] = {}
-    for d in TREND_WINDOWS:
-        for k in doc["trend"][str(d)]["moved"]:
-            moved.setdefault(k["key"], {})[str(d)] = k
-    rows = []
-    for key in sorted(moved):
-        cells = []
-        for d in TREND_WINDOWS:
-            k = moved[key].get(str(d))
-            if k is None:
-                cells.append("=")
-                continue
-            arrow = (
-                "↓"
-                if k["status"] == "BETTER"
-                else "↑" + (f" labelled({k['labelled']})" if k["labelled"] else " UNLABELLED")
-            )
-            cells.append(f"{k['first']:g}->{k['last']:g} {arrow}")
-        rows.append((key, *cells))
-    lines += (
-        _table(("key", *(f"{d}d" for d in TREND_WINDOWS)), rows)
-        if rows
-        else ["- no key moved in 30 days"]
-    )
+    lines += [f"bounds ({BOUNDS_FILE}: an unlabelled worsen is an enforcement failure)"]
+    lines += trend_table(doc, "moved")
+    lines += [f"signals ({REPORT_ONLY_FILE}: printed, no verdict)"]
+    lines += trend_table(doc, "signals")
     notes = {doc["trend"][str(d)]["note"] for d in TREND_WINDOWS} - {""}
     lines += [f"- note: {n}" for n in sorted(notes)]
     lines += ["", "largest debts (past the scorecard.conf thresholds; a signal, no verdict)"]
@@ -1933,6 +2200,7 @@ def repo_lines(doc: dict) -> list[str]:
         f"- {d['key']} {d['value']:g} (threshold {d['threshold']:g})" for d in doc["debts"]
     ] or ["- none"]
     b = doc["bite"]
+    lines += ["", *vuln_lines(doc.get("vuln"))]
     lines += ["", f"BITE ({b['days']} d since {b['since']})"]
     hooks = b["hooks"]
     bite_rows = [("hook-step", k, str(n)) for k, n in hooks.get("steps", {}).items()]
@@ -1985,18 +2253,22 @@ def fleet_markdown(
         f"- {cid}: {len(rs)} ({', '.join(sorted(rs))})"
         for cid, rs in sorted(missing.items(), key=lambda kv: (-len(kv[1]), kv[0]))
     ] or ["- none"]
-    lines += ["", "## TREND: worsened keys (30 d)", ""]
-    worse = [
-        (d["repo"], k)
-        for d in docs
-        for k in d["trend"][str(max(TREND_WINDOWS))]["moved"]
-        if k["status"] == "WORSE"
-    ]
+    month = str(max(TREND_WINDOWS))
+    lines += ["", f"## TREND: worsened bounds ({month} d; unlabelled: enforcement failure)", ""]
     lines += [
-        f"- {r} {k['key']} {k['first']:g}->{k['last']:g} "
-        + (f"labelled ({k['labelled']})" if k["labelled"] else "UNLABELLED")
-        for r, k in worse
+        f"- {d['repo']} {k['key']} {trend_cell(k)}"
+        for d in docs
+        for k in d["trend"][month]["moved"]
+        if k["status"] == "WORSE" and not k.get("signal")
     ] or ["- none"]
+    lines += ["", f"## TREND: signal moves ({month} d; report-only, no verdict)", ""]
+    lines += [
+        f"- {d['repo']} {k['key']} {trend_cell(k)}"
+        for d in docs
+        for k in d["trend"][month].get("signals", [])  # a document saved before 2026-11-05 has none
+    ] or ["- none"]
+    lines += ["", "## VULN: critical/high advisories now (a fresh run, never the snapshot)", ""]
+    lines += [f"- {d['repo']}: {vuln_summary(d.get('vuln'))}" for d in docs] or ["- none"]
     lines += ["", f"## OUTPUT: product share by repo ({OUTPUT_DAYS} d; printed, never judged)", ""]
     lines += [f"- {d['repo']}: {output_summary(d['output'])}" for d in docs] or ["- none"]
     lines += ["", "## Largest debts (a signal, no verdict)", ""]

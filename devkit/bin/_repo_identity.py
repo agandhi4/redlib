@@ -36,6 +36,24 @@ def repo_name(root: Path) -> str:
     return ((root / common).resolve().parent.name if common else root.name).lower()
 
 
+_GITHUB_URL = re.compile(
+    r"^(?:https?://(?:[^@/]*@)?github\.com/|ssh://(?:[^@/]*@)?github\.com(?::\d+)?/"
+    r"|[^@/:]+@github\.com:)(.+)$"
+)
+_SLUG = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def origin_slug(root: Path) -> str:
+    """owner/name of the origin remote when its URL is github.com's, else "" (no origin, or a
+    path such as a test fixture's). Mirrors origin_slug in _gh_repo_lib.sh; keep the two
+    agreeing. Used by scorecard.py's TREND to ask GitHub for a PR's labels."""
+    match = _GITHUB_URL.match(_git(root, "config", "--get", "remote.origin.url"))
+    if not match:
+        return ""
+    path = match.group(1).rstrip("/").removesuffix(".git")
+    return path if _SLUG.match(path) else ""
+
+
 def plan_literal(root: Path, name: str) -> str:
     """A literal `NAME=value` line of the repo's gate plan, as _gate_env.sh's gate_plan_literal
     reads it (never sourced); "" when absent."""

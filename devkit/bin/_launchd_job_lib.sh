@@ -21,6 +21,12 @@
 #       bootstrap it (retrying launchd's refusal while the old job goes away).
 #   launchd_job_uninstall <label>
 #       Boot it out and delete its plist. The job's directory stays: its clone is the last good copy.
+#   launchd_job_install <label> <name> [<sed arg>...]
+#       The three in order: stage <name>, fill its plist (plus the sed args) and load it.
+#   launchd_job_cli <label> <name> <what it runs> [<arg>...]
+#       The whole command line of an installer with no steps of its own (monthly-audit,
+#       publisher-deadman): none installs and prints `<label> <what it runs>; its devkit clone
+#       …; logs …`, --uninstall removes, -h prints the usage, anything else is exit 2.
 
 readonly LAUNCHD_SAFE_PATH='^/[A-Za-z0-9._/~+@-]+$'
 readonly LAUNCHD_SAFE_URL='^[A-Za-z0-9._/~+@:-]+$'
@@ -85,7 +91,44 @@ launchd_job_load() {
 }
 
 launchd_job_uninstall() {
+  # Uninstalling a job by its current label retires its legacy label too, whichever script
+  # asked (install_*.sh each have their own --uninstall; #472).
+  [[ "$1" == "$LABEL_PREFIX"* ]] && launchd_job_retire_legacy "${1#"$LABEL_PREFIX"}"
   _launchd_boot_out "$1"
   rm -f "$(_launchd_dest "$1")"
   echo "$LAUNCHD_WHO: removed $1 ($(_launchd_dest "$1"))"
+}
+
+# The account was renamed on 2026-11-12 and the labels with it (kashhq): a job still installed
+# under the old owner's label is booted out and its plist removed once the new label has loaded
+# (as apple-check was retired, #383: a failed load must leave the old job running, not nothing),
+# and on --uninstall. The job dir is keyed by name, so its clone and logs carry over.
+LABEL_PREFIX=com.kashhq.devkit.
+LEGACY_LABEL_PREFIX=com.agandhi4.devkit.  # retired name
+launchd_job_retire_legacy() { # <name>
+  [ -e "$(_launchd_dest "$LEGACY_LABEL_PREFIX$1")" ] || return 0
+  launchd_job_uninstall "$LEGACY_LABEL_PREFIX$1"
+}
+
+launchd_job_install() {
+  local label=$1 name=$2
+  shift 2
+  launchd_job_stage "$label" "$name"
+  launchd_job_fill "$JOB_TEMPLATE" "$JOB_DIR/filled.plist" "$@"
+  launchd_job_load "$label" "$JOB_DIR/filled.plist" || return
+  launchd_job_retire_legacy "$name"
+}
+
+launchd_job_cli() {
+  local label=$1 name=$2 what=$3 usage="usage: $LAUNCHD_WHO.sh [--uninstall]"
+  shift 3
+  case "${1:-}" in
+    '')
+      launchd_job_install "$label" "$name"
+      echo "$LAUNCHD_WHO: $label $what; its devkit clone $JOB_DIR/devkit; logs ~/Library/Logs/devkit/$name.*.log"
+      ;;
+    --uninstall) [ $# -eq 1 ] || { echo "$usage" >&2; exit 2; }; launchd_job_uninstall "$label" ;;
+    -h|--help) echo "$usage" ;;
+    *) echo "$usage" >&2; exit 2 ;;
+  esac
 }

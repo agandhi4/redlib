@@ -159,8 +159,8 @@ CAP=$(gate_plan_literal "$PLAN" DEVKIT_REVIEW_ROUNDS)
   || { echo "merge: $PLAN: DEVKIT_REVIEW_ROUNDS must be a whole number of rounds, 1 to 99 (got '$CAP')" >&2; exit 2; }
 
 refuse() { echo "merge: refused: $*" >&2; exit 1; }
-if origin=$(origin_slug "$ROOT") && ! slug_same "$SLUG" "$origin"; then
-  refuse "the plan's GATE_SLUG is $SLUG, not origin's repo $origin; make merge merges origin's PRs only (set GATE_SLUG=$origin)"
+if origin=$(origin_slug "$ROOT") && ! same_repo "$SLUG" "$origin"; then
+  refuse "the plan's GATE_SLUG is $SLUG, not origin's repo $origin (nor a name GitHub redirects to it); make merge merges origin's PRs only (set GATE_SLUG=$origin)"
 fi
 
 # confirm_owner: the OWNER override goes ahead only once its owner types `override <n>` at a

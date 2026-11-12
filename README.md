@@ -213,6 +213,7 @@ git fetch upstream && git log --oneline main..upstream/main
 - [`docs/decisions.md`](docs/decisions.md): dated decisions, newest last.
 - [`devkit/README.md`](devkit/README.md): the vendored fleet tooling behind the `make` checks, hooks and gate.
 - [`.env.example`](.env.example): every instance setting with its default.
+- [`extensions/firefox/`](extensions/firefox/): a Firefox add-on that redirects reddit.com to your instance. Set the instance host in its popup after install; it redirects nothing until one is saved. Version 1.2.0 changed the add-on id, so an install from before it is removed and reinstalled once.
 
 ---
 

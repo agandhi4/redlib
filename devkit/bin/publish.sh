@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # The fleet's one image publisher and main's proof: check every new commit of origin/main
 # (check_tree.sh), then move `latest` to the newest one that passes, boots and changes the image.
-# Every app's `make publish` calls it; on linux-box the homelab unit devkit-publish@<repo>.timer
-# runs that every 5 min (homelab hosts/linux-box/README.md), and a run starts a check at most once
+# Every app's `make publish` calls it; on the publisher host (the one native amd64 host whose
+# homelab unit devkit-publish@<repo>.timer runs it every 5 min: the homelab repo's publisher-host
+# runbook) a run starts a check at most once
 # per MAIN_CHECK_MINUTES window (step 4).
 # Design: ~/projects/solo/standardization/local-publish-design.md (owner answers 2026-10-27).
 #
@@ -145,7 +146,7 @@ check_host() {
   NAME=${SLUG#*/}
   arch=$(uname -m)
   [ "$arch" = x86_64 ] \
-    || env_error "this host is $arch; images publish only from a native amd64 host (linux-box), never the Mac: an arm64 image crash-looped the NAS (instalite-relay, 2026-10-18)"
+    || env_error "this host is $arch; images publish only from a native amd64 host (the publisher host), never the Mac: an arm64 image crash-looped the NAS (instalite-relay, 2026-10-18)"
   SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/publish.XXXXXX") || env_error "mktemp failed"
   docker_as_gh
   # Down is exit 2 with the summary line; the guard alone would exit 1 without it.

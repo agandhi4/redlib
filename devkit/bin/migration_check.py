@@ -6,14 +6,14 @@
               a `pass` body.
 
   bin/migration_check.py [--versions <dir> ...] [--kind alembic|drizzle|django]
-                         [--frozen <dir> ...] [--base origin/main]
-                         [--allow-shipped-edits] [--allow-frozen-edits]
+                         [--frozen-pin <dir>=<tree id> ...] [--base origin/main]
+                         [--allow-shipped-edits]
 
-At least one --versions or --frozen directory. Every comparison is the working tree against the
-merge base of --base (default origin/main, or $MIGRATION_BASE) and HEAD: in the gate's merged
-tree that is main itself, and on a branch behind main a migration main shipped since the branch
-point is not mistaken for one this branch deleted. (When the merge base cannot be found, a
-shallow clone, --base itself is used.)
+At least one --versions or --frozen-pin directory. The shipped-edit check compares the working
+tree with the merge base of --base (default origin/main, or $MIGRATION_BASE) and HEAD: in the
+gate's merged tree that is main itself, and on a branch behind main a migration main shipped
+since the branch point is not mistaken for one this branch deleted. (When the merge base cannot
+be found, a shallow clone, --base itself is used.)
 
 Shipped-edit check (every kind): a file under a --versions directory that exists on the base and
 is modified, deleted or renamed in the working tree fails, naming it. A migration that has not
@@ -40,13 +40,19 @@ symlink checks and counts its NNNN_*.py files; it has no downgrade lint, because
 raises IrreversibleError for a RunPython or RunSQL without a reverse, and a RunPython.noop
 reverse is the correct one for a data step whose schema step reverses itself.
 
-Frozen check (--frozen, repeatable; no kind): a vendored upstream migration graph a fork must
-never touch (kitchen's server/cookbook/migrations, Tandoor's). Any file under it that the
-working tree adds (tracked or untracked: `makemigrations` without an app label writes there),
-modifies, deletes or renames fails, naming the path: the graph must stay identical to upstream
-so upstream releases still merge. The fork's own migrations live in its own apps. The escape is
---allow-frozen-edits, or MIGRATION_FROZEN_OK=1 (a consumer's gate plan sets it for the PR that
-merges an upstream release); the output says which. An unresolvable base SKIPs it, as above.
+Frozen check (--frozen-pin <dir>=<tree id>, repeatable; no kind): a vendored upstream migration
+graph a fork must never touch (kitchen's server/cookbook/migrations, Tandoor's) must be exactly
+upstream's at the synced release, so upstream releases still merge; the fork's own migrations
+live in its own apps. It needs no base and has no escape. The working tree's <dir> (every
+tracked or staged file, even one an ignore rule matches, and untracked files unless ignored) is
+hashed as git would commit it, through a throwaway index, and must be exactly the pinned tree:
+upstream's own tree id for that directory at the synced release (`git rev-parse <upstream
+ref>:<path>`, or GitHub's contents API `sha`). Any other tree fails, naming each differing path
+when the repository holds the pinned tree. The PR that merges an upstream release changes the
+pin with the files; nothing else may. Why (kitchen #68): the base-compared `--frozen` and its
+MIGRATION_FROZEN_OK flag, set by the sync PR and removed by the next, failed every commit of a
+range that held both, which is what the publisher checks against the last deployed commit; they
+are gone (devkit decisions 2026-11-09).
 
 Pass-downgrade lint (--kind alembic; drizzle has no down files): a `def downgrade()` whose body
 is only `pass`, `...` and docstrings fails: write the downgrade, or raise with the reason
@@ -56,7 +62,7 @@ is only `pass`, `...` and docstrings fails: write the downgrade, or raise with t
 Output: `migration-check: <file>: <rule>` per hit on stderr, `migration-check: SKIP <why>` for an
 unresolvable base, then `migration-check: ok (<n> files, <m> shipped[, <k> frozen])` on stdout
 or `migration-check: FAIL` on stderr. Exit 0 ok, 1 hits, 2 usage (no directory at all, or a
---versions or --frozen path that is not a directory, which would silently guard nothing).
+--versions or --frozen-pin path that is not a directory, which would silently guard nothing).
 """
 
 from __future__ import annotations
@@ -66,17 +72,20 @@ import ast
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 EXIT_USAGE = 2
 DJANGO_MIGRATION = re.compile(r"^\d{4}_\w+\.py$")
+TREE_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
-def git(root: Path, *args: str) -> tuple[int, str]:
+def git(root: Path, *args: str, env: dict[str, str] | None = None) -> tuple[int, str]:
     proc = subprocess.run(
-        ["git", "-C", str(root), *args], capture_output=True, text=True, check=False
+        ["git", "-C", str(root), *args], capture_output=True, text=True, check=False, env=env
     )
     return proc.returncode, proc.stdout
 
@@ -153,46 +162,95 @@ def shipped_edits(root: Path, base: str, dirs: list[str], kind: str) -> tuple[li
     return hits, len(shipped)
 
 
-# git diff --name-status letters under a frozen directory: every one is a change to the vendored
-# graph (C and U included: a copy adds a file, an unmerged path is an edit in progress).
+# git diff-tree --name-status letters between a pinned tree and the working one: every one is a
+# change to the vendored graph (C and U included: a copy adds a file, an unmerged path is an edit
+# in progress).
 FROZEN_EDITS = {
     "A": "added", "C": "added", "M": "modified", "T": "modified", "U": "modified",
     "D": "deleted", "R": "renamed",
 }
 
 
-def frozen_edits(root: Path, base: str, dirs: list[str]) -> tuple[list[str], int]:
-    """(changes under the frozen directories, files they hold on the base), against a resolved
-    base. Untracked files count: `manage.py makemigrations` with no app label writes there."""
+def worktree_tree(root: Path, d: str) -> str | None:
+    """The tree id the working tree's <d> would commit as: every tracked or staged file (an ignore
+    rule never drops one, the machine's global excludes included), untracked ones unless
+    ignored. None when git cannot hash it (nothing there but ignored files, or a git whose
+    rev-parse lacks --path-format, before 2.31). It works on a copy of the repo's own index,
+    never the index itself: the copy keeps staged entries (devkit #443) and the stat data that
+    lets `add -A` skip an unchanged file instead of rehashing it through this machine's eol and
+    clean filters (devkit #444). A repo with no index yet starts from HEAD, or from nothing
+    before the first commit."""
+    with tempfile.TemporaryDirectory() as tmp:
+        index = Path(tmp) / "index"
+        env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+        # A rev-parse that fails (git older than 2.31 lacks --path-format) is no hash, never the
+        # HEAD seed below: that would bring back #443 and #444 without a word (devkit #447).
+        code, out = git(root, "rev-parse", "--path-format=absolute", "--git-path", "index")
+        if code != 0 or not out.strip():
+            return None
+        real = Path(out.strip())
+        if real.is_file():
+            # copy2, not copyfile: git trusts an entry's stat data only for a file older than
+            # the index file itself, so the copy keeps the real index's mtime (racy-git).
+            shutil.copy2(real, index)
+        else:
+            git(root, "read-tree", "HEAD", env=env)
+        code, _ = git(root, "add", "-A", "--", d, env=env)
+        if code != 0:
+            return None
+        code, out = git(root, "write-tree", f"--prefix={d.rstrip('/')}/", env=env)
+    return out.strip() if code == 0 and out.strip() else None
+
+
+def pinned_drift(root: Path, pins: list[tuple[str, str]]) -> tuple[list[str], int]:
+    """(hits, files the pinned trees hold) for --frozen-pin: each directory must hash to its pin."""
+    hits: list[str] = []
     held = 0
-    for d in dirs:
-        _, out = git(root, "ls-tree", "-r", "--name-only", base, "--", d)
-        held += sum(1 for name in out.splitlines() if name)
-    changes: list[tuple[str, str]] = []
-    _, out = git(root, "diff", "--name-status", "-M", base, "--", *dirs)
-    for line in out.splitlines():
-        parts = line.split("\t")
-        edit = FROZEN_EDITS.get(parts[0][0], "changed")
-        path = f"{parts[1]} -> {parts[2]}" if edit == "renamed" else parts[1]
-        changes.append((path, edit))
-    _, out = git(root, "ls-files", "--others", "--exclude-standard", "--", *dirs)
-    changes.extend((name, "added") for name in out.splitlines() if name)
-    hits = [
-        f"{path}: {edit} under frozen {owner(path, dirs)} (a vendored upstream migration graph "
-        "must stay identical to upstream so upstream releases still merge; put the fork's "
-        "migration in its own app; the PR merging an upstream release passes "
-        "--allow-frozen-edits)"
-        for path, edit in changes
-    ]
+    rule = (
+        "a vendored upstream migration graph must stay identical to upstream's at the synced "
+        "release; only the PR merging an upstream release changes it, with its --frozen-pin"
+    )
+    for d, want in pins:
+        got = worktree_tree(root, d)
+        if got == want:
+            _, out = git(root, "ls-tree", "-r", "--name-only", got)
+            held += sum(1 for name in out.splitlines() if name)
+            continue
+        if got is None:
+            hits.append(
+                f"{d}: git cannot hash it (only ignored files there, or git older than 2.31), "
+                f"so it is not the pinned {want[:12]} ({rule})"
+            )
+            continue
+        code, _ = git(root, "cat-file", "-e", f"{want}^{{tree}}")
+        if code != 0:
+            hits.append(
+                f"{d}: tree {got[:12]} is not the pinned {want[:12]}, which this repository does "
+                f"not hold (a mistyped pin, or the graph never matched it; {rule})"
+            )
+            continue
+        _, out = git(root, "diff-tree", "-r", "--name-status", "-M", want, got)
+        for line in out.splitlines():
+            parts = line.split("\t")
+            edit = FROZEN_EDITS.get(parts[0][0], "changed")
+            prefix = d.rstrip("/")
+            path = (
+                f"{prefix}/{parts[1]} -> {prefix}/{parts[2]}" if edit == "renamed"
+                else f"{prefix}/{parts[1]}"
+            )
+            hits.append(f"{path}: {edit} against the pinned upstream tree {want[:12]} ({rule})")
     return hits, held
 
 
-def owner(path: str, dirs: list[str]) -> str:
-    """The --frozen directory a changed path sits under, for the message."""
-    for d in dirs:
-        if path.startswith(d.rstrip("/") + "/"):
-            return d
-    return dirs[0]
+def parse_pins(values: list[str]) -> list[tuple[str, str]] | str:
+    """--frozen-pin values as (directory, tree id), or the usage error."""
+    pins: list[tuple[str, str]] = []
+    for value in values:
+        d, sep, tree = value.rpartition("=")
+        if not sep or not d or not TREE_ID.fullmatch(tree):
+            return f"--frozen-pin {value!r} is not <dir>=<40- or 64-hex tree id>"
+        pins.append((d, tree))
+    return pins
 
 
 def is_django_dir(d: Path) -> bool:
@@ -273,8 +331,10 @@ def pass_downgrades(root: Path, dirs: list[str]) -> tuple[list[str], int]:
 
 
 def parse_args() -> argparse.Namespace:
+    # allow_abbrev=False: a prefix is no flag (a retired `--frozen` would read as `--frozen-pin`).
     ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
     )
     ap.add_argument(
         "--versions",
@@ -289,10 +349,12 @@ def parse_args() -> argparse.Namespace:
              "alembic or migrations, else drizzle",
     )
     ap.add_argument(
-        "--frozen",
+        "--frozen-pin",
         action="append",
         default=[],
-        help="a vendored upstream migrations directory no change may touch; repeatable",
+        metavar="DIR=TREE",
+        help="a vendored upstream migrations directory that must be exactly upstream's tree id; "
+             "needs no base and has no escape; repeatable",
     )
     ap.add_argument("--base", default=os.environ.get("MIGRATION_BASE", "origin/main"))
     ap.add_argument(
@@ -300,12 +362,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="the PR carries the migration-contract label, or the branch never deployed; "
              "MIGRATION_EDIT_OK=1 in the environment is the same (the gate sets it from the label)",
-    )
-    ap.add_argument(
-        "--allow-frozen-edits",
-        action="store_true",
-        help="the PR merges an upstream release into the frozen directories; "
-             "MIGRATION_FROZEN_OK=1 in the environment is the same",
     )
     return ap.parse_args()
 
@@ -320,58 +376,52 @@ def detect_kind(root: Path, args: argparse.Namespace) -> str:
     return "drizzle"
 
 
-def base_checks(root: Path, args: argparse.Namespace, kind: str) -> tuple[list[str], int, int]:
-    """The two checks that compare with the base: (hits, shipped count, frozen count). Each
-    escape is printed when it is what let a change through."""
-    hits: list[str] = []
-    shipped_n = frozen_n = 0
+def base_check(root: Path, args: argparse.Namespace, kind: str) -> tuple[list[str], int]:
+    """The shipped-edit check, the one that compares with the base: (hits, shipped count). The
+    escape is printed when it is what let an edit through."""
+    if not args.versions:
+        return [], 0
     base = diff_base(root, args.base)
     if base is None:
-        for check, wanted in (("shipped-edit check", args.versions), ("frozen check", args.frozen)):
-            if wanted:
-                print(
-                    f"migration-check: SKIP {check}: base {args.base} is not resolvable here "
-                    "(fetch it; the gate and the hooks have it)"
-                )
-        return hits, shipped_n, frozen_n
-    if args.versions:
-        edits, shipped_n = shipped_edits(root, base, args.versions, kind)
-        if edits and (args.allow_shipped_edits or os.environ.get("MIGRATION_EDIT_OK") == "1"):
-            print(
-                f"migration-check: {len(edits)} shipped migration edit(s) allowed by "
-                "--allow-shipped-edits (label migration-contract or a never-deployed branch)"
-            )
-        else:
-            hits.extend(edits)
-    if args.frozen:
-        changes, frozen_n = frozen_edits(root, base, args.frozen)
-        if changes and (args.allow_frozen_edits or os.environ.get("MIGRATION_FROZEN_OK") == "1"):
-            print(
-                f"migration-check: {len(changes)} frozen migration change(s) allowed by "
-                "--allow-frozen-edits (a PR merging an upstream release)"
-            )
-        else:
-            hits.extend(changes)
-    return hits, shipped_n, frozen_n
+        print(
+            f"migration-check: SKIP shipped-edit check: base {args.base} is not resolvable here "
+            "(fetch it; the gate and the hooks have it)"
+        )
+        return [], 0
+    edits, shipped_n = shipped_edits(root, base, args.versions, kind)
+    if edits and (args.allow_shipped_edits or os.environ.get("MIGRATION_EDIT_OK") == "1"):
+        print(
+            f"migration-check: {len(edits)} shipped migration edit(s) allowed by "
+            "--allow-shipped-edits (label migration-contract or a never-deployed branch)"
+        )
+        return [], shipped_n
+    return edits, shipped_n
 
 
 def main() -> int:
     args = parse_args()
-    if not args.versions and not args.frozen:
-        print("migration-check: give at least one --versions or --frozen", file=sys.stderr)
+    if not args.versions and not args.frozen_pin:
+        print("migration-check: give at least one --versions or --frozen-pin", file=sys.stderr)
         return EXIT_USAGE
+    pins = parse_pins(args.frozen_pin)
+    if isinstance(pins, str):
+        print(f"migration-check: {pins}", file=sys.stderr)
+        return EXIT_USAGE
+    pinned_dirs = [d for d, _ in pins]
     code, out = git(Path.cwd(), "rev-parse", "--show-toplevel")
     if code != 0:
         print("migration-check: not a git repository", file=sys.stderr)
         return EXIT_USAGE
     root = Path(out.strip())
-    for flag, dirs in (("--versions", args.versions), ("--frozen", args.frozen)):
+    for flag, dirs in (("--versions", args.versions), ("--frozen-pin", pinned_dirs)):
         missing = [d for d in dirs if not (root / d).is_dir()]
         if missing:
             print(f"migration-check: {flag} not a directory: {', '.join(missing)}", file=sys.stderr)
             return EXIT_USAGE
     kind = detect_kind(root, args)
-    hits, shipped_n, frozen_n = base_checks(root, args, kind)
+    hits, shipped_n = base_check(root, args, kind)
+    pin_hits, frozen_n = pinned_drift(root, pins)
+    hits.extend(pin_hits)
     hits.extend(symlinks(root, args.versions))
     if kind == "alembic":
         down_hits, files_n = pass_downgrades(root, args.versions)
@@ -387,7 +437,7 @@ def main() -> int:
     if hits:
         print("migration-check: FAIL", file=sys.stderr)
         return 1
-    frozen = f", {frozen_n} frozen" if args.frozen else ""
+    frozen = f", {frozen_n} frozen" if pins else ""
     print(f"migration-check: ok ({files_n} files, {shipped_n} shipped{frozen})")
     return 0
 

@@ -80,7 +80,10 @@
 # (exit 1, as does an input it could not put back). Only what the guarded command writes is
 # covered: a recipe step after tier_guard returns (kitchen's `coverage combine` in ci-db-backend)
 # runs shifted and unguarded, so a shifted target writes its inputs inside the guard or not at
-# all. Its budget is reported, not enforced (the unshifted run holds it). The success line ends
+# all. Coverage's own files are the shifted run's alone (instalite-relay #18: the raw .coverage
+# a collector never names was the real-clock run's, overwritten): COVERAGE_FILE (coverage.py,
+# under pytest-cov or `coverage run`) and DEVKIT_CLOCK_SHIFT_COVERAGE (vitest's reportsDirectory,
+# set by clockShift()) name a scratch dir the guard removes on exit. Its budget is reported, not enforced (the unshifted run holds it). The success line ends
 # ` shift=+<n>d`, and
 #   TIER <tier> NOSHIFT <runner> (no shifted <runner> process: it ran on the real clock)  exit 1
 # when the command passed but no process of a floored runner recorded its shift in the guard's
@@ -356,11 +359,13 @@ put_back_inputs() {
 
 tmp=${TMPDIR:-/tmp}
 LOG=$(mktemp "${tmp%/}/tier-$TIER.XXXXXX") || die "mktemp failed"
-PROOF=""
-trap 'slot_release; rm -f "$LOG" ${PROOF:+"$PROOF"}; put_back_inputs || exit 1' EXIT
+PROOF="" SHIFT_COVERAGE=""
+trap 'slot_release; rm -f "$LOG" ${PROOF:+"$PROOF"}; rm -rf ${SHIFT_COVERAGE:+"$SHIFT_COVERAGE"}; put_back_inputs || exit 1' EXIT
 if [ -n "$SHIFT" ]; then
   PROOF=$(mktemp "${tmp%/}/tier-$TIER-shift.XXXXXX") || die "mktemp failed"
-  export DEVKIT_CLOCK_SHIFT_PROOF=$PROOF
+  SHIFT_COVERAGE=$(mktemp -d "${tmp%/}/tier-$TIER-coverage.XXXXXX") || die "mktemp failed"
+  export DEVKIT_CLOCK_SHIFT_PROOF=$PROOF COVERAGE_FILE=$SHIFT_COVERAGE/.coverage \
+    DEVKIT_CLOCK_SHIFT_COVERAGE=$SHIFT_COVERAGE/vitest
   keep_inputs
 fi
 

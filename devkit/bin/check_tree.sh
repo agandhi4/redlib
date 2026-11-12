@@ -283,17 +283,22 @@ require_docker() {
   exit 2
 }
 
+# The tree's pins first on PATH. A pin the commit got wrong is red like its plan (devkit #321):
+# exit 2 would record nothing, so the publisher would stall on it every window instead of filing
+# main-red and walking past it.
+provide_toolchain() {
+  local rc=0
+  toolchain_path "$WT" || rc=$?
+  case $rc in
+    0) ;;
+    3) echo "CHECK toolchain FAIL ($TOOLCHAIN_ERROR)"; FAILED_JOBS=toolchain; verdict FAIL ;;
+    *) echo "CHECK toolchain ERROR ($TOOLCHAIN_ERROR)"; exit 2 ;;
+  esac
+  [ -z "$TOOLCHAIN_NOTES" ] || note "$TOOLCHAIN_NOTES"
+}
+
 # ---- the tree's toolchain, then the plan decides what runs ----------------------------------
-# A pin the commit got wrong is red like its plan (devkit #321): exit 2 would record nothing, so
-# the publisher would stall on it every window instead of filing main-red and walking past it.
-TC_RC=0
-toolchain_path "$WT" || TC_RC=$?
-case $TC_RC in
-  0) ;;
-  3) echo "CHECK toolchain FAIL ($TOOLCHAIN_ERROR)"; FAILED_JOBS=toolchain; verdict FAIL ;;
-  *) echo "CHECK toolchain ERROR ($TOOLCHAIN_ERROR)"; exit 2 ;;
-esac
-[ -z "$TOOLCHAIN_NOTES" ] || note "$TOOLCHAIN_NOTES"
+provide_toolchain
 # shellcheck disable=SC2034  # read by _paths_lib.sh; the plan's alone, never the environment's
 GATE_CODE_PATHS=
 unset GATE_DOCKER_GROUPS GATE_JOBS_METRICS

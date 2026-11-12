@@ -62,7 +62,14 @@
 #      report never enters an agent's context.
 #   16. No CONTRIBUTING.md (root, .github/ or docs/): AGENTS.md is the contributor guide, and
 #      README's Documentation section says so in a "Contributors and agents: see AGENTS.md" line.
-#   Rules 5-10 and 12-16 report through docs_rule: a warning before their FAILS_FROM date below, a
+#   17. The root AGENTS.md's `## Stack` section has exactly one line starting `Capabilities:`
+#      (beside `Conventions:`), whose value is `none` or a comma-separated list of names, each
+#      `^[a-z][a-z0-9-]*$`, none twice (`Capabilities: pwa, push`). The decision cascade files a
+#      platform decision only on the repos declaring the capabilities it applies to. Shape only:
+#      docs-check runs offline and in Actions, so it reads no vocabulary; the names are validated
+#      against dotfiles' conventions/decisions/capabilities.md by the decision-cascade filer (not
+#      yet built), and the vocabulary has one home. A missing `## Stack` is rule 14's.
+#   Rules 5-10 and 12-17 report through docs_rule: a warning before their FAILS_FROM date below, a
 #   failure on and after it, so no consumer's ci-quick breaks on the sync that introduces a rule and
 #   the flip needs no second PR. DOCS_CHECK_TODAY=YYYY-MM-DD overrides today (tests).
 #   11. Optional scripts/ci/docs_rules.sh is sourced after the standard checks for repo extras. It
@@ -120,6 +127,7 @@ BANNED=${DOCS_CHECK_BANNED-graphify repomix serena nexus graphiti engram}
 DELTAS_FAILS_FROM=2026-11-01
 DOCS_SET_FAILS_FROM=2026-11-15
 DIET_FAILS_FROM=2026-11-15
+CAPABILITIES_FAILS_FROM=2026-12-01
 TODAY=${DOCS_CHECK_TODAY:-$(date +%F)}
 # README.md's required H2 sections: "Canonical|alias|alias…" (devkit/README.md, "Standard docs"
 # says what each holds). Aliases are names the fleet already used for the same content; add one
@@ -609,6 +617,55 @@ rule_contributing() {
          docs_rule "$DIET_FAILS_FROM" "README.md: the Documentation section has no 'Contributors and agents: see [AGENTS.md](AGENTS.md).' line"; }
 }
 
+# ---- 17. capabilities line -------------------------------------------------------------------
+CAPABILITY_RE='^[a-z][a-z0-9-]*$'
+# capability_names <line-no> <value>: rule 17's list half. The trailing comma appended to the value
+# makes an empty last item (`pwa,`) an item, so it is caught like any other empty one.
+capability_names() {
+  local at="AGENTS.md:$1" rest="$2," item seen=" " n=0
+  while [ -n "$rest" ]; do
+    item=${rest%%,*} rest=${rest#*,}
+    item=${item#"${item%%[![:space:]]*}"} item=${item%"${item##*[![:space:]]}"}
+    n=$((n + 1))
+    if [ -z "$item" ]; then
+      docs_rule "$CAPABILITIES_FAILS_FROM" "$at: 'Capabilities:' has an empty name; write 'none' or names separated by ', '"
+    elif ! [[ $item =~ $CAPABILITY_RE ]]; then
+      docs_rule "$CAPABILITIES_FAILS_FROM" "$at: capability '$item' is not a name (lowercase letters, digits and '-', starting with a letter)"
+    else
+      case "$seen" in *" $item "*) docs_rule "$CAPABILITIES_FAILS_FROM" "$at: capability '$item' is listed twice" ;; esac
+      seen="$seen$item "
+    fi
+  done
+  case "$seen" in *" none "*) [ "$n" -eq 1 ] || docs_rule "$CAPABILITIES_FAILS_FROM" "$at: 'none' cannot be listed with other capabilities" ;; esac
+}
+rule_capabilities() {
+  if ! is_tracked AGENTS.md || [ ! -f AGENTS.md ]; then return 0; fi
+  local first last hits n at value
+  read -r first last <<<"$(section_bounds AGENTS.md Stack)"
+  [ -n "$first" ] || return 0 # rule 14 reports the missing section
+  # "<line-no>\t<line>" per `Capabilities:` line in the section, outside fenced code.
+  hits=$(awk -v a="$first" -v b="$last" 'NR < a || NR > b { next }
+    /^[[:space:]]*(```|~~~)/ { fence = !fence; next }
+    !fence && /^Capabilities:/ { print NR "\t" $0 }' AGENTS.md)
+  n=$(grep -c . <<<"$hits")
+  if [ "$n" -eq 0 ]; then
+    docs_rule "$CAPABILITIES_FAILS_FROM" "AGENTS.md:$first: '## Stack' has no 'Capabilities:' line; add one beside 'Conventions:' ('Capabilities: none', or names from ~/.claude/conventions/decisions/capabilities.md)"
+    return 0
+  fi
+  if [ "$n" -gt 1 ]; then
+    docs_rule "$CAPABILITIES_FAILS_FROM" "AGENTS.md:$(cut -f1 <<<"$hits" | paste -sd, -): $n 'Capabilities:' lines under '## Stack'; keep exactly one"
+    return 0
+  fi
+  at=${hits%%$'\t'*}
+  value=${hits#*$'\t'Capabilities:}
+  value=${value#"${value%%[![:space:]]*}"} value=${value%"${value##*[![:space:]]}"}
+  if [ -z "$value" ]; then
+    docs_rule "$CAPABILITIES_FAILS_FROM" "AGENTS.md:$at: 'Capabilities:' is empty; write 'Capabilities: none' or the repo's capabilities"
+  else
+    capability_names "$at" "$value"
+  fi
+}
+
 # Rules run in the header's order (11, the repo extras, last): their messages print in it.
 rule_pair_shape
 rule_size_caps
@@ -626,6 +683,7 @@ rule_allowance_sunset
 rule_agents_sections
 rule_docs_set
 rule_contributing
+rule_capabilities
 
 # ---- 11. repo extras -------------------------------------------------------------------------
 if [ -f "$EXTRAS" ]; then

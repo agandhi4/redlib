@@ -5,7 +5,7 @@
 # and no paid GitHub feature is involved. Owner 2026-10-22: devkit improves every project without a hand-run
 # `make devkit-sync` PR per repo per devkit change. Owner 2026-11-02: no pre-merge gate; every
 # check runs before a deploy, so a merge here is `make merge` alone. Scheduled
-# by bin/install_dependency_merge.sh (templates/launchd/com.agandhi4.devkit.dependency-merge.plist),
+# by bin/install_dependency_merge.sh (templates/launchd/com.kashhq.devkit.dependency-merge.plist),
 # whose launcher runs devkit main's copy of this file from a clone of its own
 # (bin/job_launcher.sh), never a checkout's.
 #
@@ -17,7 +17,7 @@
 #   --dry-run    print what each PR would get; no merge, comment or log line
 #
 # Repos: the roots given, plus, under each --under <dir> (with neither, _checkouts_lib.sh's
-# DEVKIT_CHECKOUT_PARENTS: ~/projects/solo and ~/projects/homelab), every checkout
+# DEVKIT_CHECKOUT_PARENTS: ~/projects/solo, ~/projects/homelab and ~/.dotfiles), every checkout
 # (devkit_checkouts) whose freshly fetched origin/main has a plan with a literal GATE_SLUG and
 # either .devkit-rev (it vendors devkit) or VENDOR_PATHS (devkit itself). Any other checkout is
 # skipped without a line. A fetch that fails or hangs (header, Network) judges the last-known

@@ -16,7 +16,7 @@
 #
 # Why it is shaped this way:
 # - `gh api` only: no clone, no push credential, so it runs the same in Actions (GH_TOKEN with
-#   `contents: write`) and on linux-box. `--jq` is gh's built-in, so jq is not needed either.
+#   `contents: write`) and on the publisher host. `--jq` is gh's built-in, so jq is not needed either.
 # - Idempotent by comparing commits, not by "tag exists": the queue and the timer can ship the
 #   same sha on the same day, and a rerun of a deploy job must not fail. A tag of that name on a
 #   different commit (a sha7 collision, or a hand-made tag) is refused, never moved.

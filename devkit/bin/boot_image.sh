@@ -34,7 +34,7 @@
 # Why it is shaped this way (lessons from the four originals):
 # - A private network per <name>, with the database reached by container name: a
 #   host-published Postgres port is NOT reachable from the default bridge on a box whose
-#   firewall drops bridge-to-host traffic (linux-box, finplat), and host networking would pin
+#   firewall drops bridge-to-host traffic (the publisher host, finplat), and host networking would pin
 #   the app to whatever port its entrypoint hard-codes. Unique names also keep concurrent runs
 #   and a developer's own containers from colliding.
 # - `up` runs `down` first: a container left by an interrupted run would hold the port, and
