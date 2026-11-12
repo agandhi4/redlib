@@ -226,7 +226,7 @@ Consequence: open PRs with `make pr BODY_FILE=…`, never bare `gh pr create`. A
 **Consequence:** a PR that gets new commits after its review is listed again; the PR list needs an authenticated `gh`.
 
 
-## 2026-10-28 — Images ship from linux-box's publisher; Actions deleted; `ci-smoke` runs `--version`
+## 2026-10-28 — Images ship from the publisher host; Actions deleted; `ci-smoke` runs `--version`
 **Why:** Actions stopped running here on 2026-10-22, so three releases went out by a hand build on the NAS (fork.md's recipe), and the owner chose one fleet publisher (devkit #273, design answers Q1/Q4 2026-10-27). devkit-check's publish contract needs a build-only `ci-image` and a `ci-smoke` gate job, but this image cannot boot offline (the listener waits on Reddit OAuth).
 **Decision:** devkit b47c27b; `PUBLISH_IMAGE=ghcr.io/agandhi4/redlib` and `publish:` (homelab `devkit-publish@redlib.timer`). `ci-image` only builds; `ci-smoke` (`scripts/ci/smoke_image.sh` under tier_guard, 30 s) runs the image's binary with `--network none` and asserts `redlib --version` (now `instance_info::app_version()`, not the crate semver) and the OCI label equal `CI_BUILD_VERSION`. ghcr.yml, quick-check.yml and the hand-ship recipe are deleted. Rejected: booting against live Reddit (a flaky gate), and opening the listener before OAuth (the Startup order rule).
 **Consequence:** a merge that changes an image input reaches `latest` within 5 min plus the build; a docs or devkit-only merge publishes nothing. The smoke catches a wrong-arch or broken binary and a lost APP_VERSION, not a routing break. `--version` outside an image prints `v<semver>`.
@@ -274,11 +274,11 @@ Consequence: about 4x fewer prefetch calls for the same browsing, and a post ope
 ## 2026-11-01 — The image's dependency layer ignores redlib's own version
 Why: gate logs for #60–#67 showed the image job's dependency step (about 270 release crates) rebuilding cold on each PR's first gate and on each publish, 150–430 s. The cause was `COPY Cargo.lock Cargo.toml`: every PR bumps the crate version for the `?v=` asset cache-buster, which changes both files. Those cold builds pushed #62, #65 and #67 past the gate budget and forced full reruns.
 Decision: a `dep-manifests` stage rewrites redlib's own version to 0.0.0 in both files, and the dependency layer copies those versions instead. BuildKit keys `COPY --from` on content, so the layer is rebuilt only when a dependency changes. `COPY . ./` then brings in the real manifests, so only the redlib crate recompiles.
-Consequence: a version bump no longer costs a cold dependency build in the gate or on linux-box. The stage's `test` lines fail the build if the rewrite stops matching exactly one line per file.
+Consequence: a version bump no longer costs a cold dependency build in the gate or on the publisher host. The stage's `test` lines fail the build if the rewrite stops matching exactly one line per file.
 
 ## 2026-11-02 — The docs describe review rounds and the main check, not the retired gate
 Why: devkit retired the pre-merge gate (devkit 2026-11-02), but AGENTS.md, the README, docs/fork.md and the Makefile still told agents to run `make gate` and wait for `local-gate`.
-Decision: a PR merges on review rounds (`@codex review` or `make review PR=<n>`, capped at `DEVKIT_REVIEW_ROUNDS`); linux-box's publisher proves main with `check_tree.sh` at most once per 3 h window and ships only green commits. `GATE_STATE_NAME` is dropped (nothing reads it).
+Decision: a PR merges on review rounds (`@codex review` or `make review PR=<n>`, capped at `DEVKIT_REVIEW_ROUNDS`); the publisher host proves main with `check_tree.sh` at most once per 3 h window and ships only green commits. `GATE_STATE_NAME` is dropped (nothing reads it).
 Consequence: `make gate` remains as devkit's stub. The plan file keeps its name, `scripts/ci/gate_plan.sh`.
 
 ## 2026-11-05 — Vuln pass: lockfile clears the zstd chain and pulldown-cmark
@@ -301,3 +301,8 @@ Consequence: homelab's stacks pull it from there (homelab PR of the same day).
 Why: this fork is public and may be forked; AGENTS.md, README.md, `docs/fork.md`, the Makefile, the Dockerfile and `.env.example` named the owner's publisher and NAS hosts, the NAS deploy path and command, the instance hostname and homelab file paths.
 Decision: those move to homelab's `stacks/redlib/README.md` (homelab #223); docs here use role words ("the publisher host", "the NAS") and each file points there at most once. `scripts/ci/docs_rules.sh` makes docs-check refuse the private hostnames, NAS volume paths, home paths, private DNS suffixes and the LAN prefix outside devkit/ and this log's history.
 Consequence: git history still holds the old lines (no credentials, so no rewrite). The Firefox extension still defaults its target to the private hostname and its id names the owner's domain; both are behaviour, left for the owner.
+
+## 2026-11-12 — The plan declares GATE_PUBLIC; the Firefox add-on ships no default host
+Why: devkit 46056f5 ships `check_public_topology` in devkit-check for `GATE_PUBLIC=1` plans, with no history exemption; the add-on still defaulted to the owner's private instance and its id named the owner's domain (owner decision 2026-11-12: both change).
+Decision: `GATE_PUBLIC=1` in gate_plan.sh; three history lines reword the host to "the publisher host" (no entry reordered or re-dated). The add-on's target host is empty until set in the popup (placeholder `redlib.example.org`; the listener returns early with no host and logs it once at startup), id `reddit-redirect@kashhq.github.io`, version 1.2.0. The local rule in `scripts/ci/docs_rules.sh` stays, because the vendored docs_check.sh does not yet run the guard and a docs-only PR runs docs-check alone; it drops its history split and its extension exclusion.
+Consequence: the next devkit sync that brings docs_check.sh's own GATE_PUBLIC guard deletes `scripts/ci/docs_rules.sh`. An install of the add-on from before 1.2.0 is removed and reinstalled once, since Firefox keys an add-on by its id.

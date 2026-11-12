@@ -5,7 +5,7 @@ const statEl = document.getElementById("stat");
 // Load current settings
 browser.storage.local.get(["enabled", "targetHost"]).then((settings) => {
   enabledEl.checked = settings.enabled !== undefined ? settings.enabled : true;
-  targetHostEl.value = settings.targetHost || "reddit.box";
+  targetHostEl.value = settings.targetHost || "";
 });
 
 // Get redirect count from background script
