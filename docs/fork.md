@@ -1,6 +1,6 @@
 # What this fork changed
 
-Personal fork by agandhi4, single instance at `reddit.box`. The README covers configuration (upstream's docs) and this fork's deployment; this documents the divergence, organized by system rather than chronology. Versions cite when each landed.
+Personal fork by kashhq, single instance at `reddit.box`. The README covers configuration (upstream's docs) and this fork's deployment; this documents the divergence, organized by system rather than chronology. Versions cite when each landed.
 
 ## Fork type: hard fork
 

@@ -81,7 +81,7 @@ ci-smoke: ## run $(CI_IMAGE)'s binary offline; it and the OCI version label must
 
 # Run by homelab's devkit-publish@redlib.timer on linux-box (main checked at most once per 3 h), never by hand on a Mac
 # (it refuses anything but native amd64). devkit README "Publish".
-publish: ## move ghcr.io/agandhi4/redlib:latest to a main check_tree proved green (linux-box only)
+publish: ## move ghcr.io/kashhq/redlib:latest to a main check_tree proved green (linux-box only)
 	devkit/bin/publish.sh .
 
 # devkit/bin/metrics_collect.sh runs the collectors in scripts/ci/metrics.conf and compares the
