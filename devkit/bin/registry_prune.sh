@@ -22,7 +22,7 @@
 # - The cutoff is the oldest kept sha-* image's created_at, and everything newer stays (a
 #   date-tagged finplat image, a child pushed with its parent), so a run never deletes what a
 #   concurrent push just made.
-# - `gh api` with the token's delete:packages scope (homelab docs/credentials, linux-box).
+# - `gh api` with the token's delete:packages scope (homelab docs/credentials, the publisher host).
 set -uo pipefail
 
 usage() { echo "usage: $0 <ghcr.io/owner/name> [--keep N] [--dry-run]" >&2; exit 2; }

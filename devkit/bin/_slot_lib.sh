@@ -59,20 +59,10 @@
 # now names another process (its start time differs), so a gate killed with -9 frees its units
 # within a second. No fd is held while a job runs, so a job's stray child (a dev server) holds
 # nothing either.
-#
-# Compat, until 2026-11-09 (two weeks of nightly devkit syncs; then delete _slot_legacy): a gate or
-# tier vendored before this file holds a flock on $GATE_LOCK or $GATE_LOCK.<n> (default
-# /tmp/linux-box-local-gate.lock, also the merge queues' and linux-box's) for its whole run. Each
-# held one counts SLOT_LEGACY_COST units here, labelled `<its holder line's first word> (older
-# devkit)`. The older copy does not see this pool, so until its repo syncs it can still start
-# beside a full one.
-
-readonly SLOT_LEGACY_COST=2
 
 slot_pool_init() { # <who>
   local n
   SLOT_DIR=${DEVKIT_SLOT_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/devkit/gate-slots}
-  SLOT_LEGACY_LOCK=${GATE_LOCK:-/tmp/linux-box-local-gate.lock}
   n=$(devkit_ncpu)
   SLOT_CAPACITY=${GATE_CAPACITY:-$(( (${n:-1} + 1) / 2 ))}
   [[ "$SLOT_CAPACITY" =~ ^[1-9][0-9]*$ ]] \
@@ -136,26 +126,13 @@ _slot_live() {
 # _slot_locked <command...>: the command with the pool's mutex held; 1 when it cannot be had in 30 s.
 _slot_locked() { { flock -w 30 9 && "$@"; } 9>>"$SLOT_DIR/lock"; }
 
-# _slot_legacy: one `<label> (older devkit)` line per legacy slot lock held now (header, Compat).
-# The probe takes a free file's lock for an instant; an older gate racing it retries next second.
-_slot_legacy() {
-  local f label
-  for f in "$SLOT_LEGACY_LOCK" "$SLOT_LEGACY_LOCK".[0-9]*; do
-    case $f in *.holder) continue ;; esac
-    [ -f "$f" ] || continue
-    flock -n "$f" true 2>/dev/null && continue
-    label=$(awk 'NR == 1 { print $1 }' "$f" "$f.holder" 2>/dev/null | head -n 1)
-    echo "${label:-?} (older devkit)"
-  done
-}
-
 # _slot_scan: under the mutex. Deletes stale entries, then sets SLOT_USED (units held),
 # SLOT_OTHERS (those not held by DEVKIT_SLOT_HOLDER), SLOT_HOLDERS (`<label> <cost>, ...`),
 # SLOT_HOLDER_COUNT, SLOT_HEAD (the first live waiter's file name), SLOT_WAITERS (how many wait),
 # SLOT_POSITION (1-based place of $SLOT_TICKET, 0 for none), SLOT_AHEAD (`<label>, ...` of the
 # waiters before it).
 _slot_scan() {
-  local f line
+  local f
   SLOT_USED=0 SLOT_OTHERS=0 SLOT_HOLDERS="" SLOT_HOLDER_COUNT=0 SLOT_HEAD="" SLOT_AHEAD=""
   SLOT_WAITERS=0 SLOT_POSITION=0
   for f in "$SLOT_DIR"/held/*; do
@@ -166,12 +143,6 @@ _slot_scan() {
     SLOT_HOLDER_COUNT=$((SLOT_HOLDER_COUNT + 1))
     SLOT_HOLDERS="$SLOT_HOLDERS${SLOT_HOLDERS:+, }$SLOT_ENTRY_LABEL $SLOT_ENTRY_COST"
   done
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    SLOT_USED=$((SLOT_USED + SLOT_LEGACY_COST)) SLOT_OTHERS=$((SLOT_OTHERS + SLOT_LEGACY_COST))
-    SLOT_HOLDER_COUNT=$((SLOT_HOLDER_COUNT + 1))
-    SLOT_HOLDERS="$SLOT_HOLDERS${SLOT_HOLDERS:+, }${line% (older devkit)} $SLOT_LEGACY_COST (older devkit)"
-  done <<<"$(_slot_legacy)"
   # Waiters in line order: <order>.<pid>, numeric on both parts.
   while IFS= read -r f; do
     [ -n "$f" ] || continue

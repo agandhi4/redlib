@@ -3,7 +3,7 @@
 # "GitHub Actions"). Minutes are a shared budget billed per job rounded up to a minute, and a
 # moved action tag is an unreviewed supply-chain change. Over .github/workflows/*.yml|yaml:
 #   1. Every `uses: owner/repo@ref` is a 40-hex commit SHA with a `# vX.Y.Z` comment. Exempt:
-#      local `./…` actions; devkit's reusable workflows (`agandhi4/devkit/.github/workflows/…`),
+#      local `./…` actions; devkit's reusable workflows (`kashhq/devkit/.github/workflows/…`),
 #      which must be `@main` or a SHA. `docker://` images must be pinned by `@sha256:` digest.
 #   2. A workflow triggered on pull_request (or pull_request_target) has, for every job that can
 #      run on it: a draft skip in the job or a step (`github.event.pull_request.draft == false`,
@@ -20,8 +20,16 @@
 #      `*-latest` label. GitHub moves `-latest` to a new OS on its own date (ubuntu-latest to 26
 #      from 2026-10-19), so an unpinned fleet changes toolchains with no PR to bisect to. An
 #      expression (`${{ matrix.os }}`) is not resolved; the matrix it names is not read.
+#   6. A job that can run on pull_request and runs `make … ci-quick` checks out with `fetch-depth: 0`
+#      on every actions/checkout step it has. A PR checkout fetches only refs/pull/<n>/merge, so
+#      origin/main does not resolve and changed_lint.py's `git merge-base origin/main HEAD` fails
+#      (rollcall's and devkit's own PR runs were red from 2026-11-02 to 2026-11-09). A push
+#      checkout fetches the pushed branch, which is why main stayed green. A job with no checkout
+#      step has nothing to judge; devkit's reusable quick-check (`make "$MAKE_TARGET"`) is held to
+#      the same line by tests/config_contract.bats.
 # Which jobs "can run" on an event is read from the job-level `if:`: no `github.event_name` in it
-# means every event; otherwise the event must be named (and not as `!= '<event>'`). A
+# means every event; otherwise the event must be named (and not as `!= '<event>'`, unless an `||`
+# can admit it back). A
 # cancel-in-progress expression is understood only as `${{ github.event_name == 'pull_request' }}`
 # (true on PRs, false on pushes); any other expression fails as unevaluable.
 # Usage: devkit/bin/workflows_check.sh [repo-root]      (part of ci-quick)
@@ -52,8 +60,11 @@ check_pins() { # <workflow>
       *@*) ref=${target##*@} ;;
       *) fail "$wf:$n: $target has no @ref; pin it to a commit SHA"; continue ;;
     esac
+    # devkit's reusable workflows are the one call that may ride @main. The retired owner's name
+    # is still devkit (GitHub redirects it) until each consumer's rename PR lands; it is
+    # accepted here, and devkit-check's retired-owner rule names the line to move.
     case "$target" in
-      agandhi4/devkit/.github/workflows/*)
+      kashhq/devkit/.github/workflows/*|agandhi4/devkit/.github/workflows/*)  # retired name
         [ "$ref" = main ] || [[ "$ref" =~ $SHA_RE ]] \
           || fail "$wf:$n: devkit reusable workflow must be @main or a commit SHA (got @$ref)"
         continue ;;
@@ -82,7 +93,7 @@ check_runners() { # <workflow>
   ' "$1"
 }
 
-# Rules 2-4. Reads the workflow's shape (triggers and their filters, workflow and job concurrency,
+# Rules 2-4 and 6. Reads the workflow's shape (triggers and their filters, workflow and job concurrency,
 # job-level `if:`, draft skips anywhere in a job) by indentation, then judges it at END.
 # Prints "F|W<TAB><line><TAB><reason>". `pushes` holds the line numbers of image-push steps.
 judge_workflow() { # <workflow> <push step lines>
@@ -90,6 +101,14 @@ judge_workflow() { # <workflow> <push step lines>
     function indent(s) { match(s, /^[[:space:]]*/); return RLENGTH }
     function trim(s) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
     function unq(s) { s = trim(s); gsub("^[\"" Q "]|[\"" Q "]$", "", s); return s }
+    # The value of a YAML scalar: a quoted `if:` is the expression inside the quotes, so a quoted
+    # `||` is still an `||` (a single-quoted scalar escapes its own quote by doubling it).
+    function yaml_scalar(s,   n) {
+      s = trim(s); n = length(s)
+      if (n >= 2 && substr(s, 1, 1) == "\"" && substr(s, n, 1) == "\"") return substr(s, 2, n - 2)
+      if (n >= 2 && substr(s, 1, 1) == Q && substr(s, n, 1) == Q) { s = substr(s, 2, n - 2); gsub(Q Q, Q, s); return s }
+      return s
+    }
     # Sets KEY and VAL for a "key: value" line (not a list item).
     function keyval(s,   t) {
       if (s !~ ("^[[:space:]]*[\"" Q "]?[A-Za-z0-9_.-]+[\"" Q "]?[[:space:]]*:([[:space:]]|$)")) return 0
@@ -116,11 +135,59 @@ judge_workflow() { # <workflow> <push step lines>
       if (v !~ /^\{/ || !match(v, /cancel-in-progress:[[:space:]]*[^,}]+/)) return ""
       v = substr(v, RSTART, RLENGTH); sub(/^cancel-in-progress:/, "", v); return classify(v)
     }
-    function eligible(x, ev,   q) {
+    # Splits x at its depth-0 `op` (`||` or `&&`; parentheses and quoted strings are skipped) into
+    # PART[1..n]; returns n.
+    function split_top(x, op,   n, d, i, c, qc, start) {
+      n = 0; d = 0; qc = ""; start = 1
+      for (i = 1; i <= length(x); i++) {
+        c = substr(x, i, 1)
+        if (qc != "") { if (c == qc) qc = ""; continue }
+        if (c == Q || c == "\"") qc = c
+        else if (c == "(") d++
+        else if (c == ")") d--
+        else if (d == 0 && substr(x, i, 2) == op) { PART[++n] = substr(x, start, i - start); start = i + 2; i++ }
+      }
+      PART[++n] = substr(x, start)
+      return n
+    }
+    # 1 when x is one parenthesized group: `(a || b)`, not `(a) && (b)`.
+    function wrapped(x,   d, i, c) {
+      if (x !~ /^\(/ || x !~ /\)$/) return 0
+      d = 0
+      for (i = 1; i < length(x); i++) {
+        c = substr(x, i, 1)
+        if (c == "(") d++
+        else if (c == ")" && --d == 0) return 0
+      }
+      return 1
+    }
+    # 1 when the `if:` x can be true on event ev. An `||` of alternatives can run when any can, an
+    # `&&` only when all can; an atom is false only when it is `event_name != ev` or names another
+    # event with `==`, so anything else (a draft test, a ref test, a `!`) can be true. Why not a
+    # regex over the whole string: `event_name != pull_request || …draft == false` (rollcall and
+    # devkit CI) runs on every ready PR, and `event_name != pull_request && (a || b)` on none.
+    function eligible(x, ev,   n, i, parts, q) {
+      x = trim(x); sub(/^\$\{\{[[:space:]]*/, "", x); sub(/[[:space:]]*\}\}$/, "", x); x = trim(x)
       if (x !~ /github\.event_name/) return 1
+      n = split_top(x, "||")
+      if (n > 1) {
+        for (i = 1; i <= n; i++) parts[i] = PART[i]
+        for (i = 1; i <= n; i++) if (eligible(parts[i], ev)) return 1
+        return 0
+      }
+      n = split_top(x, "&&")
+      if (n > 1) {
+        for (i = 1; i <= n; i++) parts[i] = PART[i]
+        for (i = 1; i <= n; i++) if (!eligible(parts[i], ev)) return 0
+        return 1
+      }
+      if (wrapped(x)) return eligible(substr(x, 2, length(x) - 2), ev)
+      if (x ~ /^!/) return 1
       q = "[\"" Q "]" ev "[\"" Q "]"
-      if (x ~ q) return x !~ ("!=[[:space:]]*" q)
-      return x ~ /event_name[[:space:]]*!=/
+      if (x ~ ("event_name[[:space:]]*!=[[:space:]]*" q)) return 0
+      if (x ~ ("event_name[[:space:]]*==[[:space:]]*" q)) return 1
+      if (x ~ /event_name[[:space:]]*==/) return 0
+      return 1
     }
     function pr_eligible(x,   i) {
       for (i = 1; i <= npr; i++) if (eligible(x, pr_events[i])) return 1
@@ -128,7 +195,13 @@ judge_workflow() { # <workflow> <push step lines>
     }
     function out(kind, line, msg) { printf "%s\t%d\t%s\n", kind, line, msg }
 
-    BEGIN { draft_re = "pull_request\\.draft[[:space:]]*(==[[:space:]]*false|!=[[:space:]]*true)|![[:space:]]*github\\.event\\.pull_request\\.draft|pull_request\\.merged[[:space:]]*==[[:space:]]*true" }
+    BEGIN {
+      draft_re = "pull_request\\.draft[[:space:]]*(==[[:space:]]*false|!=[[:space:]]*true)|![[:space:]]*github\\.event\\.pull_request\\.draft|pull_request\\.merged[[:space:]]*==[[:space:]]*true"
+      checkout_re = "uses:[[:space:]]*[\"" Q "]?actions/checkout@"
+      depth0_re = "(^|[[:space:]{,-])fetch-depth:[[:space:]]*[\"" Q "]?0[\"" Q "]?[[:space:]]*([,}]|$)"
+      make_re = "(^|[[:space:]:;&|\"" Q "])make[[:space:]]"
+      quick_re = "[[:space:]]ci-quick([[:space:]\"" Q ";&|]|$)"
+    }
 
     /^#[[:space:]]*workflows-check:[[:space:]]*multi-job ok:[[:space:]]*[^[:space:]]/ { exempt = 1 }
     /^[[:space:]]*(#|$)/ { next }
@@ -162,19 +235,32 @@ judge_workflow() { # <workflow> <push step lines>
     section == "jobs" {
       if (jobs_ind < 0) jobs_ind = ind
       if (ind == jobs_ind) {
-        if (keyval(line)) { nj++; jname[nj] = KEY; jline[nj] = NR; jchild = -1; in_if = in_conc = 0 }
+        if (keyval(line)) { nj++; jname[nj] = KEY; jline[nj] = NR; jchild = -1; in_if = in_conc = in_step = 0; cmd_pend = "" }
         next
       }
       if (!nj) next
       if (line ~ draft_re) jdraft[nj] = 1
       if (jchild < 0) jchild = ind
+      # Rule 6: a step is a list item under the job (indented or not: `- uses:` may sit level with
+      # `steps:`) plus the lines indented under it; it is a checkout wherever its `uses:` sits among
+      # its keys, and full-history wherever its `fetch-depth: 0` does.
+      if (line ~ /^[[:space:]]*-([[:space:]]|$)/ && ind >= jchild) { ns[nj]++; step_ind = ind; in_step = 1 }
+      else if (ind <= step_ind) in_step = 0
+      if (in_step && ns[nj]) {
+        if (line ~ checkout_re) sco[nj, ns[nj]] = NR
+        if (line ~ depth0_re) sdepth[nj, ns[nj]] = 1
+      }
+      # A command continued with a trailing backslash is judged as the one line the shell runs.
+      cmd = cmd_pend line
+      if (cmd ~ /\\$/) cmd_pend = substr(cmd, 1, length(cmd) - 1) " "
+      else { cmd_pend = ""; if (cmd ~ make_re && cmd ~ quick_re) jquick[nj] = 1 }
       if (in_if && ind > if_ind) { jif[nj] = jif[nj] " " trim(line); next }
       in_if = 0
       if (in_conc && ind > conc_ind) { if (keyval(line) && KEY == "cancel-in-progress") jcancel[nj] = classify(VAL); next }
       in_conc = 0
       if (ind == jchild && keyval(line)) {
         if (KEY == "if") {
-          if (VAL ~ /^[>|]/) { in_if = 1; if_ind = ind } else jif[nj] = VAL
+          if (VAL ~ /^[>|]/) { in_if = 1; if_ind = ind } else jif[nj] = yaml_scalar(VAL)
         } else if (KEY == "concurrency") {
           if (VAL == "") { in_conc = 1; conc_ind = ind } else jcancel[nj] = flow_cancel(VAL)
         }
@@ -201,6 +287,10 @@ judge_workflow() { # <workflow> <push step lines>
         for (j = 1; j <= nj; j++) {
           if (!pr_eligible(jif[j])) continue
           count++; names = names (names == "" ? "" : ", ") jname[j]; if (count == 2) second = jline[j]
+          if (jquick[j])
+            for (s = 1; s <= ns[j]; s++)
+              if (sco[j, s] && !sdepth[j, s])
+                out("F", sco[j, s], "job " jname[j] " runs make ci-quick on pull_request with a shallow checkout; add `with: fetch-depth: 0` so origin/main resolves (changed_lint.py diffs against it)")
           if (!draft_exempt && !jdraft[j])
             out("F", jline[j], "job " jname[j] " runs on pull_request without a draft skip (if: github.event.pull_request.draft == false)")
           if (wf_cancel == "true" || wf_cancel == "pr" || jcancel[j] == "true" || jcancel[j] == "pr") continue
@@ -246,16 +336,21 @@ fi
 
 for wf in "${files[@]}"; do
   check_pins "$wf"
+  # Captured, not read from <(…): a process substitution drops the awk's exit status, so an awk
+  # that cannot run (a stray quote in its program) printed nothing and the check said ok.
+  runners=$(check_runners "$wf") || fail "$wf: runs-on check could not run (awk failed)"
   while IFS=$'\t' read -r n label; do
+    [ -n "$n" ] || continue
     fail "$wf:$n: runs-on $label moves to a new OS on GitHub's schedule; pin the image (ubuntu-24.04, macos-15)"
-  done < <(check_runners "$wf")
+  done <<<"$runners"
   push_lines=$(image_push_steps "$wf" | awk '{ printf "%s%s", sep, $1; sep = " " }')
+  verdicts=$(judge_workflow "$wf" "$push_lines") || fail "$wf: shape check could not run (awk failed)"
   while IFS=$'\t' read -r kind n reason; do
     case "$kind" in
       F) fail "$wf:$n: $reason" ;;
       W) warn "$wf:$n: $reason" ;;
     esac
-  done < <(judge_workflow "$wf" "$push_lines")
+  done <<<"$verdicts"
 done
 
 if [ $rc = 0 ]; then

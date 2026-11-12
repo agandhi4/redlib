@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Schedule (or remove) the Mac's main check (bin/main_check.sh): fills devkit main's
-# templates/launchd/com.agandhi4.devkit.main-check.plist and bootstraps it as a LaunchAgent that
+# templates/launchd/com.kashhq.devkit.main-check.plist and bootstraps it as a LaunchAgent that
 # runs main's copy (bin/_launchd_job_lib.sh), never this checkout's.
 #
 # Usage: bin/install_main_check.sh                install, or replace the installed job
@@ -10,14 +10,14 @@
 # would, so devkit's python3 and uv lead the plist's PATH, resolved here
 # (install_dependency_merge.sh's reason: launchd's python3 is Xcode's 3.9).
 # Install and uninstall both retire the Apple-only job it replaced (2026-11-02):
-# com.agandhi4.devkit.apple-check is booted out and its plist and job dir deleted, so two jobs
+# the old apple-check job is booted out and its plist and job dir deleted, so two jobs
 # never check the same repo, and its state becomes main_check.sh's (retire_apple_check). Its open
 # `main is red on the Mac` issues keep their title, and main_check.sh closes them.
 # Exit 0 done, 1 launchctl or plutil failed, 2 usage, a bad path or devkit's main unreadable.
 set -uo pipefail
 
-readonly LABEL=com.agandhi4.devkit.main-check
-readonly RETIRED_LABEL=com.agandhi4.devkit.apple-check
+readonly LABEL=com.kashhq.devkit.main-check
+readonly RETIRED_LABEL=com.agandhi4.devkit.apple-check  # retired name
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P) || exit 2
 # shellcheck source=bin/_toolchain_lib.sh  # devkit_toolchain_bin
 . "$HERE/_toolchain_lib.sh"
@@ -53,9 +53,7 @@ retire_apple_check() {
 install() {
   devkit_toolchain_bin || die "$DEVKIT_PYTHON_ERROR"
   [[ "$DEVKIT_TOOLCHAIN_BIN" =~ $LAUNCHD_SAFE_PATH ]] || die "the toolchain directory $DEVKIT_TOOLCHAIN_BIN is not a plain path"
-  launchd_job_stage "$LABEL" main-check
-  launchd_job_fill "$JOB_TEMPLATE" "$JOB_DIR/filled.plist" -e "s|__TOOLCHAIN_BIN__|$DEVKIT_TOOLCHAIN_BIN|g"
-  launchd_job_load "$LABEL" "$JOB_DIR/filled.plist"
+  launchd_job_install "$LABEL" main-check -e "s|__TOOLCHAIN_BIN__|$DEVKIT_TOOLCHAIN_BIN|g"
   # Only once main-check is loaded (devkit #383): a failed load leaves apple-check running. Its
   # first run is a StartInterval away, so the state is moved before it reads any.
   retire_apple_check

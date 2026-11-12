@@ -33,9 +33,24 @@ origin_slug() {
 }
 
 # slug_same <a> <b>: the same GitHub repo; owner and name compare without case, as GitHub's do
-# (Orbit's plan says agandhi4/Orbit).
+# (Orbit's plan says kashhq/Orbit).
 slug_same() {
   [ "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" ]
+}
+
+# same_repo <plan slug> <origin slug>: one GitHub repository, by name or by GitHub's own answer:
+# a renamed owner or repo redirects, and `repos/<old>` reports the current full_name, so either
+# side may still carry the old name (a plan not yet moved, a checkout not yet repointed). Why
+# (2026-11-12): the account rename left every plan's GATE_SLUG on the old owner while each
+# checkout's origin named the new one, and the PR that moves the slug is judged against
+# origin/main's plan, so every rename PR was refused; two reads ask GitHub instead of guessing.
+# A name GitHub cannot resolve (offline, a fork's parent the token cannot read) stands as itself.
+same_repo() {
+  local a b
+  slug_same "$1" "$2" && return 0
+  a=$(gh api "repos/$1" --jq .full_name 2>/dev/null) || a=$1
+  b=$(gh api "repos/$2" --jq .full_name 2>/dev/null) || b=$2
+  slug_same "${a:-$1}" "${b:-$2}"
 }
 
 # gh_default_heal <dir> <label>: make origin gh's default repo in <dir>'s clone, with one

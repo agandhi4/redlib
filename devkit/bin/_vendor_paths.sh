@@ -60,7 +60,7 @@
 #       commit (never "" here); the bounds check needs the caller's devkit_python
 #       (bin/_toolchain_lib.sh), run only when the file is listed. Sets VENDORED_TREE.
 
-DEVKIT_URL=${DEVKIT_URL:-https://github.com/agandhi4/devkit.git}
+DEVKIT_URL=${DEVKIT_URL:-https://github.com/kashhq/devkit.git}
 VENDOR_SYNC_BOUNDS=docs/metrics/ratchet.json
 # Resolved now: callers run these functions from inside a subshell that cd'd to the repo.
 _VENDOR_PATHS_BIN=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

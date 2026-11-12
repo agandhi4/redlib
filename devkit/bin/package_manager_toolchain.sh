@@ -3,7 +3,7 @@
 # (pnpm@10.32.1, optionally +sha512.<hex>), so a recipe's bare `pnpm` is that version on every
 # machine. Why (2026-11-02, finplat #737): Node 25 and later ship no corepack, and node_toolchain.sh
 # installs nodejs.org's tarball, so `corepack pnpm` worked on the Mac only through Homebrew's
-# corepack and failed on linux-box (exit 127) in every frontend job. packageManager is the one pin.
+# corepack and failed on the publisher host (exit 127) in every frontend job. packageManager is the one pin.
 #
 # Usage: devkit/bin/package_manager_toolchain.sh <repo-root>
 #   Prints the bin directory to prepend to PATH (holding pnpm and pnpx), or nothing when no tracked

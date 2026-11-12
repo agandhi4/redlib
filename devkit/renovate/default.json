@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Shared Renovate preset for every fleet repo, homelab included. Consumers extend github>agandhi4/devkit//renovate/default (see consumer.example.json). automerge is OFF everywhere: the merge gate is the `local-gate` status, which a Renovate PR never receives, and GitHub cannot require it (branch protection is paid on private repos), so a Renovate self-merge lands code no gate has run (homelab #109/#110, 2026-10-19). Every Renovate PR waits for `make merge PR=<n>`. The one exception is renovate/automerge-digest, opted into per repo with GATE_RENOVATE_AUTOMERGE=digest in its gate plan; devkit-check and the scorecard (bin/_renovate.py) flag any other automerge. rebaseWhen auto, never behind-base-branch: bin/dependency_merge.sh gates a PR behind main as it is (the gate tests the merge into the current main), and behind-base-branch made Renovate force-push every open branch after each nightly merge, racing the next one (homelab #128, 2026-10-22). auto rebases a non-automerge PR only on a conflict, and behind ones on a repo whose protection requires up-to-date branches, where GitHub would refuse them.",
+  "description": "Shared Renovate preset for every fleet repo, homelab included. Consumers extend github>kashhq/devkit//renovate/default (see consumer.example.json). automerge is OFF everywhere: the merge gate is the `local-gate` status, which a Renovate PR never receives, and GitHub cannot require it (branch protection is paid on private repos), so a Renovate self-merge lands code no gate has run (homelab #109/#110, 2026-10-19). Every Renovate PR waits for `make merge PR=<n>`. The one exception is renovate/automerge-digest, opted into per repo with GATE_RENOVATE_AUTOMERGE=digest in its gate plan; devkit-check and the scorecard (bin/_renovate.py) flag any other automerge. rebaseWhen auto, never behind-base-branch: bin/dependency_merge.sh gates a PR behind main as it is (the gate tests the merge into the current main), and behind-base-branch made Renovate force-push every open branch after each nightly merge, racing the next one (homelab #128, 2026-10-22). auto rebases a non-automerge PR only on a conflict, and behind ones on a repo whose protection requires up-to-date branches, where GitHub would refuse them.",
   "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
   "timezone": "America/Los_Angeles",
   "schedule": ["before 6am on monday"],
@@ -47,9 +47,9 @@
       "pinDigests": true
     },
     {
-      "description": "Except the fleet's own images: their `:latest` is the deploy pointer autoupdate pulls (conventions delivery.md), so a digest would freeze the deploy. The compose-pinned-image guard names them as declared exceptions.",
+      "description": "Except the fleet's own images: their `:latest` is the deploy pointer autoupdate pulls (conventions delivery.md), so a digest would freeze the deploy. The compose-pinned-image guard names them as declared exceptions. ghcr.io/agandhi4 is the retired owner (2026-11-12), kept until every compose file names kashhq.",
       "matchManagers": ["docker-compose"],
-      "matchPackageNames": ["ghcr.io/agandhi4/**"],
+      "matchPackageNames": ["ghcr.io/kashhq/**", "ghcr.io/agandhi4/**"],
       "pinDigests": false
     },
     {
@@ -59,9 +59,9 @@
       "groupName": "github actions"
     },
     {
-      "description": "Except devkit's own reusable workflow: consumers call it at @main (templates/workflows/quick-check-caller.yml) so it moves with devkit, and a digest pin of it reopened in every consumer on every devkit merge for a workflow that does not run (Actions billing off, local-gate is the merge gate; homelab #125, closed 2026-10-26). Third-party actions stay pinned.",
+      "description": "Except devkit's own reusable workflow: consumers call it at @main (templates/workflows/quick-check-caller.yml) so it moves with devkit, and a digest pin of it reopened in every consumer on every devkit merge for a workflow that does not run (Actions billing off, local-gate is the merge gate; homelab #125, closed 2026-10-26). Third-party actions stay pinned. agandhi4/devkit is the retired owner (2026-11-12), kept until every caller names kashhq.",
       "matchManagers": ["github-actions"],
-      "matchPackageNames": ["agandhi4/devkit"],
+      "matchPackageNames": ["kashhq/devkit", "agandhi4/devkit"],
       "pinDigests": false
     },
     {

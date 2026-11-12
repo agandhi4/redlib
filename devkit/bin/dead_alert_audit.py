@@ -660,7 +660,7 @@ def _validate_since(value: str) -> str:
 def _validate_vm_url(value: str) -> str:
     parts = urllib.parse.urlsplit(value)
     if parts.scheme not in ("http", "https") or not parts.netloc:
-        raise AuditError(f"--vm-url {value!r} must be an http(s) URL like http://nas.box:8428")
+        raise AuditError(f"--vm-url {value!r} must be an http(s) URL like http://victoria.example:8428")
     return value.rstrip("/")
 
 
